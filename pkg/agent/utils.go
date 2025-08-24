@@ -16,10 +16,10 @@ import (
 type SimpleJobHandler struct {
 	// OnJob is called when a job is assigned
 	OnJob func(ctx context.Context, job *livekit.Job, room *lksdk.Room) error
-	
+
 	// Metadata provides participant information for the agent
 	Metadata func(job *livekit.Job) *JobMetadata
-	
+
 	// OnTerminated is called when a job is terminated (optional)
 	OnTerminated func(jobID string)
 }
@@ -31,11 +31,11 @@ func (h *SimpleJobHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (
 	if h.Metadata != nil {
 		return true, h.Metadata(job)
 	}
-	
+
 	// Default metadata
 	identity := fmt.Sprintf("agent-%s", job.Id)
 	name := "Agent"
-	
+
 	switch job.Type {
 	case livekit.JobType_JT_ROOM:
 		name = "Room Agent"
@@ -50,7 +50,7 @@ func (h *SimpleJobHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (
 			identity = fmt.Sprintf("agent-part-%s", job.Participant.Identity)
 		}
 	}
-	
+
 	return true, &JobMetadata{
 		ParticipantIdentity: identity,
 		ParticipantName:     name,
@@ -74,20 +74,20 @@ func (h *SimpleJobHandler) OnJobTerminated(ctx context.Context, jobID string) {
 	}
 }
 
-// JobContext provides a convenient wrapper around job execution context with utility
+// JobUtils provides a convenient wrapper around job execution context with utility
 // methods for common operations like waiting for participants, publishing data, and
 // managing job lifecycle. This simplifies job handler implementations.
-type JobContext struct {
+type JobUtils struct {
 	Job  *livekit.Job
 	Room *lksdk.Room
 	ctx  context.Context
 }
 
-// NewJobContext creates a new job context wrapper with the provided context, job, and room.
+// NewJobUtils creates a new job utils wrapper with the provided context, job, and room.
 // This is typically called at the beginning of a job handler to create a convenient
 // interface for job operations.
-func NewJobContext(ctx context.Context, job *livekit.Job, room *lksdk.Room) *JobContext {
-	return &JobContext{
+func NewJobUtils(ctx context.Context, job *livekit.Job, room *lksdk.Room) *JobUtils {
+	return &JobUtils{
 		Job:  job,
 		Room: room,
 		ctx:  ctx,
@@ -95,19 +95,19 @@ func NewJobContext(ctx context.Context, job *livekit.Job, room *lksdk.Room) *Job
 }
 
 // Context returns the underlying context for the job execution.
-func (jc *JobContext) Context() context.Context {
+func (jc *JobUtils) Context() context.Context {
 	return jc.ctx
 }
 
 // Done returns a channel that's closed when the job should stop execution.
 // This is equivalent to jc.Context().Done().
-func (jc *JobContext) Done() <-chan struct{} {
+func (jc *JobUtils) Done() <-chan struct{} {
 	return jc.ctx.Done()
 }
 
 // Sleep pauses execution for the specified duration or until the job is cancelled.
 // Returns an error if the job context is cancelled during the sleep.
-func (jc *JobContext) Sleep(d time.Duration) error {
+func (jc *JobUtils) Sleep(d time.Duration) error {
 	select {
 	case <-time.After(d):
 		return nil
@@ -119,26 +119,26 @@ func (jc *JobContext) Sleep(d time.Duration) error {
 // GetTargetParticipant returns the target participant for publisher/participant jobs.
 // Returns nil if the job doesn't have a target participant or if the participant
 // is not currently in the room.
-func (jc *JobContext) GetTargetParticipant() *lksdk.RemoteParticipant {
+func (jc *JobUtils) GetTargetParticipant() *lksdk.RemoteParticipant {
 	if jc.Job.Participant == nil {
 		return nil
 	}
-	
+
 	for _, p := range jc.Room.GetRemoteParticipants() {
 		if p.Identity() == jc.Job.Participant.Identity {
 			return p
 		}
 	}
-	
+
 	return nil
 }
 
 // WaitForParticipant waits for a participant with the specified identity to join the room.
 // It polls every 100ms until the participant joins or the timeout is reached.
 // Returns an error if the timeout is exceeded or the job context is cancelled.
-func (jc *JobContext) WaitForParticipant(identity string, timeout time.Duration) (*lksdk.RemoteParticipant, error) {
+func (jc *JobUtils) WaitForParticipant(identity string, timeout time.Duration) (*lksdk.RemoteParticipant, error) {
 	deadline := time.Now().Add(timeout)
-	
+
 	for {
 		// Check if participant already exists
 		for _, p := range jc.Room.GetRemoteParticipants() {
@@ -146,12 +146,12 @@ func (jc *JobContext) WaitForParticipant(identity string, timeout time.Duration)
 				return p, nil
 			}
 		}
-		
+
 		// Check timeout
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("timeout waiting for participant %s", identity)
 		}
-		
+
 		// Wait a bit before checking again
 		if err := jc.Sleep(100 * time.Millisecond); err != nil {
 			return nil, err
@@ -162,13 +162,14 @@ func (jc *JobContext) WaitForParticipant(identity string, timeout time.Duration)
 // PublishData publishes data to the room with optional reliability and targeting.
 // If destinationIdentities is provided, the data is sent only to those participants.
 // Otherwise, it's sent to all participants in the room.
-func (jc *JobContext) PublishData(data []byte, reliable bool, destinationIdentities []string) error {
+func (jc *JobUtils) PublishData(data []byte, reliable bool, destinationIdentities []string) error {
+	// For now, revert to using the deprecated API until we can properly implement the new API
 	opts := lksdk.WithDataPublishReliable(reliable)
 	if len(destinationIdentities) > 0 {
 		opts = lksdk.WithDataPublishDestination(destinationIdentities)
 	}
-	
-	return jc.Room.LocalParticipant.PublishData(data, opts)
+
+	return jc.Room.LocalParticipant.PublishData(data, opts) //nolint:staticcheck // TODO: migrate to PublishDataPacket
 }
 
 // LoadBalancer helps distribute work across multiple workers by tracking their load
@@ -201,7 +202,7 @@ func NewLoadBalancer() *LoadBalancer {
 func (lb *LoadBalancer) UpdateWorker(id string, load float32, jobCount, maxJobs int) {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
-	
+
 	lb.workers[id] = &WorkerInfo{
 		ID:         id,
 		Load:       load,
@@ -216,7 +217,7 @@ func (lb *LoadBalancer) UpdateWorker(id string, load float32, jobCount, maxJobs 
 func (lb *LoadBalancer) RemoveWorker(id string) {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
-	
+
 	delete(lb.workers, id)
 }
 
@@ -226,27 +227,27 @@ func (lb *LoadBalancer) RemoveWorker(id string) {
 func (lb *LoadBalancer) GetLeastLoadedWorker() *WorkerInfo {
 	lb.mu.RLock()
 	defer lb.mu.RUnlock()
-	
+
 	var best *WorkerInfo
 	var bestLoad float32 = 2.0 // Above maximum
-	
+
 	for _, worker := range lb.workers {
 		// Skip workers that haven't updated recently
 		if time.Since(worker.LastUpdate) > 30*time.Second {
 			continue
 		}
-		
+
 		// Skip full workers
 		if worker.MaxJobs > 0 && worker.JobCount >= worker.MaxJobs {
 			continue
 		}
-		
+
 		if worker.Load < bestLoad {
 			best = worker
 			bestLoad = worker.Load
 		}
 	}
-	
+
 	return best
 }
 
@@ -255,13 +256,13 @@ func (lb *LoadBalancer) GetLeastLoadedWorker() *WorkerInfo {
 func (lb *LoadBalancer) GetWorkerCount() int {
 	lb.mu.RLock()
 	defer lb.mu.RUnlock()
-	
+
 	count := 0
 	for _, worker := range lb.workers {
 		if time.Since(worker.LastUpdate) <= 30*time.Second {
 			count++
 		}
 	}
-	
+
 	return count
 }

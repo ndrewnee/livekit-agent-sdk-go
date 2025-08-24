@@ -28,23 +28,27 @@ This guide helps you migrate between versions safely and efficiently.
 
 | Agent SDK Version | LiveKit Server Version | Go Version | Status |
 |---|---|---|---|
-| 0.1.x | 1.4.x+ | 1.21+ | Current |
-| 0.0.x | 1.3.x+ | 1.20+ | Deprecated |
+| 1.0.x (UniversalWorker) | 1.6.x+ | 1.21+ | Current |
+| 0.2.x (deprecated workers) | 1.5.x+ | 1.21+ | Deprecated |
+| 0.1.x | 1.4.x+ | 1.21+ | End of Life |
+| 0.0.x | 1.3.x+ | 1.20+ | End of Life |
 
 ### Deprecation Timeline
 
-- **0.0.x**: Deprecated as of 2024-01-15, security patches only until 2024-06-15
-- **0.1.x**: Current stable release
+- **0.0.x**: End of life
+- **0.1.x**: End of life
+- **0.2.x**: Deprecated - Worker, ParticipantAgent, PublisherAgent are deprecated
+- **1.0.x**: Current stable release with UniversalWorker and UniversalHandler interface
 
-## Migration from 0.0.x to 0.1.x
+## Migration to UniversalWorker (1.0.x)
 
-### Key Changes
+### Key Changes from Deprecated Workers
 
-1. **Job Handler Interface**: Simplified and more consistent
-2. **Worker Configuration**: New options structure
-3. **Error Handling**: Structured error types
-4. **Context Management**: Improved context propagation
-5. **Resource Management**: Built-in resource limiting
+1. **Unified Worker**: UniversalWorker replaces Worker, ParticipantAgent, and PublisherAgent
+2. **New Handler Interface**: UniversalHandler with optional participant event callbacks
+3. **JobContext**: OnJobAssigned now receives JobContext instead of separate job and room parameters
+4. **SimpleUniversalHandler**: Convenience handler with function callbacks for easier implementation
+5. **Direct Event Handling**: Built-in participant event callbacks instead of polling patterns
 
 ### Step-by-Step Migration
 
@@ -59,76 +63,159 @@ go clean -modcache
 go mod download
 ```
 
-#### 2. Update Job Handler Interface
+#### 2. Update from Deprecated Workers to UniversalWorker
 
-**Before (0.0.x):**
+**Before (deprecated Worker):**
 ```go
 type MyHandler struct {}
 
-func (h *MyHandler) HandleJob(job *Job, room *Room) error {
-    // Old job handling
-    return nil
-}
-
-// Registration
-worker.RegisterHandler("my-handler", &MyHandler{})
-```
-
-**After (0.1.x):**
-```go
-type MyHandler struct {}
-
-func (h *MyHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
-    // New job handling with context
-    select {
-    case <-ctx.Done():
-        return ctx.Err()
-    default:
-        // Process job
-        return nil
+func (h *MyHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+    return true, &agent.JobMetadata{
+        ParticipantIdentity: "my-agent",
     }
 }
 
-// Registration
-handler := &MyHandler{}
-worker := agent.NewWorker(url, apiKey, apiSecret, handler, options)
+func (h *MyHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+    // Handle job with separate parameters
+    return nil
+}
+
+func (h *MyHandler) OnJobTerminated(ctx context.Context, jobID string) {
+    // Cleanup
+}
+
+// Create worker
+worker := agent.NewWorker(url, apiKey, apiSecret, handler, opts)
 ```
 
-#### 3. Update Worker Creation
-
-**Before (0.0.x):**
+**After (UniversalWorker with SimpleUniversalHandler):**
 ```go
-config := &WorkerConfig{
-    ServerURL: "ws://localhost:7880",
-    APIKey:    apiKey,
-    APISecret: apiSecret,
-    AgentName: "my-agent",
+handler := &agent.SimpleUniversalHandler{
+    JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+        return true, &agent.JobMetadata{
+            ParticipantIdentity: "my-agent",
+            ParticipantName:     "My Agent",
+        }
+    },
+    
+    JobAssignedFunc: func(ctx context.Context, jobCtx *agent.JobContext) error {
+        // Access job and room through JobContext
+        log.Printf("Handling job %s in room %s", jobCtx.Job.Id, jobCtx.Room.Name())
+        <-ctx.Done()
+        return nil
+    },
+    
+    JobTerminatedFunc: func(ctx context.Context, jobID string) {
+        log.Printf("Job %s terminated", jobID)
+    },
+    
+    // Optional: Direct participant event handling
+    ParticipantJoinedFunc: func(ctx context.Context, p *lksdk.RemoteParticipant) {
+        log.Printf("Participant joined: %s", p.Identity())
+    },
 }
 
-worker, err := NewWorker(config)
-if err != nil {
-    log.Fatal(err)
-}
+// Create UniversalWorker
+worker := agent.NewUniversalWorker(url, apiKey, apiSecret, handler, opts)
 ```
 
-**After (0.1.x):**
+#### 3. Migrate from ParticipantAgent/PublisherAgent
+
+**Before (ParticipantAgent):**
 ```go
-options := agent.WorkerOptions{
-    AgentName:         "my-agent",
-    JobTypes:          []livekit.JobType{livekit.JobType_JT_ROOM},
-    MaxConcurrentJobs: 5,
-}
+// Create base worker first
+worker := agent.NewWorker(url, apiKey, apiSecret, nil, opts)
 
-worker := agent.NewWorker(
-    "ws://localhost:7880",
-    apiKey,
-    apiSecret,
-    handler,
-    options,
-)
+// Create participant agent
+participantAgent := agent.NewParticipantAgent(worker, agent.ParticipantAgentOptions{
+    Identity: "participant-agent",
+    Metadata: `{"type": "participant"}`,
+})
+
+// Handle participant events
+participantAgent.OnTrackPublished = func(pub *lksdk.RemoteTrackPublication, p *lksdk.RemoteParticipant) {
+    log.Printf("Track published: %s", pub.SID())
+}
 ```
 
-#### 4. Update Context Handling
+**After (UniversalWorker):**
+```go
+// Single unified worker with all functionality
+handler := &agent.SimpleUniversalHandler{
+    JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+        return true, &agent.JobMetadata{
+            ParticipantIdentity: "participant-agent",
+            ParticipantMetadata: `{"type": "participant"}`,
+        }
+    },
+    
+    // Built-in track event handling
+    TrackPublishedFunc: func(ctx context.Context, pub *lksdk.RemoteTrackPublication, p *lksdk.RemoteParticipant) {
+        log.Printf("Track published: %s", pub.SID())
+    },
+}
+
+worker := agent.NewUniversalWorker(url, apiKey, apiSecret, handler, opts)
+```
+
+#### 4. Update Room Event Handling
+
+**Before (polling pattern with deprecated Worker):**
+```go
+func (h *MyHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+    // Manual polling for participant changes
+    go func() {
+        ticker := time.NewTicker(500 * time.Millisecond)
+        defer ticker.Stop()
+        
+        knownParticipants := make(map[string]bool)
+        
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case <-ticker.C:
+                for _, p := range room.GetRemoteParticipants() {
+                    if !knownParticipants[p.Identity()] {
+                        knownParticipants[p.Identity()] = true
+                        log.Printf("Participant joined: %s", p.Identity())
+                    }
+                }
+            }
+        }
+    }()
+    
+    <-ctx.Done()
+    return nil
+}
+```
+
+**After (UniversalWorker with direct callbacks):**
+```go
+handler := &agent.SimpleUniversalHandler{
+    JobAssignedFunc: func(ctx context.Context, jobCtx *agent.JobContext) error {
+        // No polling needed - events handled directly
+        log.Printf("Agent in room: %s", jobCtx.Room.Name())
+        <-ctx.Done()
+        return nil
+    },
+    
+    // Direct participant event callbacks
+    ParticipantJoinedFunc: func(ctx context.Context, p *lksdk.RemoteParticipant) {
+        log.Printf("Participant joined: %s", p.Identity())
+    },
+    
+    ParticipantLeftFunc: func(ctx context.Context, p *lksdk.RemoteParticipant) {
+        log.Printf("Participant left: %s", p.Identity())
+    },
+    
+    TrackPublishedFunc: func(ctx context.Context, pub *lksdk.RemoteTrackPublication, p *lksdk.RemoteParticipant) {
+        log.Printf("Track published: %s by %s", pub.SID(), p.Identity())
+    },
+}
+```
+
+#### 5. Update Context Handling
 
 **Before (0.0.x):**
 ```go
@@ -143,7 +230,7 @@ func (h *MyHandler) HandleJob(job *Job, room *Room) error {
 
 **After (0.1.x):**
 ```go
-func (h *MyHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *MyHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
     ticker := time.NewTicker(time.Second)
     defer ticker.Stop()
     
@@ -177,7 +264,7 @@ func (h *MyHandler) HandleJob(job *Job, room *Room) error {
 ```go
 import "github.com/am-sokolov/livekit-agent-sdk-go/pkg/agent"
 
-func (h *MyHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *MyHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
     if err := someOperation(); err != nil {
         if errors.Is(err, agent.ErrResourceExhausted) {
             return agent.ErrResourceExhausted
@@ -279,13 +366,16 @@ echo "See migration-guide.md for manual steps that may be required."
    - New resource limiting system
    - Updated job recovery mechanism
 
-### Deprecated Features (0.1.0)
+### Deprecated Features (1.0.0)
 
-| Feature | Replacement | Removal Version |
+| Feature | Replacement | Status |
 |---|---|---|
-| `WorkerConfig` struct | `WorkerOptions` | 0.2.0 |
-| `HandleJob` method | `OnJob` method | 0.2.0 |
-| `RegisterHandler` | Direct handler in constructor | 0.2.0 |
+| `Worker` class | `UniversalWorker` | Deprecated |
+| `ParticipantAgent` class | `UniversalWorker` | Deprecated |
+| `PublisherAgent` class | `UniversalWorker` | Deprecated |
+| `JobHandler` interface | `UniversalHandler` interface | Deprecated |
+| Polling for events | Direct event callbacks | Replaced |
+| Separate job/room parameters | `JobContext` parameter | Replaced |
 
 ## Best Practices for Upgrades
 

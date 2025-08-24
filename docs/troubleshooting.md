@@ -187,7 +187,7 @@ Common issues and solutions when working with the LiveKit Agent SDK.
 
 1. **Respect Context Cancellation**
    ```go
-   func (h *MyHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+   func (h *MyHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
        for {
            select {
            case <-ctx.Done():
@@ -210,7 +210,7 @@ Common issues and solutions when working with the LiveKit Agent SDK.
 
 3. **Break Down Long Tasks**
    ```go
-   func (h *MyHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+   func (h *MyHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
        // Process in chunks with context checks
        for i := 0; i < totalWork; i += chunkSize {
            select {
@@ -236,7 +236,7 @@ Common issues and solutions when working with the LiveKit Agent SDK.
 
 1. **Proper Resource Cleanup**
    ```go
-   func (h *MyHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+   func (h *MyHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
        // Use defer for cleanup
        resources := acquireResources()
        defer resources.Release()
@@ -255,7 +255,7 @@ Common issues and solutions when working with the LiveKit Agent SDK.
 
 2. **Track Subscription Cleanup**
    ```go
-   func (h *MyHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+   func (h *MyHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
        var subscriptions []*lksdk.RemoteTrackPublication
        
        defer func() {
@@ -281,7 +281,7 @@ Common issues and solutions when working with the LiveKit Agent SDK.
    ```go
    import "runtime"
    
-   func (h *MyHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+   func (h *MyHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
        var m runtime.MemStats
        runtime.ReadMemStats(&m)
        log.Printf("Memory before job: %d KB", m.Alloc/1024)
@@ -676,7 +676,7 @@ Common issues and solutions when working with the LiveKit Agent SDK.
        storage StateStorage
    }
    
-   func (h *StatefulHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+   func (h *StatefulHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
        // Load previous state
        state, err := h.storage.LoadState(job.Id)
        if err != nil {
@@ -766,7 +766,7 @@ func init() {
 }
 
 // In your handler
-func (h *MyHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *MyHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
     logger := logger.GetLogger().WithValues(
         "job_id", job.Id,
         "room", room.Name(),
@@ -814,7 +814,7 @@ type MetricsHandler struct {
     metrics *prometheus.Registry
 }
 
-func (h *MetricsHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *MetricsHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
     start := time.Now()
     
     defer func() {

@@ -22,21 +22,22 @@ The LiveKit Agent SDK follows a distributed architecture designed for scalabilit
 
 ## Key Components
 
-### 1. Worker
+### 1. UniversalWorker
 
-The Worker is the fundamental unit of the Agent SDK. It represents a long-running process that:
+The UniversalWorker is the fundamental unit of the Agent SDK. It represents a long-running process that:
 
 - Maintains a persistent WebSocket connection to the LiveKit server
 - Registers its capabilities and availability
 - Receives and processes job assignments
 - Reports status and load metrics
 - Handles graceful shutdown and recovery
+- Replaces the deprecated Worker, ParticipantAgent, and PublisherAgent
 
 ```go
-// Worker lifecycle
-worker := agent.NewWorker(...)
+// UniversalWorker lifecycle
+worker := agent.NewUniversalWorker(...)
 worker.Start(ctx)  // Connects and begins accepting jobs
-worker.Stop(ctx)   // Gracefully shuts down
+worker.Stop()      // Gracefully shuts down
 ```
 
 ### 2. Jobs
@@ -62,18 +63,40 @@ Created ──► Assigned ──► Running ──► Completed
 
 ### 3. Job Handlers
 
-Job handlers contain your agent's business logic. They process assigned jobs and interact with LiveKit rooms:
+Job handlers contain your agent's business logic. The UniversalHandler interface provides methods for the job lifecycle and optional event handlers:
 
 ```go
-type JobHandler interface {
-    OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error
+type UniversalHandler interface {
+    // Called when a job is available - decide whether to accept it
+    OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata)
+    
+    // Called when the job is assigned - perform the actual work
+    OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error
+    
+    // Called when the job is terminated - clean up resources
+    OnJobTerminated(ctx context.Context, jobID string)
+    
+    // Optional participant event handlers
+    OnParticipantJoined(ctx context.Context, participant *lksdk.RemoteParticipant)
+    OnParticipantLeft(ctx context.Context, participant *lksdk.RemoteParticipant)
+    OnTrackPublished(ctx context.Context, publication *lksdk.RemoteTrackPublication, participant *lksdk.RemoteParticipant)
+    OnTrackUnpublished(ctx context.Context, publication *lksdk.RemoteTrackPublication, participant *lksdk.RemoteParticipant)
 }
 ```
 
-The handler receives:
-- **Context**: For cancellation and deadline management
-- **Job**: The job assignment with metadata
-- **Room**: Connected LiveKit room instance
+For convenience, use SimpleUniversalHandler with function callbacks:
+
+```go
+handler := &agent.SimpleUniversalHandler{
+    JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+        return true, &agent.JobMetadata{ParticipantIdentity: "my-agent"}
+    },
+    JobAssignedFunc: func(ctx context.Context, jobCtx *agent.JobContext) error {
+        // Access job and room through jobCtx
+        return nil
+    },
+}
+```
 
 ## Connection Management
 
@@ -134,20 +157,41 @@ The server uses worker load to:
 Room jobs operate at the room level, processing events for all participants:
 
 ```go
-handler := &agent.JobHandlerFunc{
-    OnJob: func(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
-        // Access all participants
-        for _, participant := range room.GetRemoteParticipants() {
-            // Process participant
+type RoomHandler struct{}
+
+func (h *RoomHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+    // Access all participants
+    for _, participant := range room.GetRemoteParticipants() {
+        // Process participant
+    }
+    
+    // Monitor room changes using polling
+    go h.monitorRoom(ctx, room)
+    
+    <-ctx.Done()
+    return nil
+}
+
+func (h *RoomHandler) monitorRoom(ctx context.Context, room *lksdk.Room) {
+    ticker := time.NewTicker(500 * time.Millisecond)
+    defer ticker.Stop()
+    
+    knownParticipants := make(map[string]bool)
+    
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            // Check for participant changes
+            for _, p := range room.GetRemoteParticipants() {
+                if !knownParticipants[p.Identity()] {
+                    knownParticipants[p.Identity()] = true
+                    // New participant joined
+                }
+            }
         }
-        
-        // Handle room events
-        room.Callback.OnParticipantConnected = func(p *lksdk.RemoteParticipant) {
-            // New participant joined
-        }
-        
-        return nil
-    },
+    }
 }
 ```
 
@@ -162,11 +206,32 @@ handler := &agent.JobHandlerFunc{
 Participant jobs focus on individual participant interactions:
 
 ```go
-type ParticipantAgentHandler interface {
-    OnParticipantConnected(participant *lksdk.RemoteParticipant)
-    OnParticipantDisconnected(participant *lksdk.RemoteParticipant)
-    OnTrackPublished(participant *lksdk.RemoteParticipant, track *lksdk.RemoteTrackPublication)
-    // ... more participant-specific events
+type ParticipantHandler struct{}
+
+func (h *ParticipantHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+    // Accept participant jobs
+    if job.Type != livekit.JobType_JT_PARTICIPANT {
+        return false, nil
+    }
+    
+    return true, &agent.JobMetadata{
+        ParticipantIdentity: "participant-assistant",
+        ParticipantName:     "Personal Assistant",
+    }
+}
+
+func (h *ParticipantHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+    // Extract target participant from job metadata
+    var jobMeta struct {
+        ParticipantIdentity string `json:"participant_identity"`
+    }
+    json.Unmarshal([]byte(job.Metadata), &jobMeta)
+    
+    // Monitor specific participant
+    go h.monitorParticipant(ctx, room, jobMeta.ParticipantIdentity)
+    
+    <-ctx.Done()
+    return nil
 }
 ```
 
@@ -181,10 +246,32 @@ type ParticipantAgentHandler interface {
 Publisher jobs enable agents to publish media streams:
 
 ```go
-type PublisherAgentHandler interface {
-    OnConnected(localParticipant *lksdk.LocalParticipant)
-    PrepareAudioTrack(ctx context.Context) (*webrtc.TrackLocalStaticSample, error)
-    PrepareVideoTrack(ctx context.Context) (*webrtc.TrackLocalStaticSample, error)
+type PublisherHandler struct{}
+
+func (h *PublisherHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+    // Create audio track
+    audioTrack, err := webrtc.NewTrackLocalStaticSample(
+        webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
+        "audio", "agent-audio",
+    )
+    if err != nil {
+        return err
+    }
+    
+    // Publish track
+    _, err = room.LocalParticipant.PublishTrack(audioTrack, &lksdk.TrackPublicationOptions{
+        Name:   "Agent Audio",
+        Source: livekit.TrackSource_MICROPHONE,
+    })
+    if err != nil {
+        return err
+    }
+    
+    // Generate and send media
+    go h.generateMedia(ctx, audioTrack)
+    
+    <-ctx.Done()
+    return nil
 }
 ```
 
@@ -253,7 +340,8 @@ Each job runs in its own goroutine, allowing concurrent processing:
 ```go
 // Worker handles multiple jobs concurrently
 worker := agent.NewWorker(url, key, secret, handler, agent.WorkerOptions{
-    MaxConcurrentJobs: 10,  // Process up to 10 jobs simultaneously
+    JobType: livekit.JobType_JT_ROOM,
+    MaxJobs: 10,  // Process up to 10 jobs simultaneously
 })
 ```
 
@@ -424,16 +512,18 @@ Scale horizontally for high load:
 Different workers for different job types:
 
 ```go
-// Audio processing worker
+// Audio processing worker (room-based)
 audioWorker := agent.NewWorker(url, key, secret, audioHandler, agent.WorkerOptions{
     AgentName: "audio-processor",
-    JobTypes: []livekit.JobType{livekit.JobType_JT_ROOM},
+    JobType:   livekit.JobType_JT_ROOM,
+    MaxJobs:   5,
 })
 
 // Video publishing worker
 videoWorker := agent.NewWorker(url, key, secret, videoHandler, agent.WorkerOptions{
     AgentName: "video-publisher",
-    JobTypes: []livekit.JobType{livekit.JobType_JT_PUBLISHER},
+    JobType:   livekit.JobType_JT_PUBLISHER,
+    MaxJobs:   10,
 })
 ```
 

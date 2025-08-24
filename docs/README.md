@@ -14,13 +14,6 @@ Welcome to the comprehensive documentation for the LiveKit Agent SDK for Go. Thi
 - **[Advanced Features](advanced-features.md)** - Load balancing, job recovery, resource management
 - **[Media Processing](media-processing.md)** - Working with media pipelines and quality control
 
-### Examples & Tutorials
-- **[Examples Overview](examples/README.md)** - Complete working examples
-  - [Simple Room Agent](examples/simple-room-agent.md) - Basic agent implementation
-  - [Participant Monitoring](examples/participant-monitoring.md) - Track participant events
-  - [Media Publisher](examples/media-publisher.md) - Publishing media to rooms
-  - [Load-Balanced Workers](examples/load-balanced-workers.md) - Multi-worker deployments
-
 ### Reference
 - **[API Reference](api-reference.md)** - Complete API documentation
 - **[Troubleshooting](troubleshooting.md)** - Common issues and solutions
@@ -54,7 +47,7 @@ Welcome to the comprehensive documentation for the LiveKit Agent SDK for Go. Thi
 Throughout this documentation, you'll find practical code examples that you can copy and adapt:
 
 ```go
-// Example: Creating a simple room agent
+// Example: Creating a simple room agent with UniversalWorker
 package main
 
 import (
@@ -63,20 +56,20 @@ import (
     
     "github.com/am-sokolov/livekit-agent-sdk-go/pkg/agent"
     "github.com/livekit/protocol/livekit"
-    lksdk "github.com/livekit/server-sdk-go/v2"
 )
 
 func main() {
-    handler := &agent.JobHandlerFunc{
-        OnJob: func(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
-            log.Printf("Handling job %s for room %s", job.Id, room.Name())
+    handler := &agent.SimpleUniversalHandler{
+        JobAssignedFunc: func(ctx context.Context, jobCtx *agent.JobContext) error {
+            log.Printf("Handling job %s for room %s", jobCtx.Job.Id, jobCtx.Room.Name())
             // Your agent logic here
             return nil
         },
     }
     
-    worker := agent.NewWorker("ws://localhost:7880", "api-key", "api-secret", handler, agent.WorkerOptions{
+    worker := agent.NewUniversalWorker("ws://localhost:7880", "api-key", "api-secret", handler, agent.WorkerOptions{
         AgentName: "my-agent",
+        JobType:   livekit.JobType_JT_ROOM,
     })
     
     if err := worker.Start(context.Background()); err != nil {

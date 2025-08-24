@@ -28,18 +28,18 @@ import (
 //	pipeline := NewMediaPipeline()
 //	pipeline.AddStage(NewTranscodingStage("transcode", 10, targetFormat))
 //	pipeline.AddStage(NewFilteringStage("denoise", 20))
-//	
+//
 //	err := pipeline.StartProcessingTrack(remoteTrack)
 //	if err == nil {
 //	    // Get processed output
 //	    buffer, _ := pipeline.GetOutputBuffer(remoteTrack.ID())
 //	}
 type MediaPipeline struct {
-	mu              sync.RWMutex
-	stages          []MediaPipelineStage
-	tracks          map[string]*MediaTrackPipeline
-	processors      map[string]MediaProcessor
-	bufferFactory   *MediaBufferFactory
+	mu               sync.RWMutex
+	stages           []MediaPipelineStage
+	tracks           map[string]*MediaTrackPipeline
+	processors       map[string]MediaProcessor
+	bufferFactory    *MediaBufferFactory
 	metricsCollector *MediaMetricsCollector
 }
 
@@ -55,16 +55,16 @@ type MediaPipelineStage interface {
 	// GetName returns the unique name of this stage.
 	// Used for identification and logging.
 	GetName() string
-	
+
 	// Process transforms media data through this stage.
 	// The stage should return modified data or an error if processing fails.
 	// Stages can modify data in-place or create new data.
 	Process(ctx context.Context, input MediaData) (MediaData, error)
-	
+
 	// CanProcess checks if this stage can process the given media type.
 	// Return false to skip this stage for specific media types.
 	CanProcess(mediaType MediaType) bool
-	
+
 	// GetPriority returns the stage priority.
 	// Lower numbers run first. Stages with the same priority run in
 	// the order they were added.
@@ -78,28 +78,28 @@ type MediaPipelineStage interface {
 // and allows for parallel processing.
 type MediaTrackPipeline struct {
 	// TrackID uniquely identifies the track being processed
-	TrackID         string
-	
+	TrackID string
+
 	// Track is the WebRTC remote track being processed
-	Track           *webrtc.TrackRemote
-	
+	Track *webrtc.TrackRemote
+
 	// Pipeline is a reference to the parent pipeline
-	Pipeline        *MediaPipeline
-	
+	Pipeline *MediaPipeline
+
 	// InputBuffer queues incoming media data for processing
-	InputBuffer     *MediaBuffer
-	
+	InputBuffer *MediaBuffer
+
 	// OutputBuffer stores processed media data
-	OutputBuffer    *MediaBuffer
-	
+	OutputBuffer *MediaBuffer
+
 	// ProcessingStats tracks performance metrics
 	ProcessingStats *MediaProcessingStats
-	
+
 	// Active indicates if the pipeline is currently processing
-	Active          bool
-	
-	cancelFunc      context.CancelFunc
-	wg              sync.WaitGroup
+	Active bool
+
+	cancelFunc context.CancelFunc
+	wg         sync.WaitGroup
 }
 
 // MediaProcessor defines the interface for media processing components.
@@ -120,7 +120,7 @@ type MediaProcessor interface {
 	//
 	// Returns processed audio data or an error.
 	ProcessAudio(ctx context.Context, samples []byte, sampleRate uint32, channels uint8) ([]byte, error)
-	
+
 	// ProcessVideo processes video frames.
 	//
 	// Parameters:
@@ -131,11 +131,11 @@ type MediaProcessor interface {
 	//
 	// Returns processed video data or an error.
 	ProcessVideo(ctx context.Context, frame []byte, width, height uint32, format VideoFormat) ([]byte, error)
-	
+
 	// GetName returns the unique name of this processor.
 	// Used for registration and identification.
 	GetName() string
-	
+
 	// GetCapabilities returns what this processor can handle.
 	// Used to determine if a processor is suitable for specific media.
 	GetCapabilities() ProcessorCapabilities
@@ -147,22 +147,22 @@ type MediaProcessor interface {
 // It contains the media payload along with format information and metadata.
 type MediaData struct {
 	// Type indicates whether this is audio or video data
-	Type        MediaType
-	
+	Type MediaType
+
 	// TrackID identifies which track this data belongs to
-	TrackID     string
-	
+	TrackID string
+
 	// Timestamp is when this data was captured
-	Timestamp   time.Time
-	
+	Timestamp time.Time
+
 	// Data contains the raw media payload
-	Data        []byte
-	
+	Data []byte
+
 	// Format describes the media format
-	Format      MediaFormat
-	
+	Format MediaFormat
+
 	// Metadata contains additional information that stages can use
-	Metadata    map[string]interface{}
+	Metadata map[string]interface{}
 }
 
 // MediaType represents the type of media.
@@ -171,7 +171,7 @@ type MediaType int
 const (
 	// MediaTypeAudio indicates audio media
 	MediaTypeAudio MediaType = iota
-	
+
 	// MediaTypeVideo indicates video media
 	MediaTypeVideo
 )
@@ -183,27 +183,27 @@ const (
 // the data they're working with.
 type MediaFormat struct {
 	// Audio format properties
-	
+
 	// SampleRate is the number of audio samples per second (Hz)
 	SampleRate uint32
-	
+
 	// Channels is the number of audio channels (1=mono, 2=stereo, etc.)
-	Channels   uint8
-	
+	Channels uint8
+
 	// BitDepth is the number of bits per audio sample
-	BitDepth   uint8
-	
+	BitDepth uint8
+
 	// Video format properties
-	
+
 	// Width is the video frame width in pixels
-	Width      uint32
-	
+	Width uint32
+
 	// Height is the video frame height in pixels
-	Height     uint32
-	
+	Height uint32
+
 	// FrameRate is the video frames per second
-	FrameRate  float64
-	
+	FrameRate float64
+
 	// PixelFormat describes how pixels are encoded
 	PixelFormat VideoFormat
 }
@@ -217,13 +217,13 @@ type VideoFormat int
 const (
 	// VideoFormatI420 is YUV 4:2:0 planar format (most common for video)
 	VideoFormatI420 VideoFormat = iota
-	
+
 	// VideoFormatNV12 is YUV 4:2:0 semi-planar format
 	VideoFormatNV12
-	
+
 	// VideoFormatRGBA is RGB with alpha channel (4 bytes per pixel)
 	VideoFormatRGBA
-	
+
 	// VideoFormatBGRA is BGR with alpha channel (4 bytes per pixel)
 	VideoFormatBGRA
 )
@@ -235,15 +235,15 @@ const (
 type ProcessorCapabilities struct {
 	// SupportedMediaTypes lists which media types this processor handles
 	SupportedMediaTypes []MediaType
-	
+
 	// SupportedFormats lists specific formats the processor supports
-	SupportedFormats    []MediaFormat
-	
+	SupportedFormats []MediaFormat
+
 	// MaxConcurrency is the maximum number of concurrent operations (0 = unlimited)
-	MaxConcurrency      int
-	
+	MaxConcurrency int
+
 	// RequiresGPU indicates if this processor needs GPU acceleration
-	RequiresGPU         bool
+	RequiresGPU bool
 }
 
 // MediaBuffer provides buffering for media data.
@@ -267,9 +267,9 @@ type MediaBuffer struct {
 type MediaBufferFactory struct {
 	// defaultSize is the initial capacity for new buffers
 	defaultSize int
-	
+
 	// maxSize is the maximum number of items a buffer can hold
-	maxSize     int
+	maxSize int
 }
 
 // MediaProcessingStats tracks processing statistics.
@@ -278,22 +278,22 @@ type MediaBufferFactory struct {
 // bottlenecks or issues. Stats are updated in real-time as
 // media flows through the pipeline.
 type MediaProcessingStats struct {
-	mu               sync.RWMutex
-	
+	mu sync.RWMutex
+
 	// FramesProcessed is the total number of successfully processed frames
-	FramesProcessed  uint64
-	
+	FramesProcessed uint64
+
 	// FramesDropped is the number of frames that were dropped
-	FramesDropped    uint64
-	
+	FramesDropped uint64
+
 	// ProcessingTimeMs is the average processing time in milliseconds
 	ProcessingTimeMs float64
-	
+
 	// LastProcessedAt is when the last frame was processed
-	LastProcessedAt  time.Time
-	
+	LastProcessedAt time.Time
+
 	// Errors is the number of processing errors encountered
-	Errors           uint64
+	Errors uint64
 }
 
 // MediaMetricsCollector collects metrics from the media pipeline.
@@ -338,8 +338,8 @@ func (mp *MediaPipeline) AddStage(stage MediaPipelineStage) {
 	// Sort stages by priority
 	mp.sortStages()
 
-	logger := logger.GetLogger()
-	logger.Infow("added pipeline stage",
+	getLogger := logger.GetLogger()
+	getLogger.Infow("added pipeline stage",
 		"stage", stage.GetName(),
 		"priority", stage.GetPriority())
 }
@@ -385,9 +385,9 @@ func (mp *MediaPipeline) RegisterProcessor(processor MediaProcessor) {
 	defer mp.mu.Unlock()
 
 	mp.processors[processor.GetName()] = processor
-	
-	logger := logger.GetLogger()
-	logger.Infow("registered media processor",
+
+	getLogger := logger.GetLogger()
+	getLogger.Infow("registered media processor",
 		"processor", processor.GetName())
 }
 
@@ -413,7 +413,7 @@ func (mp *MediaPipeline) StartProcessingTrack(track *webrtc.TrackRemote) error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	trackPipeline := &MediaTrackPipeline{
 		TrackID:         track.ID(),
 		Track:           track,
@@ -438,8 +438,8 @@ func (mp *MediaPipeline) StartProcessingTrack(track *webrtc.TrackRemote) error {
 		return err
 	}
 
-	logger := logger.GetLogger()
-	logger.Infow("started processing track",
+	getLogger := logger.GetLogger()
+	getLogger.Infow("started processing track",
 		"trackID", track.ID(),
 		"kind", track.Kind())
 
@@ -471,8 +471,8 @@ func (mp *MediaPipeline) StopProcessingTrack(trackID string) {
 	trackPipeline.cancelFunc()
 	trackPipeline.wg.Wait()
 
-	logger := logger.GetLogger()
-	logger.Infow("stopped processing track", "trackID", trackID)
+	getLogger := logger.GetLogger()
+	getLogger.Infow("stopped processing track", "trackID", trackID)
 }
 
 // startMediaReceiver starts receiving media data from a track
@@ -485,11 +485,13 @@ func (mp *MediaPipeline) startMediaReceiver(track *webrtc.TrackRemote, pipeline 
 	case webrtc.RTPCodecTypeVideo:
 		// Video handling would be implemented here
 		// This would involve setting up video receivers
+	default:
+		panic("unhandled default case")
 	}
 
 	// Note: Actual media reception would require lower-level WebRTC access
 	// This is a simplified implementation showing the structure
-	
+
 	return nil
 }
 
@@ -518,8 +520,8 @@ func (tp *MediaTrackPipeline) processLoop(ctx context.Context) {
 			tp.updateStats(err != nil, processingTime)
 
 			if err != nil {
-				logger := logger.GetLogger()
-				logger.Errorw("pipeline processing error", err,
+				getLogger := logger.GetLogger()
+				getLogger.Errorw("pipeline processing error", err,
 					"trackID", tp.TrackID,
 					"stage", err.Error())
 				continue
@@ -583,9 +585,14 @@ func (mp *MediaPipeline) GetProcessingStats(trackID string) (*MediaProcessingSta
 	defer mp.mu.RUnlock()
 
 	if trackPipeline, exists := mp.tracks[trackID]; exists {
-		stats := &MediaProcessingStats{}
 		trackPipeline.ProcessingStats.mu.RLock()
-		*stats = *trackPipeline.ProcessingStats
+		stats := &MediaProcessingStats{
+			FramesProcessed:  trackPipeline.ProcessingStats.FramesProcessed,
+			FramesDropped:    trackPipeline.ProcessingStats.FramesDropped,
+			ProcessingTimeMs: trackPipeline.ProcessingStats.ProcessingTimeMs,
+			LastProcessedAt:  trackPipeline.ProcessingStats.LastProcessedAt,
+			Errors:           trackPipeline.ProcessingStats.Errors,
+		}
 		trackPipeline.ProcessingStats.mu.RUnlock()
 		return stats, true
 	}
@@ -754,9 +761,17 @@ func (mmc *MediaMetricsCollector) GetMetrics(trackID string) (*MediaProcessingSt
 		return nil, false
 	}
 
-	// Return a copy
-	statsCopy := *stats
-	return &statsCopy, true
+	// Return a copy without copying the mutex
+	stats.mu.RLock()
+	statsCopy := &MediaProcessingStats{
+		FramesProcessed:  stats.FramesProcessed,
+		FramesDropped:    stats.FramesDropped,
+		ProcessingTimeMs: stats.ProcessingTimeMs,
+		LastProcessedAt:  stats.LastProcessedAt,
+		Errors:           stats.Errors,
+	}
+	stats.mu.RUnlock()
+	return statsCopy, true
 }
 
 // GetAllMetrics returns metrics for all tracks.
@@ -772,8 +787,16 @@ func (mmc *MediaMetricsCollector) GetAllMetrics() map[string]*MediaProcessingSta
 
 	result := make(map[string]*MediaProcessingStats)
 	for trackID, stats := range mmc.metrics {
-		statsCopy := *stats
-		result[trackID] = &statsCopy
+		stats.mu.RLock()
+		statsCopy := &MediaProcessingStats{
+			FramesProcessed:  stats.FramesProcessed,
+			FramesDropped:    stats.FramesDropped,
+			ProcessingTimeMs: stats.ProcessingTimeMs,
+			LastProcessedAt:  stats.LastProcessedAt,
+			Errors:           stats.Errors,
+		}
+		stats.mu.RUnlock()
+		result[trackID] = statsCopy
 	}
 	return result
 }

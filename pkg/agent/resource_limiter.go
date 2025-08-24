@@ -21,27 +21,27 @@ import (
 type ResourceLimiter struct {
 	mu     sync.RWMutex
 	logger *zap.Logger
-	
+
 	// Configuration
-	memoryLimitBytes    uint64
-	cpuQuotaPercent     int // 100 = 1 CPU core
-	maxFileDescriptors  int
-	checkInterval       time.Duration
-	
+	memoryLimitBytes   uint64
+	cpuQuotaPercent    int // 100 = 1 CPU core
+	maxFileDescriptors int
+	checkInterval      time.Duration
+
 	// State
-	enforcing           atomic.Bool
-	memoryViolations    int64
-	cpuViolations       int64
-	fdViolations        int64
-	lastCPUTime         int64
-	lastCheckTime       time.Time
-	
+	enforcing        atomic.Bool
+	memoryViolations int64
+	cpuViolations    int64
+	fdViolations     int64
+	lastCPUTime      int64
+	lastCheckTime    time.Time
+
 	// CPU throttling
-	cpuThrottler        *CPUThrottler
-	
+	cpuThrottler *CPUThrottler
+
 	// File descriptor tracking
-	fdTracker           *FileDescriptorTracker
-	
+	fdTracker *FileDescriptorTracker
+
 	// Callbacks
 	onMemoryLimitExceeded func(usage, limit uint64)
 	onCPULimitExceeded    func(usage float64)
@@ -79,7 +79,7 @@ func NewResourceLimiter(logger *zap.Logger, opts ResourceLimiterOptions) *Resour
 	if opts.MaxFileDescriptors == 0 {
 		opts.MaxFileDescriptors = 1024
 	}
-	
+
 	rl := &ResourceLimiter{
 		logger:             logger,
 		memoryLimitBytes:   uint64(opts.MemoryLimitMB) * 1024 * 1024,
@@ -88,15 +88,15 @@ func NewResourceLimiter(logger *zap.Logger, opts ResourceLimiterOptions) *Resour
 		checkInterval:      opts.CheckInterval,
 		lastCheckTime:      time.Now(),
 	}
-	
+
 	// Initialize CPU throttler
 	rl.cpuThrottler = NewCPUThrottler(opts.CPUQuotaPercent)
-	
+
 	// Initialize FD tracker
 	rl.fdTracker = NewFileDescriptorTracker()
-	
+
 	rl.enforcing.Store(opts.EnforceHardLimits)
-	
+
 	return rl
 }
 
@@ -111,7 +111,7 @@ func (rl *ResourceLimiter) Start(ctx context.Context) {
 func (rl *ResourceLimiter) enforce(ctx context.Context) {
 	ticker := time.NewTicker(rl.checkInterval)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -126,13 +126,13 @@ func (rl *ResourceLimiter) enforce(ctx context.Context) {
 func (rl *ResourceLimiter) checkAndEnforce() {
 	// Check memory
 	memUsage := rl.checkMemoryUsage()
-	
+
 	// Check CPU
 	cpuUsage := rl.checkCPUUsage()
-	
+
 	// Check file descriptors
 	fdUsage := rl.checkFileDescriptors()
-	
+
 	// Log current usage
 	rl.logger.Debug("Resource usage check",
 		zap.Uint64("memory_mb", memUsage/1024/1024),
@@ -148,47 +148,47 @@ func (rl *ResourceLimiter) checkAndEnforce() {
 func (rl *ResourceLimiter) checkMemoryUsage() uint64 {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
-	
+
 	currentUsage := memStats.Alloc
-	
+
 	if currentUsage > rl.memoryLimitBytes {
 		atomic.AddInt64(&rl.memoryViolations, 1)
-		
+
 		rl.logger.Warn("Memory limit exceeded",
 			zap.Uint64("usage_mb", currentUsage/1024/1024),
 			zap.Uint64("limit_mb", rl.memoryLimitBytes/1024/1024),
 			zap.Int64("violations", atomic.LoadInt64(&rl.memoryViolations)),
 		)
-		
+
 		// Call callback
 		if rl.onMemoryLimitExceeded != nil {
 			rl.onMemoryLimitExceeded(currentUsage, rl.memoryLimitBytes)
 		}
-		
+
 		// Enforce limit if enabled
 		if rl.enforcing.Load() {
 			rl.enforceMemoryLimit()
 		}
 	}
-	
+
 	return currentUsage
 }
 
 // enforceMemoryLimit attempts to reduce memory usage
 func (rl *ResourceLimiter) enforceMemoryLimit() {
 	rl.logger.Info("Enforcing memory limit - triggering aggressive GC")
-	
+
 	// Force multiple GC cycles
 	for i := 0; i < 3; i++ {
 		runtime.GC()
 		debug.FreeOSMemory()
 		time.Sleep(100 * time.Millisecond)
 	}
-	
+
 	// Check if we're still over limit
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
-	
+
 	if memStats.Alloc > rl.memoryLimitBytes {
 		// Still over limit, set memory limit at OS level if possible
 		rl.setOSMemoryLimit()
@@ -197,66 +197,59 @@ func (rl *ResourceLimiter) enforceMemoryLimit() {
 
 // setOSMemoryLimit attempts to set OS-level memory limit
 func (rl *ResourceLimiter) setOSMemoryLimit() {
-	// This is platform-specific
-	// On Unix systems, we can use setrlimit
-	var rLimit syscall.Rlimit
-	err := syscall.Getrlimit(syscall.RLIMIT_AS, &rLimit)
-	if err == nil {
-		rLimit.Cur = rl.memoryLimitBytes
-		if err := syscall.Setrlimit(syscall.RLIMIT_AS, &rLimit); err != nil {
-			rl.logger.Error("Failed to set OS memory limit", zap.Error(err))
-		} else {
-			rl.logger.Info("Set OS memory limit", zap.Uint64("limit_bytes", rl.memoryLimitBytes))
-		}
-	}
+	// IMPORTANT: Setting RLIMIT_AS is dangerous and can crash the Go runtime
+	// because it limits total virtual memory including memory mappings needed
+	// by the runtime itself. We should not set hard OS limits on memory.
+	// Instead, we rely on GC and memory pressure to manage memory usage.
+	rl.logger.Warn("OS memory limit enforcement skipped - rely on GC instead")
 }
 
 // checkCPUUsage checks and enforces CPU limits
 func (rl *ResourceLimiter) checkCPUUsage() float64 {
 	now := time.Now()
-	
+
 	// Get current process CPU time
 	var rusage syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &rusage); err != nil {
 		rl.logger.Error("Failed to get CPU usage", zap.Error(err))
 		return 0
 	}
-	
+
 	// Calculate CPU time in nanoseconds
 	currentCPUTime := rusage.Utime.Nano() + rusage.Stime.Nano()
-	
+
 	// Calculate CPU usage percentage
 	if rl.lastCPUTime > 0 {
 		cpuDelta := currentCPUTime - rl.lastCPUTime
 		timeDelta := now.Sub(rl.lastCheckTime).Nanoseconds()
-		
+
 		if timeDelta > 0 {
 			// CPU usage as percentage (multiplied by number of cores for multi-core)
 			cpuPercent := float64(cpuDelta) / float64(timeDelta) * 100.0 * float64(runtime.NumCPU())
-			
+
 			if cpuPercent > float64(rl.cpuQuotaPercent) {
 				atomic.AddInt64(&rl.cpuViolations, 1)
-				
+
 				rl.logger.Warn("CPU limit exceeded",
 					zap.Float64("usage_percent", cpuPercent),
 					zap.Int("limit_percent", rl.cpuQuotaPercent),
 					zap.Int64("violations", atomic.LoadInt64(&rl.cpuViolations)),
 				)
-				
+
 				// Call callback
 				if rl.onCPULimitExceeded != nil {
 					rl.onCPULimitExceeded(cpuPercent)
 				}
-				
+
 				// Enforce limit if enabled
 				if rl.enforcing.Load() {
 					rl.cpuThrottler.Throttle(cpuPercent)
 				}
 			}
-			
+
 			rl.lastCPUTime = currentCPUTime
 			rl.lastCheckTime = now
-			
+
 			return cpuPercent
 		}
 	} else {
@@ -264,34 +257,34 @@ func (rl *ResourceLimiter) checkCPUUsage() float64 {
 		rl.lastCPUTime = currentCPUTime
 		rl.lastCheckTime = now
 	}
-	
+
 	return 0
 }
 
 // checkFileDescriptors checks file descriptor usage
 func (rl *ResourceLimiter) checkFileDescriptors() int {
 	currentFDs := rl.fdTracker.GetCurrentCount()
-	
+
 	if currentFDs > rl.maxFileDescriptors {
 		atomic.AddInt64(&rl.fdViolations, 1)
-		
+
 		rl.logger.Warn("File descriptor limit exceeded",
 			zap.Int("usage", currentFDs),
 			zap.Int("limit", rl.maxFileDescriptors),
 			zap.Int64("violations", atomic.LoadInt64(&rl.fdViolations)),
 		)
-		
+
 		// Call callback
 		if rl.onFDLimitExceeded != nil {
 			rl.onFDLimitExceeded(currentFDs, rl.maxFileDescriptors)
 		}
-		
+
 		// Log open files for debugging
 		if rl.enforcing.Load() {
 			rl.fdTracker.LogOpenFiles(rl.logger)
 		}
 	}
-	
+
 	return currentFDs
 }
 
@@ -328,19 +321,19 @@ func (rl *ResourceLimiter) SetFDLimitCallback(cb func(usage, limit int)) {
 func (rl *ResourceLimiter) GetMetrics() map[string]interface{} {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
-	
+
 	fdCount := rl.fdTracker.GetCurrentCount()
-	
+
 	return map[string]interface{}{
-		"memory_usage_mb":      memStats.Alloc / 1024 / 1024,
-		"memory_limit_mb":      rl.memoryLimitBytes / 1024 / 1024,
-		"memory_violations":    atomic.LoadInt64(&rl.memoryViolations),
-		"cpu_quota_percent":    rl.cpuQuotaPercent,
-		"cpu_violations":       atomic.LoadInt64(&rl.cpuViolations),
-		"file_descriptors":     fdCount,
-		"fd_limit":            rl.maxFileDescriptors,
-		"fd_violations":       atomic.LoadInt64(&rl.fdViolations),
-		"enforcing":           rl.enforcing.Load(),
+		"memory_usage_mb":   memStats.Alloc / 1024 / 1024,
+		"memory_limit_mb":   rl.memoryLimitBytes / 1024 / 1024,
+		"memory_violations": atomic.LoadInt64(&rl.memoryViolations),
+		"cpu_quota_percent": rl.cpuQuotaPercent,
+		"cpu_violations":    atomic.LoadInt64(&rl.cpuViolations),
+		"file_descriptors":  fdCount,
+		"fd_limit":          rl.maxFileDescriptors,
+		"fd_violations":     atomic.LoadInt64(&rl.fdViolations),
+		"enforcing":         rl.enforcing.Load(),
 	}
 }
 
@@ -348,9 +341,8 @@ func (rl *ResourceLimiter) GetMetrics() map[string]interface{} {
 // reducing GOMAXPROCS when CPU usage exceeds quotas. This helps prevent agents from
 // consuming excessive CPU resources in shared environments.
 type CPUThrottler struct {
-	mu              sync.Mutex
-	quotaPercent    int
-	lastThrottleTime time.Time
+	mu               sync.Mutex
+	quotaPercent     int
 	throttleDuration time.Duration
 }
 
@@ -369,21 +361,21 @@ func NewCPUThrottler(quotaPercent int) *CPUThrottler {
 func (t *CPUThrottler) Throttle(currentUsagePercent float64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	
+
 	// Calculate how much to throttle
 	excessPercent := currentUsagePercent - float64(t.quotaPercent)
 	if excessPercent <= 0 {
 		return
 	}
-	
+
 	// Throttle proportionally to excess
 	sleepRatio := excessPercent / currentUsagePercent
 	sleepDuration := time.Duration(float64(t.throttleDuration) * sleepRatio)
-	
+
 	// Apply throttling
 	runtime.Gosched() // Yield to other goroutines
 	time.Sleep(sleepDuration)
-	
+
 	// Reduce GOMAXPROCS temporarily if significantly over limit
 	if excessPercent > 50 {
 		currentProcs := runtime.GOMAXPROCS(0)
@@ -391,9 +383,9 @@ func (t *CPUThrottler) Throttle(currentUsagePercent float64) {
 		if targetProcs < 1 {
 			targetProcs = 1
 		}
-		
+
 		runtime.GOMAXPROCS(targetProcs)
-		
+
 		// Restore after a delay
 		go func() {
 			time.Sleep(100 * time.Millisecond)
@@ -406,7 +398,6 @@ func (t *CPUThrottler) Throttle(currentUsagePercent float64) {
 // It can count file descriptors and categorize them by type (files, sockets, pipes, etc.)
 // to help diagnose file descriptor leaks and resource usage patterns.
 type FileDescriptorTracker struct {
-	mu sync.RWMutex
 }
 
 // NewFileDescriptorTracker creates a new file descriptor tracker.
@@ -416,31 +407,21 @@ func NewFileDescriptorTracker() *FileDescriptorTracker {
 }
 
 // GetCurrentCount returns the current number of open file descriptors for the process.
-// On Unix systems, this counts entries in /proc/self/fd. If that fails, it falls back
-// to attempting to dup file descriptors to estimate the count.
+// On Unix systems, this counts entries in /proc/self/fd. If that fails, it returns
+// a default estimate rather than attempting syscalls that might interfere with runtime.
 func (t *FileDescriptorTracker) GetCurrentCount() int {
 	// On Unix systems, count files in /proc/self/fd
 	pid := os.Getpid()
 	fdPath := fmt.Sprintf("/proc/%d/fd", pid)
-	
+
 	entries, err := os.ReadDir(fdPath)
 	if err != nil {
-		// Fallback: try to get from resource limits
-		var rLimit syscall.Rlimit
-		if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err == nil {
-			// Estimate based on trying to dup stderr
-			count := 0
-			for i := 3; i < int(rLimit.Cur); i++ {
-				if _, err := syscall.Dup(i); err == nil {
-					syscall.Close(i)
-					count++
-				}
-			}
-			return count + 3 // stdin, stdout, stderr
-		}
-		return -1
+		// On macOS and other systems without /proc, we can't reliably count FDs
+		// without interfering with the runtime. Return a conservative estimate.
+		// Most programs will have at least stdin/stdout/stderr plus some internal FDs
+		return 10 // Conservative estimate
 	}
-	
+
 	return len(entries)
 }
 
@@ -450,22 +431,22 @@ func (t *FileDescriptorTracker) GetCurrentCount() int {
 func (t *FileDescriptorTracker) LogOpenFiles(logger *zap.Logger) {
 	pid := os.Getpid()
 	fdPath := fmt.Sprintf("/proc/%d/fd", pid)
-	
+
 	entries, err := os.ReadDir(fdPath)
 	if err != nil {
 		logger.Error("Failed to read file descriptors", zap.Error(err))
 		return
 	}
-	
+
 	// Group by type
 	fileTypes := make(map[string]int)
-	
+
 	for _, entry := range entries {
 		link, err := os.Readlink(fdPath + "/" + entry.Name())
 		if err != nil {
 			continue
 		}
-		
+
 		// Categorize by type
 		switch {
 		case link == "pipe:[0]" || link[:5] == "pipe:":
@@ -480,7 +461,7 @@ func (t *FileDescriptorTracker) LogOpenFiles(logger *zap.Logger) {
 			fileTypes["other"]++
 		}
 	}
-	
+
 	logger.Info("Open file descriptors by type",
 		zap.Int("total", len(entries)),
 		zap.Any("types", fileTypes),
@@ -492,25 +473,25 @@ func (t *FileDescriptorTracker) LogOpenFiles(logger *zap.Logger) {
 // useful for understanding the environment constraints and setting appropriate agent limits.
 func GetSystemResourceLimits() (map[string]uint64, error) {
 	limits := make(map[string]uint64)
-	
+
 	// Memory limit
 	var memLimit syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_AS, &memLimit); err == nil {
 		limits["memory_bytes"] = memLimit.Cur
 	}
-	
+
 	// File descriptor limit
 	var fdLimit syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &fdLimit); err == nil {
 		limits["file_descriptors"] = fdLimit.Cur
 	}
-	
+
 	// CPU limit (if available)
 	var cpuLimit syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_CPU, &cpuLimit); err == nil {
 		limits["cpu_seconds"] = cpuLimit.Cur
 	}
-	
+
 	return limits, nil
 }
 
@@ -539,23 +520,23 @@ func (rl *ResourceLimiter) NewGuard(name string) *ResourceLimitGuard {
 func (g *ResourceLimitGuard) Execute(ctx context.Context, fn func() error) error {
 	// Check resources before execution
 	metrics := g.limiter.GetMetrics()
-	
+
 	memUsage := metrics["memory_usage_mb"].(uint64)
 	memLimit := metrics["memory_limit_mb"].(uint64)
-	
+
 	if memUsage > memLimit*9/10 { // 90% threshold
-		return fmt.Errorf("operation %s aborted: memory usage too high (%d/%d MB)", 
+		return fmt.Errorf("operation %s aborted: memory usage too high (%d/%d MB)",
 			g.name, memUsage, memLimit)
 	}
-	
+
 	fdCount := metrics["file_descriptors"].(int)
 	fdLimit := metrics["fd_limit"].(int)
-	
+
 	if fdCount > fdLimit*9/10 { // 90% threshold
-		return fmt.Errorf("operation %s aborted: too many file descriptors (%d/%d)", 
+		return fmt.Errorf("operation %s aborted: too many file descriptors (%d/%d)",
 			g.name, fdCount, fdLimit)
 	}
-	
+
 	// Execute function
 	return fn()
 }

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,15 +13,12 @@ import (
 
 // TestJobRecoveryManager tests basic job recovery functionality
 func TestJobRecoveryManager(t *testing.T) {
-	handler := &testJobHandler{}
-	worker := newTestableWorker(handler, WorkerOptions{
-		JobType: livekit.JobType_JT_ROOM,
-	})
+	worker := newMockWorker(nil)
 
 	recoveryHandler := &mockJobRecoveryHandler{
 		shouldRecover: true,
 	}
-	manager := NewJobRecoveryManager(worker.Worker, recoveryHandler)
+	manager := NewJobRecoveryManager(worker, recoveryHandler)
 
 	// Save a job for recovery
 	job := &livekit.Job{
@@ -41,15 +39,12 @@ func TestJobRecoveryManager(t *testing.T) {
 
 // TestJobRecoveryAttempt tests the recovery attempt process
 func TestJobRecoveryAttempt(t *testing.T) {
-	handler := &testJobHandler{}
-	worker := newTestableWorker(handler, WorkerOptions{
-		JobType: livekit.JobType_JT_ROOM,
-	})
+	worker := newMockWorker(nil)
 
 	recoveryHandler := &mockJobRecoveryHandler{
 		shouldRecover: true,
 	}
-	manager := NewJobRecoveryManager(worker.Worker, recoveryHandler)
+	manager := NewJobRecoveryManager(worker, recoveryHandler)
 
 	// Save multiple jobs
 	jobs := []*livekit.Job{
@@ -75,27 +70,24 @@ func TestJobRecoveryAttempt(t *testing.T) {
 
 	// Should have results for both jobs
 	assert.Len(t, results, 2)
-	
+
 	// Both should fail because we can't actually connect to rooms
 	assert.NotNil(t, results["job-1"])
 	assert.NotNil(t, results["job-2"])
 
 	// Verify recovery handler was called
-	assert.Equal(t, 2, recoveryHandler.attemptCalls)
-	assert.Equal(t, 2, recoveryHandler.failedCalls)
+	assert.Equal(t, 2, recoveryHandler.getAttemptCalls())
+	assert.Equal(t, 2, recoveryHandler.getFailedCalls())
 }
 
 // TestJobRecoveryTimeout tests that old jobs are not recovered
 func TestJobRecoveryTimeout(t *testing.T) {
-	handler := &testJobHandler{}
-	worker := newTestableWorker(handler, WorkerOptions{
-		JobType: livekit.JobType_JT_ROOM,
-	})
+	worker := newMockWorker(nil)
 
 	recoveryHandler := &mockJobRecoveryHandler{
 		shouldRecover: true,
 	}
-	manager := NewJobRecoveryManager(worker.Worker, recoveryHandler)
+	manager := NewJobRecoveryManager(worker, recoveryHandler)
 	manager.recoveryTimeout = 1 * time.Millisecond // Very short timeout
 
 	// Save a job
@@ -156,7 +148,9 @@ func TestPartialMessageBufferSizeLimit(t *testing.T) {
 	// Try to append data that exceeds limit
 	err := buffer.Append(1, []byte("this is too long"))
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "exceeds limit")
+	if err != nil {
+		assert.Contains(t, err.Error(), "exceeds limit")
+	}
 }
 
 // TestPartialMessageBufferStale tests stale buffer detection
@@ -164,7 +158,8 @@ func TestPartialMessageBufferStale(t *testing.T) {
 	buffer := NewPartialMessageBuffer(1024)
 
 	// Add some data
-	buffer.Append(1, []byte("partial"))
+	err := buffer.Append(1, []byte("partial"))
+	assert.NoError(t, err)
 
 	// Should not be stale immediately
 	assert.False(t, buffer.IsStale(1*time.Hour))
@@ -213,8 +208,9 @@ func TestWorkerJobRecoveryIntegration(t *testing.T) {
 		shouldRecover: true,
 	}
 
-	handler := &testJobHandler{}
-	worker := NewWorker("http://localhost:7880", "key", "secret", handler, WorkerOptions{
+	// Using UniversalWorker instead of deprecated Worker
+	handler := &MockUniversalHandler{}
+	worker := NewUniversalWorker("http://localhost:7880", "key", "secret", handler, WorkerOptions{
 		JobType:            livekit.JobType_JT_ROOM,
 		EnableJobRecovery:  true,
 		JobRecoveryHandler: recoveryHandler,
@@ -222,7 +218,6 @@ func TestWorkerJobRecoveryIntegration(t *testing.T) {
 
 	// Verify recovery manager is created
 	assert.NotNil(t, worker.recoveryManager)
-	assert.NotNil(t, worker.partialMsgBuffer)
 }
 
 // TestDefaultJobRecoveryHandler tests the default recovery handler
@@ -230,7 +225,7 @@ func TestDefaultJobRecoveryHandler(t *testing.T) {
 	handler := &DefaultJobRecoveryHandler{}
 
 	ctx := context.Background()
-	
+
 	// Should recover running jobs
 	runningJob := &JobState{
 		JobID:  "job-1",
@@ -255,6 +250,7 @@ func TestDefaultJobRecoveryHandler(t *testing.T) {
 
 // mockJobRecoveryHandler for testing
 type mockJobRecoveryHandler struct {
+	mu             sync.Mutex
 	shouldRecover  bool
 	attemptCalls   int
 	recoveredCalls int
@@ -262,14 +258,38 @@ type mockJobRecoveryHandler struct {
 }
 
 func (m *mockJobRecoveryHandler) OnJobRecoveryAttempt(ctx context.Context, jobID string, jobState *JobState) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.attemptCalls++
 	return m.shouldRecover
 }
 
 func (m *mockJobRecoveryHandler) OnJobRecovered(ctx context.Context, job *livekit.Job, room *lksdk.Room) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.recoveredCalls++
 }
 
 func (m *mockJobRecoveryHandler) OnJobRecoveryFailed(ctx context.Context, jobID string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.failedCalls++
+}
+
+func (m *mockJobRecoveryHandler) getAttemptCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.attemptCalls
+}
+
+func (m *mockJobRecoveryHandler) getRecoveredCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.recoveredCalls
+}
+
+func (m *mockJobRecoveryHandler) getFailedCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.failedCalls
 }

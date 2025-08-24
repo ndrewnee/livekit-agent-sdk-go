@@ -16,11 +16,24 @@ Complete reference documentation for all public APIs in the LiveKit Agent SDK.
 
 ## Core Types
 
-### JobHandler Interface
+### UniversalHandler Interface
 
 ```go
-type JobHandler interface {
-    OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error
+type UniversalHandler interface {
+    // Called when a job is available - decide whether to accept it
+    OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata)
+    
+    // Called when the job is assigned - perform the actual work
+    OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error
+    
+    // Called when the job is terminated - clean up resources
+    OnJobTerminated(ctx context.Context, jobID string)
+    
+    // Optional: participant event handlers
+    OnParticipantJoined(ctx context.Context, participant *lksdk.RemoteParticipant)
+    OnParticipantLeft(ctx context.Context, participant *lksdk.RemoteParticipant)
+    OnTrackPublished(ctx context.Context, publication *lksdk.RemoteTrackPublication, participant *lksdk.RemoteParticipant)
+    OnTrackUnpublished(ctx context.Context, publication *lksdk.RemoteTrackPublication, participant *lksdk.RemoteParticipant)
 }
 ```
 
@@ -28,11 +41,21 @@ The primary interface that must be implemented by all agent handlers.
 
 **Methods:**
 
-- `OnJob(ctx, job, room)`: Called when a job is assigned to the agent
-  - `ctx`: Context for job execution (cancelled when job should stop)
+- `OnJobRequest(ctx, job)`: Called when a job is available
+  - `ctx`: Context for the request
   - `job`: Job information including type, metadata, and ID
-  - `room`: Connected LiveKit room instance
+  - Returns: (accept bool, metadata *JobMetadata)
+
+- `OnJobAssigned(ctx, jobCtx)`: Called when the job is assigned
+  - `ctx`: Context for job execution (cancelled when job should stop)
+  - `jobCtx`: Job context containing job, room, and metadata
   - Returns: Error if job execution fails
+
+- `OnJobTerminated(ctx, jobID)`: Called when job ends
+  - `ctx`: Context for cleanup
+  - `jobID`: ID of the terminated job
+
+- Participant event handlers: Optional methods for tracking room events
 
 ### JobType Enumeration
 
@@ -52,46 +75,46 @@ const (
 
 ## Worker API
 
-### Worker Struct
+### UniversalWorker Struct
 
 ```go
-type Worker struct {
+type UniversalWorker struct {
     // Internal fields (not exported)
 }
 ```
 
-Main worker instance that connects to LiveKit and processes jobs.
+Main worker instance that connects to LiveKit and processes jobs. Replaces the deprecated Worker, ParticipantAgent, and PublisherAgent.
 
-### NewWorker Function
+### NewUniversalWorker Function
 
 ```go
-func NewWorker(
+func NewUniversalWorker(
     url string,
     apiKey string,
     apiSecret string,
-    handler JobHandler,
+    handler UniversalHandler,
     opts WorkerOptions,
-) *Worker
+) *UniversalWorker
 ```
 
-Creates a new worker instance.
+Creates a new universal worker instance.
 
 **Parameters:**
 
 - `url`: LiveKit server WebSocket URL (e.g., "ws://localhost:7880")
 - `apiKey`: LiveKit API key for authentication
 - `apiSecret`: LiveKit API secret for authentication  
-- `handler`: JobHandler implementation
+- `handler`: UniversalHandler implementation
 - `opts`: Worker configuration options
 
-**Returns:** Worker instance ready to start
+**Returns:** UniversalWorker instance ready to start
 
-### Worker Methods
+### UniversalWorker Methods
 
 #### Start
 
 ```go
-func (w *Worker) Start(ctx context.Context) error
+func (w *UniversalWorker) Start(ctx context.Context) error
 ```
 
 Starts the worker and begins processing jobs. Blocks until context is cancelled or fatal error occurs.
@@ -99,35 +122,36 @@ Starts the worker and begins processing jobs. Blocks until context is cancelled 
 #### Stop
 
 ```go
-func (w *Worker) Stop(ctx context.Context) error
+func (w *UniversalWorker) Stop() error
 ```
 
 Gracefully stops the worker, completing active jobs within timeout.
 
-#### IsHealthy
+#### GetStatus
 
 ```go
-func (w *Worker) IsHealthy() bool
+func (w *UniversalWorker) GetStatus() WorkerStatus
 ```
 
-Returns true if worker is connected and healthy.
+Returns current worker status (available, busy, full, etc.).
 
-#### GetStats
+#### GetWorkerID
 
 ```go
-func (w *Worker) GetStats() WorkerStats
+func (w *UniversalWorker) GetWorkerID() string
 ```
 
-Returns current worker statistics and metrics.
+Returns the unique worker ID assigned by the server.
 
 ### WorkerOptions Struct
 
 ```go
 type WorkerOptions struct {
     AgentName         string
-    JobTypes          []livekit.JobType
-    MaxConcurrentJobs int
+    JobType           livekit.JobType
+    MaxJobs           int
     Namespace         string
+    Permissions       *livekit.ParticipantPermission
     LoadCalculator    LoadCalculator
     ResourceLimiter   ResourceLimiter
     EnableJobRecovery bool
@@ -135,15 +159,17 @@ type WorkerOptions struct {
     ShutdownTimeout   time.Duration
     HealthCheckInterval time.Duration
     WebSocketDebug    bool
+    Logger            logger.Logger
 }
 ```
 
 **Fields:**
 
-- `AgentName`: Unique identifier for this agent type
-- `JobTypes`: Supported job types (defaults to all types)
-- `MaxConcurrentJobs`: Maximum concurrent jobs (defaults to 1)
+- `AgentName`: Unique identifier for this agent type (must match dispatch config)
+- `JobType`: Single job type this worker handles
+- `MaxJobs`: Maximum concurrent jobs (defaults to 1)
 - `Namespace`: Agent namespace for multi-tenant deployments
+- `Permissions`: Agent participant permissions
 - `LoadCalculator`: Custom load calculation strategy
 - `ResourceLimiter`: Resource monitoring and limits
 - `EnableJobRecovery`: Enable automatic job recovery
@@ -151,6 +177,7 @@ type WorkerOptions struct {
 - `ShutdownTimeout`: Maximum time to wait for graceful shutdown
 - `HealthCheckInterval`: How often to perform health checks
 - `WebSocketDebug`: Enable WebSocket message logging
+- `Logger`: Custom logger instance
 
 ## Job Handling
 
@@ -171,6 +198,30 @@ type Job struct {
 }
 ```
 
+### JobMetadata
+
+Metadata returned when accepting a job:
+
+```go
+type JobMetadata struct {
+    ParticipantIdentity string // Agent's participant identity
+    ParticipantName     string // Agent's display name
+    ParticipantMetadata string // Agent's metadata (JSON)
+}
+```
+
+### JobContext
+
+Context provided to job handlers:
+
+```go
+type JobContext struct {
+    Job      *livekit.Job        // Job information
+    Room     *lksdk.Room         // Connected room instance
+    Metadata *JobMetadata        // Agent metadata
+}
+```
+
 ### Room Information
 
 Room context provided to job handlers:
@@ -181,7 +232,7 @@ func (r *Room) Name() string                           // Room name
 func (r *Room) SID() string                           // Room SID
 func (r *Room) GetRemoteParticipants() []*RemoteParticipant // All participants
 func (r *Room) LocalParticipant() *LocalParticipant   // Agent's participant
-func (r *Room) Callback                               // Event callbacks
+// Note: Callbacks cannot be modified after connection
 ```
 
 ### Context Management
@@ -195,65 +246,51 @@ Job contexts are automatically managed:
 
 ## Agent Types
 
-### ParticipantAgent
+### SimpleUniversalHandler
 
 ```go
-type ParticipantAgent struct {
-    // Configuration
-    Identity string
-    Metadata string
+type SimpleUniversalHandler struct {
+    // Job handling callbacks
+    JobRequestFunc    func(context.Context, *livekit.Job) (bool, *JobMetadata)
+    JobAssignedFunc   func(context.Context, *JobContext) error
+    JobTerminatedFunc func(context.Context, string)
     
-    // Handlers
-    OnTrackPublished   func(*RemoteTrackPublication, *RemoteParticipant)
-    OnTrackUnpublished func(*RemoteTrackPublication, *RemoteParticipant)
-    OnDataReceived     func([]byte, DataReceiveParams)
-    OnDisconnected     func()
+    // Participant event callbacks
+    ParticipantJoinedFunc     func(context.Context, *lksdk.RemoteParticipant)
+    ParticipantLeftFunc       func(context.Context, *lksdk.RemoteParticipant)
+    TrackPublishedFunc        func(context.Context, *lksdk.RemoteTrackPublication, *lksdk.RemoteParticipant)
+    TrackUnpublishedFunc      func(context.Context, *lksdk.RemoteTrackPublication, *lksdk.RemoteParticipant)
+    TrackSubscribedFunc       func(context.Context, *lksdk.RemoteTrack, *lksdk.RemoteTrackPublication, *lksdk.RemoteParticipant)
+    TrackUnsubscribedFunc     func(context.Context, *lksdk.RemoteTrack, *lksdk.RemoteTrackPublication, *lksdk.RemoteParticipant)
+    DataReceivedFunc          func(context.Context, []byte, *lksdk.RemoteParticipant)
+    SpeakingChangedFunc       func(context.Context, *lksdk.RemoteParticipant, bool)
+    ConnectionQualityChangedFunc func(context.Context, *lksdk.RemoteParticipant, livekit.ConnectionQuality)
 }
 ```
 
-Agent that acts as a room participant.
+Convenient handler implementation using function callbacks.
 
-#### NewParticipantAgent
+### BaseHandler
 
 ```go
-func NewParticipantAgent(opts ParticipantAgentOptions) *ParticipantAgent
+type BaseHandler struct{}
 ```
 
-**ParticipantAgentOptions:**
-
-- `Identity`: Participant identity (must be unique in room)
-- `Metadata`: JSON metadata attached to participant
-- `AutoSubscribe`: Automatically subscribe to tracks
-- `Permissions`: Participant permissions
-
-### PublisherAgent
+Base implementation of UniversalHandler with no-op methods. Embed this in your handler to only implement the methods you need:
 
 ```go
-type PublisherAgent struct {
-    // Media publishing
-    AudioTrack *LocalAudioTrack
-    VideoTrack *LocalVideoTrack
-    
-    // Event handlers
-    OnTrackMuted   func(bool, TrackKind)
-    OnSubscribed   func(*RemoteParticipant, *TrackPublication)
+type MyHandler struct {
+    agent.BaseHandler
+}
+
+func (h *MyHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *JobMetadata) {
+    // Your implementation
+}
+
+func (h *MyHandler) OnJobAssigned(ctx context.Context, jobCtx *JobContext) error {
+    // Your implementation
 }
 ```
-
-Agent that publishes media to rooms.
-
-#### NewPublisherAgent
-
-```go
-func NewPublisherAgent(opts PublisherAgentOptions) *PublisherAgent
-```
-
-**PublisherAgentOptions:**
-
-- `Identity`: Publisher identity
-- `AudioEnabled`: Enable audio publishing
-- `VideoEnabled`: Enable video publishing
-- `TrackOptions`: Audio/video track configuration
 
 ## Media Processing
 

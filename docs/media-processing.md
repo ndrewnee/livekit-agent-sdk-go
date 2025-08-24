@@ -318,18 +318,39 @@ policy := agent.QualityAdaptationPolicy{
 }
 qc.SetAdaptationPolicy(policy)
 
-// Start monitoring tracks
-room.Callback.OnTrackSubscribed = func(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-    if pub.Kind() == lksdk.TrackKindVideo {
-        subscription := &agent.PublisherTrackSubscription{
-            Track:          track,
-            Publication:    pub,
-            Participant:    rp,
-            CurrentQuality: livekit.VideoQuality_HIGH,
+// Monitor tracks using polling pattern
+go func() {
+    ticker := time.NewTicker(500 * time.Millisecond)
+    defer ticker.Stop()
+    
+    knownTracks := make(map[string]bool)
+    
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            for _, p := range room.GetRemoteParticipants() {
+                for _, pub := range p.TrackPublications() {
+                    trackID := pub.TrackPublication().SID()
+                    if !knownTracks[trackID] && pub.TrackPublication().Kind() == livekit.TrackKind_VIDEO {
+                        knownTracks[trackID] = true
+                        
+                        if track := pub.TrackPublication().Track(); track != nil {
+                            subscription := &agent.PublisherTrackSubscription{
+                                Track:          track.(*webrtc.TrackRemote),
+                                Publication:    pub.TrackPublication(),
+                                Participant:    p,
+                                CurrentQuality: livekit.VideoQuality_HIGH,
+                            }
+                            qc.StartMonitoring(track.(*webrtc.TrackRemote), subscription)
+                        }
+                    }
+                }
+            }
         }
-        qc.StartMonitoring(track, subscription)
     }
-}
+}()
 ```
 
 ### Custom Quality Adaptation
@@ -341,24 +362,55 @@ type AdaptiveQualityHandler struct {
     cpuMonitor      *CPUMonitor
 }
 
-func (h *AdaptiveQualityHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *AdaptiveQualityHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
     // Monitor system resources
     go h.monitorResources(ctx)
     
-    // Set up adaptive quality for subscriptions
-    room.Callback.OnTrackSubscribed = func(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-        if pub.Kind() == lksdk.TrackKindVideo {
-            h.setupAdaptiveQuality(track, pub, rp)
-        }
-    }
-    
-    // Handle connection quality changes
-    room.Callback.OnConnectionQualityChanged = func(update *livekit.ConnectionQualityInfo) {
-        h.handleQualityUpdate(update)
-    }
+    // Monitor for tracks and quality changes using polling
+    go h.monitorTracksAndQuality(ctx, room)
     
     <-ctx.Done()
     return nil
+}
+
+func (h *AdaptiveQualityHandler) monitorTracksAndQuality(ctx context.Context, room *lksdk.Room) {
+    ticker := time.NewTicker(500 * time.Millisecond)
+    defer ticker.Stop()
+    
+    knownTracks := make(map[string]bool)
+    lastQualityUpdate := make(map[string]livekit.ConnectionQuality)
+    
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            // Check for new tracks
+            for _, p := range room.GetRemoteParticipants() {
+                for _, pub := range p.TrackPublications() {
+                    trackID := pub.TrackPublication().SID()
+                    if !knownTracks[trackID] {
+                        knownTracks[trackID] = true
+                        
+                        if pub.TrackPublication().Kind() == livekit.TrackKind_VIDEO {
+                            if track := pub.TrackPublication().Track(); track != nil {
+                                h.setupAdaptiveQuality(track.(*webrtc.TrackRemote), pub.TrackPublication(), p)
+                            }
+                        }
+                    }
+                }
+                
+                // Check connection quality changes
+                if p.ConnectionQuality() != lastQualityUpdate[p.SID()] {
+                    lastQualityUpdate[p.SID()] = p.ConnectionQuality()
+                    h.handleQualityUpdate(&livekit.ConnectionQualityInfo{
+                        ParticipantSid: p.SID(),
+                        Quality:        p.ConnectionQuality(),
+                    })
+                }
+            }
+        }
+    }
 }
 
 func (h *AdaptiveQualityHandler) setupAdaptiveQuality(
@@ -440,17 +492,49 @@ type ManagedSubscription struct {
     Metrics      *SubscriptionMetrics
 }
 
-func (sm *SubscriptionManager) ManageSubscriptions(room *lksdk.Room) {
-    room.Callback.OnTrackPublished = func(pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-        sm.handleNewTrack(pub, rp)
-    }
-    
-    room.Callback.OnTrackUnpublished = func(pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-        sm.handleTrackRemoved(pub)
-    }
+func (sm *SubscriptionManager) ManageSubscriptions(ctx context.Context, room *lksdk.Room) {
+    // Monitor tracks using polling pattern
+    go sm.monitorTracks(ctx, room)
     
     // Periodic optimization
-    go sm.optimizeSubscriptions(room)
+    go sm.optimizeSubscriptions(ctx, room)
+}
+
+func (sm *SubscriptionManager) monitorTracks(ctx context.Context, room *lksdk.Room) {
+    ticker := time.NewTicker(500 * time.Millisecond)
+    defer ticker.Stop()
+    
+    knownTracks := make(map[string]bool)
+    
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            currentTracks := make(map[string]bool)
+            
+            // Check for new tracks
+            for _, p := range room.GetRemoteParticipants() {
+                for _, pub := range p.TrackPublications() {
+                    trackID := pub.TrackPublication().SID()
+                    currentTracks[trackID] = true
+                    
+                    if !knownTracks[trackID] {
+                        knownTracks[trackID] = true
+                        sm.handleNewTrack(pub.TrackPublication(), p)
+                    }
+                }
+            }
+            
+            // Check for removed tracks
+            for trackID := range knownTracks {
+                if !currentTracks[trackID] {
+                    delete(knownTracks, trackID)
+                    sm.handleTrackRemoved(trackID)
+                }
+            }
+        }
+    }
 }
 
 func (sm *SubscriptionManager) handleNewTrack(pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
@@ -498,7 +582,7 @@ func (sm *SubscriptionManager) handleNewTrack(pub *lksdk.RemoteTrackPublication,
     }
 }
 
-func (sm *SubscriptionManager) optimizeSubscriptions(room *lksdk.Room) {
+func (sm *SubscriptionManager) optimizeSubscriptions(ctx context.Context, room *lksdk.Room) {
     ticker := time.NewTicker(10 * time.Second)
     defer ticker.Stop()
     

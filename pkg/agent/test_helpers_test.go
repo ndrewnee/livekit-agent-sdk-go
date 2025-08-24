@@ -3,15 +3,15 @@ package agent
 import (
 	"context"
 
+	"github.com/am-sokolov/livekit-agent-sdk-go/internal/test/mocks"
 	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
-	"github.com/livekit/agent-sdk-go/internal/test/mocks"
 )
 
 // testJobHandler wraps MockJobHandler to implement the JobHandler interface properly
 type testJobHandler struct {
 	mock *mocks.MockJobHandler
-	
+
 	// Direct function setters for tests
 	OnJobRequestFunc    func(ctx context.Context, job *livekit.Job) (bool, *JobMetadata)
 	OnJobAssignedFunc   func(ctx context.Context, job *livekit.Job, room *lksdk.Room) error
@@ -29,14 +29,14 @@ func (h *testJobHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (bo
 	if h.OnJobRequestFunc != nil {
 		return h.OnJobRequestFunc(ctx, job)
 	}
-	
+
 	// Otherwise use mock
 	accepted, mockMetadata := h.mock.OnJobRequest(ctx, job)
-	
+
 	if mockMetadata == nil {
 		return accepted, nil
 	}
-	
+
 	// Convert mock metadata to real metadata
 	metadata := &JobMetadata{
 		ParticipantIdentity:   mockMetadata.ParticipantIdentity,
@@ -45,7 +45,7 @@ func (h *testJobHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (bo
 		ParticipantAttributes: mockMetadata.ParticipantAttributes,
 		SupportsResume:        mockMetadata.SupportsResume,
 	}
-	
+
 	return accepted, metadata
 }
 

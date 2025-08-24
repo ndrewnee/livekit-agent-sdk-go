@@ -15,7 +15,7 @@ A Go SDK for building LiveKit agents that are fully compliant with the LiveKit a
 ## Installation
 
 ```bash
-go get github.com/livekit/agent-sdk-go
+go get github.com/am-sokolov/livekit-agent-sdk-go
 ```
 
 ## Quick Start
@@ -33,27 +33,37 @@ import (
 )
 
 func main() {
-    // Create a simple job handler
-    handler := &agent.SimpleJobHandler{
-        OnJob: func(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
-            log.Printf("Agent joined room: %s", room.Name())
+    // Create a handler using the simple handler helper
+    handler := &agent.SimpleUniversalHandler{
+        JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+            // Accept all jobs
+            return true, &agent.JobMetadata{
+                ParticipantIdentity: "my-agent",
+                ParticipantName:     "My Agent",
+            }
+        },
+        JobAssignedFunc: func(ctx context.Context, jobCtx *agent.JobContext) error {
+            log.Printf("Agent joined room: %s", jobCtx.Room.Name())
             
             // Your agent logic here
             <-ctx.Done()
             
             return nil
         },
+        JobTerminatedFunc: func(ctx context.Context, jobID string) {
+            log.Printf("Job terminated: %s", jobID)
+        },
     }
     
     // Create worker options
     opts := agent.WorkerOptions{
         AgentName: "my-agent",
-        Version:   "1.0.0",
         JobType:   livekit.JobType_JT_ROOM,
+        MaxJobs:   5,
     }
     
-    // Create and start worker
-    worker := agent.NewWorker("http://localhost:7880", "devkey", "secret", handler, opts)
+    // Create and start the universal worker
+    worker := agent.NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, opts)
     
     ctx := context.Background()
     if err := worker.Start(ctx); err != nil {
@@ -70,29 +80,32 @@ func main() {
 The SDK supports three types of agents:
 
 ### Room Agent (`JT_ROOM`)
-Launched when a room is created. Has access to all room events and participants.
+Launched when a room is created with agent dispatch configuration. Has access to all room events and participants.
 
 ```go
 opts := agent.WorkerOptions{
     JobType: livekit.JobType_JT_ROOM,
+    MaxJobs: 5,  // Handle up to 5 concurrent rooms
 }
 ```
 
 ### Publisher Agent (`JT_PUBLISHER`)
-Launched when a participant starts publishing media. Ideal for processing published tracks.
+Launched for media publishing jobs. Can generate and publish audio/video content to rooms.
 
 ```go
 opts := agent.WorkerOptions{
     JobType: livekit.JobType_JT_PUBLISHER,
+    MaxJobs: 10,  // Handle multiple concurrent publishing jobs
 }
 ```
 
 ### Participant Agent (`JT_PARTICIPANT`)
-Launched when any participant joins. Can interact with specific participants.
+Launched for individual participant monitoring and interaction. Provides personalized services per participant.
 
 ```go
 opts := agent.WorkerOptions{
     JobType: livekit.JobType_JT_PARTICIPANT,
+    MaxJobs: 20,  // Handle many participants concurrently
 }
 ```
 
@@ -100,10 +113,12 @@ opts := agent.WorkerOptions{
 
 ### Custom Job Handler
 
-Implement the `JobHandler` interface for full control:
+Implement the `UniversalHandler` interface for full control:
 
 ```go
-type MyAgent struct{}
+type MyAgent struct {
+    agent.BaseHandler
+}
 
 func (a *MyAgent) OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
     // Decide whether to accept the job
@@ -114,7 +129,10 @@ func (a *MyAgent) OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *ag
     }
 }
 
-func (a *MyAgent) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (a *MyAgent) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
+    // Access the room and job details
+    log.Printf("Handling job %s in room %s", jobCtx.Job.Id, jobCtx.Room.Name())
+    
     // Handle the job
     return nil
 }
@@ -122,47 +140,55 @@ func (a *MyAgent) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lks
 func (a *MyAgent) OnJobTerminated(ctx context.Context, jobID string) {
     // Cleanup
 }
+
+// Optional: Handle participant events
+func (a *MyAgent) OnParticipantJoined(ctx context.Context, participant *lksdk.RemoteParticipant) {
+    log.Printf("Participant joined: %s", participant.Identity())
+}
 ```
 
 ### Worker Options
 
 ```go
 opts := agent.WorkerOptions{
-    AgentName:    "my-agent",           // Agent identifier
-    Version:      "1.0.0",              // Agent version
+    AgentName:    "my-agent",           // Agent identifier (must match dispatch config)
     Namespace:    "production",         // For multi-tenant isolation
-    JobType:      livekit.JobType_JT_ROOM,
+    JobType:      livekit.JobType_JT_ROOM,  // Single job type per worker
     Permissions:  &livekit.ParticipantPermission{
         CanPublish:   true,
         CanSubscribe: true,
     },
     MaxJobs:      10,                   // Maximum concurrent jobs
     Logger:       customLogger,         // Custom logger
-    PingInterval: 10 * time.Second,     // Keepalive interval
 }
 ```
 
-### Using Job Context
+### Room Monitoring Pattern
 
-The SDK provides `JobContext` for easier job management:
+Since room callbacks cannot be modified after connection, use polling patterns for monitoring:
 
 ```go
-func handleJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
-    jobCtx := agent.NewJobContext(ctx, job, room)
+func monitorRoom(ctx context.Context, room *lksdk.Room) {
+    ticker := time.NewTicker(500 * time.Millisecond)
+    defer ticker.Stop()
     
-    // Wait for a specific participant
-    participant, err := jobCtx.WaitForParticipant("user123", 30*time.Second)
-    if err != nil {
-        return err
+    knownParticipants := make(map[string]bool)
+    
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            // Check for new participants
+            for _, p := range room.GetRemoteParticipants() {
+                if !knownParticipants[p.Identity()] {
+                    knownParticipants[p.Identity()] = true
+                    // Handle new participant
+                    log.Printf("New participant: %s", p.Identity())
+                }
+            }
+        }
     }
-    
-    // Publish data to room
-    err = jobCtx.PublishData([]byte("Hello from agent"), true, nil)
-    
-    // Sleep with cancellation support
-    jobCtx.Sleep(5 * time.Second)
-    
-    return nil
 }
 ```
 
@@ -184,6 +210,8 @@ worker := loadBalancer.GetLeastLoadedWorker()
 
 Agents only receive jobs when rooms are created with agent dispatch configuration. Simply starting an agent and joining a room won't trigger job dispatch.
 
+**Note:** LiveKit server in dev mode fully supports agent dispatch. Make sure to include the `Agents` field when creating rooms.
+
 ### Creating Rooms with Agent Dispatch
 
 ```go
@@ -203,41 +231,109 @@ room, err := roomClient.CreateRoom(context.Background(), &livekit.CreateRoomRequ
 
 1. Start the LiveKit server in dev mode:
    ```bash
-   livekit-server --dev
+   docker run --rm -p 7880:7880 livekit/livekit-server --dev
    ```
 
 2. Run your agent:
    ```bash
+   export LIVEKIT_URL="ws://localhost:7880"
+   export LIVEKIT_API_KEY="devkey"
+   export LIVEKIT_API_SECRET="secret"
    go run main.go
    ```
 
 3. Create a room with agent dispatch:
-   ```bash
-   go run examples/create-room-with-agent/main.go
+   ```go
+   room, err := roomClient.CreateRoom(context.Background(), &livekit.CreateRoomRequest{
+       Name: "test-room",
+       Agents: []*livekit.RoomAgentDispatch{{
+           AgentName: "my-agent",  // Must match your agent's name
+       }},
+   })
    ```
 
-4. The agent will now receive and process the job.
+4. The agent will automatically receive and process the job.
 
 ## Examples
 
-### Simple Agent
+The repository includes three complete, working examples that demonstrate different agent types and use cases:
 
-See the [simple agent example](examples/simple-agent/main.go) for a basic implementation that:
-- Joins rooms as an agent participant
-- Sends periodic messages to the room
-- Demonstrates basic agent lifecycle
+### 1. Simple Room Agent
+
+A basic agent that monitors room activity and collects analytics.
 
 ```bash
-cd examples/simple-agent
-go run main.go --url http://localhost:7880 --api-key devkey --api-secret secret
+cd examples/simple-room-agent
+export LIVEKIT_URL="ws://localhost:7880"
+export LIVEKIT_API_KEY="devkey"
+export LIVEKIT_API_SECRET="secret"
+go run .
 ```
 
-### Transcription Agent
+**Features:**
+- Room event monitoring with polling pattern
+- Participant tracking and statistics
+- Data message publishing
+- Graceful shutdown handling
 
-See the [transcription agent example](examples/transcription-agent/main.go) for a more complex implementation that:
-- Connects to audio publishers
-- Demonstrates publisher job handling
-- Shows how to process media streams
+### 2. Participant Monitoring Agent
+
+Provides personalized monitoring for individual participants.
+
+```bash
+cd examples/participant-monitoring-agent
+export LIVEKIT_URL="ws://localhost:7880"
+export LIVEKIT_API_KEY="devkey"
+export LIVEKIT_API_SECRET="secret"
+go run .
+```
+
+**Features:**
+- Individual participant tracking
+- Audio level monitoring & speaking detection
+- Connection quality tracking
+- Personalized welcome messages
+
+### 3. Media Publisher Agent
+
+Demonstrates publishing audio and video content to LiveKit rooms.
+
+```bash
+cd examples/media-publisher-agent
+export LIVEKIT_URL="ws://localhost:7880"
+export LIVEKIT_API_KEY="devkey"
+export LIVEKIT_API_SECRET="secret"
+go run .
+```
+
+**Features:**
+- Audio tone generation (sine waves)
+- Video pattern generation (color bars, etc.)
+- Multiple publishing modes (audio/video/both)
+- Interactive control via data messages
+
+### Running Examples
+
+Each example includes dispatch scripts to create rooms with proper agent configuration:
+
+```bash
+# In one terminal, run the agent
+go run .
+
+# In another terminal, dispatch a job
+go run . dispatch
+```
+
+### Testing All Examples
+
+A comprehensive test script is provided to verify all examples:
+
+```bash
+cd examples
+./test-all-examples.sh
+```
+
+This will build and briefly run each example to ensure they're working correctly.
 
 ## Architecture
 
@@ -250,6 +346,25 @@ The SDK implements the complete LiveKit Agent Protocol:
 5. **Room Participation**: Joins rooms as a special participant
 6. **Status Updates**: Reports job progress and worker load
 7. **Graceful Termination**: Handles job cleanup and disconnection
+
+## Key Implementation Notes
+
+### API Changes from Documentation
+
+This SDK implements the latest LiveKit Agent Protocol with some important differences from older documentation:
+
+1. **JobHandler Interface**: Uses three separate methods instead of a single callback:
+   - `OnJobRequest()` - Decide whether to accept a job
+   - `OnJobAssigned()` - Handle the assigned job
+   - `OnJobTerminated()` - Clean up when job ends
+
+2. **Worker Options**: 
+   - `JobType` (singular) instead of `JobTypes` array
+   - `MaxJobs` instead of `MaxConcurrentJobs`
+
+3. **Room Monitoring**: Callbacks cannot be set after room connection. Use polling patterns instead.
+
+4. **Track Access**: Use `participant.TrackPublications()` instead of `participant.Tracks()`
 
 ## Protocol Compliance
 
@@ -269,6 +384,18 @@ The SDK provides robust error handling:
 - Timeout management
 - Graceful degradation
 
+## Documentation
+
+For detailed developer documentation, see the [docs](docs/) directory:
+- [Getting Started Guide](docs/getting-started.md)
+- [Concepts and Architecture](docs/concepts.md)
+- [Job Handling](docs/job-handling.md)
+- [API Reference](docs/api-reference.md)
+- [Advanced Features](docs/advanced-features.md)
+- [Media Processing](docs/media-processing.md)
+- [Migration Guide](docs/migration-guide.md)
+- [Troubleshooting](docs/troubleshooting.md)
+
 ## Contributing
 
 Contributions are welcome! Please ensure:
@@ -277,5 +404,6 @@ Contributions are welcome! Please ensure:
 - Documentation is updated
 
 ## License
+Author: Alexey Sokolov
+Apache License 2.0. See [LICENSE](LICENSE)
 
-This SDK follows the same license as the LiveKit server project.

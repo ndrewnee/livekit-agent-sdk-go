@@ -18,16 +18,16 @@ import (
 // mockWebSocketServer simulates a LiveKit server for testing
 type mockWebSocketServer struct {
 	*httptest.Server
-	upgrader               websocket.Upgrader
-	mu                     sync.Mutex
-	connections            []*websocket.Conn
-	receivedMsgs           [][]byte
-	responses              chan *livekit.ServerMessage
-	workerID               string
-	simulateErrors         bool
-	closeOnConnect         bool
-	delayResponse          time.Duration
-	suppressRegistration   bool
+	upgrader             websocket.Upgrader
+	mu                   sync.Mutex
+	connections          []*websocket.Conn
+	receivedMsgs         [][]byte
+	responses            chan *livekit.ServerMessage
+	workerID             string
+	simulateErrors       bool
+	closeOnConnect       bool
+	delayResponse        time.Duration
+	suppressRegistration bool
 }
 
 func newMockWebSocketServer() *mockWebSocketServer {
@@ -97,7 +97,7 @@ func (m *mockWebSocketServer) handleConnection(conn *websocket.Conn) {
 			}
 		}
 		m.mu.Unlock()
-		conn.Close()
+		_ = conn.Close()
 	}()
 
 	for {
@@ -134,12 +134,12 @@ func (m *mockWebSocketServer) handleConnection(conn *websocket.Conn) {
 						},
 					},
 				}
-				m.sendMessage(conn, resp)
+				_ = m.sendMessage(conn, resp)
 			} else {
 				// When registration is suppressed, immediately send any queued responses
 				select {
 				case resp := <-m.responses:
-					m.sendMessage(conn, resp)
+					_ = m.sendMessage(conn, resp)
 				default:
 				}
 			}
@@ -158,7 +158,7 @@ func (m *mockWebSocketServer) handleConnection(conn *websocket.Conn) {
 				},
 			}
 			if !m.simulateErrors {
-				m.sendMessage(conn, resp)
+				_ = m.sendMessage(conn, resp)
 			}
 
 		case *livekit.WorkerMessage_Availability:
@@ -171,7 +171,7 @@ func (m *mockWebSocketServer) handleConnection(conn *websocket.Conn) {
 		// Send any queued responses
 		select {
 		case resp := <-m.responses:
-			m.sendMessage(conn, resp)
+			_ = m.sendMessage(conn, resp)
 		default:
 		}
 	}
@@ -230,7 +230,7 @@ func (m *mockWebSocketServer) GetLastWorkerMessage() (*livekit.WorkerMessage, er
 	if len(msgs) == 0 {
 		return nil, fmt.Errorf("no messages received")
 	}
-	
+
 	var msg livekit.WorkerMessage
 	err := proto.Unmarshal(msgs[len(msgs)-1], &msg)
 	return &msg, err
@@ -238,7 +238,7 @@ func (m *mockWebSocketServer) GetLastWorkerMessage() (*livekit.WorkerMessage, er
 
 func (m *mockWebSocketServer) WaitForMessage(msgType string, timeout time.Duration) (*livekit.WorkerMessage, error) {
 	deadline := time.Now().Add(timeout)
-	
+
 	for time.Now().Before(deadline) {
 		msgs := m.GetReceivedMessages()
 		for i := len(msgs) - 1; i >= 0; i-- {
@@ -246,7 +246,7 @@ func (m *mockWebSocketServer) WaitForMessage(msgType string, timeout time.Durati
 			if err := proto.Unmarshal(msgs[i], &msg); err != nil {
 				continue
 			}
-			
+
 			switch msgType {
 			case "register":
 				if msg.GetRegister() != nil {
@@ -272,14 +272,14 @@ func (m *mockWebSocketServer) WaitForMessage(msgType string, timeout time.Durati
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	
+
 	return nil, fmt.Errorf("timeout waiting for %s message", msgType)
 }
 
 func (m *mockWebSocketServer) Close() {
 	m.mu.Lock()
 	for _, conn := range m.connections {
-		conn.Close()
+		_ = conn.Close()
 	}
 	m.mu.Unlock()
 	m.Server.Close()
@@ -299,7 +299,7 @@ func newMockRoomServer() *mockRoomServer {
 	m.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Simulate room API responses
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 		})
 	}))

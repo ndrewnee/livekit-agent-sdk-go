@@ -8,7 +8,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
 )
 
 // WebSocketConn interface for WebSocket operations
@@ -19,15 +18,15 @@ type WebSocketConn interface {
 
 // NetworkHandler provides enhanced network error handling
 type NetworkHandler struct {
-	mu                    sync.RWMutex
-	partialWriteBuffer    []byte
-	partialWriteOffset    int
-	partialWriteMessageType int
-	lastNetworkActivity   time.Time
+	mu                       sync.RWMutex
+	partialWriteBuffer       []byte
+	partialWriteOffset       int
+	partialWriteMessageType  int
+	lastNetworkActivity      time.Time
 	networkPartitionDetected bool
-	dnsFailureCount       int32
-	maxDNSRetries         int
-	partitionTimeout      time.Duration
+	dnsFailureCount          int32
+	maxDNSRetries            int
+	partitionTimeout         time.Duration
 }
 
 // NewNetworkHandler creates a new network handler
@@ -45,7 +44,7 @@ func (n *NetworkHandler) WriteMessageWithRetry(conn WebSocketConn, messageType i
 	defer n.mu.Unlock()
 
 	// Check if we have a partial write in progress
-	if n.partialWriteBuffer != nil && len(n.partialWriteBuffer) > 0 {
+	if len(n.partialWriteBuffer) > 0 {
 		// Resume from partial write
 		if n.partialWriteMessageType != messageType {
 			// Different message type, clear buffer
@@ -66,13 +65,13 @@ func (n *NetworkHandler) WriteMessageWithRetry(conn WebSocketConn, messageType i
 	// Attempt to write
 	err := conn.WriteMessage(messageType, data)
 	if err != nil {
-		// Check if it's a temporary error
+		// Check if it's a temporary error (including timeout)
 		if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
 			// Save for retry
 			n.partialWriteBuffer = data
 			n.partialWriteMessageType = messageType
 			n.partialWriteOffset = 0 // WebSocket doesn't expose partial write offset
-			return fmt.Errorf("partial write, will retry: %w", err)
+			return fmt.Errorf("partial write due to temporary error, will retry: %w", err)
 		}
 
 		// Check for specific network errors
@@ -88,7 +87,7 @@ func (n *NetworkHandler) WriteMessageWithRetry(conn WebSocketConn, messageType i
 	n.clearPartialWrite()
 	n.lastNetworkActivity = time.Now()
 	n.networkPartitionDetected = false
-	
+
 	return nil
 }
 
@@ -103,7 +102,7 @@ func (n *NetworkHandler) clearPartialWrite() {
 func (n *NetworkHandler) HasPartialWrite() bool {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	return n.partialWriteBuffer != nil && len(n.partialWriteBuffer) > 0
+	return len(n.partialWriteBuffer) > 0
 }
 
 // GetPartialWriteData returns the partial write data if any
@@ -139,6 +138,13 @@ func (n *NetworkHandler) UpdateNetworkActivity() {
 	defer n.mu.Unlock()
 	n.lastNetworkActivity = time.Now()
 	n.networkPartitionDetected = false
+}
+
+// SetNetworkPartition sets the network partition state (for testing)
+func (n *NetworkHandler) SetNetworkPartition(detected bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.networkPartitionDetected = detected
 }
 
 // ResolveDNSWithRetry performs DNS resolution with retry logic
@@ -241,10 +247,10 @@ func isNetworkError(err error) bool {
 
 // containsNetError checks if a string contains a substring (case-insensitive)
 func containsNetError(s, substr string) bool {
-	return len(s) >= len(substr) && 
-		(s == substr || 
-		 len(s) > len(substr) && 
-		 (containsNetErrorHelper(s, substr)))
+	return len(s) >= len(substr) &&
+		(s == substr ||
+			len(s) > len(substr) &&
+				(containsNetErrorHelper(s, substr)))
 }
 
 func containsNetErrorHelper(s, substr string) bool {

@@ -46,35 +46,50 @@ import (
 )
 
 func main() {
-    // Create a simple job handler
-    handler := &agent.JobHandlerFunc{
-        OnJob: func(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
-            log.Printf("Agent joined room: %s (Job ID: %s)", room.Name(), job.Id)
-            
-            // Set up room event handlers
-            room.Callback.OnParticipantConnected = func(p *lksdk.RemoteParticipant) {
-                log.Printf("Participant connected: %s", p.Identity())
+    // Create a handler using SimpleUniversalHandler for convenience
+    handler := &agent.SimpleUniversalHandler{
+        JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+            // Accept all jobs and provide agent metadata
+            return true, &agent.JobMetadata{
+                ParticipantIdentity: "my-first-agent",
+                ParticipantName:     "My First Agent",
+                ParticipantMetadata: `{"version": "1.0"}`,
             }
-            
-            room.Callback.OnParticipantDisconnected = func(p *lksdk.RemoteParticipant) {
-                log.Printf("Participant disconnected: %s", p.Identity())
-            }
+        },
+        
+        JobAssignedFunc: func(ctx context.Context, jobCtx *agent.JobContext) error {
+            log.Printf("Agent joined room: %s (Job ID: %s)", jobCtx.Room.Name(), jobCtx.Job.Id)
             
             // Keep the agent in the room
             <-ctx.Done()
-            log.Printf("Agent leaving room: %s", room.Name())
+            log.Printf("Agent leaving room: %s", jobCtx.Room.Name())
             return nil
+        },
+        
+        JobTerminatedFunc: func(ctx context.Context, jobID string) {
+            log.Printf("Job terminated: %s", jobID)
+        },
+        
+        // Handle participant events directly
+        ParticipantJoinedFunc: func(ctx context.Context, participant *lksdk.RemoteParticipant) {
+            log.Printf("Participant joined: %s", participant.Identity())
+        },
+        
+        ParticipantLeftFunc: func(ctx context.Context, participant *lksdk.RemoteParticipant) {
+            log.Printf("Participant left: %s", participant.Identity())
         },
     }
     
-    // Create worker with configuration
-    worker := agent.NewWorker(
+    // Create UniversalWorker with configuration
+    worker := agent.NewUniversalWorker(
         "ws://localhost:7880",  // Your LiveKit server URL
         "your-api-key",         // Your API key
         "your-api-secret",      // Your API secret
         handler,
         agent.WorkerOptions{
             AgentName: "my-first-agent",
+            JobType:   livekit.JobType_JT_ROOM,  // Accept room jobs
+            MaxJobs:   5,                         // Handle up to 5 concurrent jobs
         },
     )
     
@@ -131,11 +146,8 @@ LiveKit supports three types of agent jobs:
 ```go
 worker := agent.NewWorker(serverURL, apiKey, apiSecret, handler, agent.WorkerOptions{
     AgentName:       "my-agent",           // Unique name for your agent
-    MaxConcurrentJobs: 5,                  // Limit concurrent jobs
-    JobTypes:        []livekit.JobType{    // Specify which job types to accept
-        livekit.JobType_JT_ROOM,
-        livekit.JobType_JT_PUBLISHER,
-    },
+    JobType:         livekit.JobType_JT_ROOM,  // Single job type per worker
+    MaxJobs:         5,                    // Maximum concurrent jobs
     Namespace:       "production",         // Namespace for multi-tenant setups
     Version:         "1.0.0",              // Agent version
 })
@@ -148,31 +160,85 @@ worker := agent.NewWorker(serverURL, apiKey, apiSecret, handler, agent.WorkerOpt
 A room agent that monitors room activity:
 
 ```go
-handler := &agent.JobHandlerFunc{
-    OnJob: func(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
-        log.Printf("Monitoring room: %s", room.Name())
-        
-        // Track participants
-        participants := make(map[string]*lksdk.RemoteParticipant)
-        
-        room.Callback.OnParticipantConnected = func(p *lksdk.RemoteParticipant) {
-            participants[p.SID()] = p
-            log.Printf("Participant joined: %s (total: %d)", p.Identity(), len(participants))
+type RoomMonitorHandler struct {
+    participants map[string]*lksdk.RemoteParticipant
+    mu           sync.RWMutex
+}
+
+func (h *RoomMonitorHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+    // Accept room jobs only
+    if job.Type != livekit.JobType_JT_ROOM {
+        return false, nil
+    }
+    return true, &agent.JobMetadata{
+        ParticipantIdentity: "room-monitor",
+        ParticipantName:     "Room Monitor Agent",
+    }
+}
+
+func (h *RoomMonitorHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+    log.Printf("Monitoring room: %s", room.Name())
+    
+    // Initialize participants map
+    h.participants = make(map[string]*lksdk.RemoteParticipant)
+    
+    // Monitor room using polling pattern
+    go h.monitorRoom(ctx, room)
+    
+    // Stay in room until context is cancelled
+    <-ctx.Done()
+    return nil
+}
+
+func (h *RoomMonitorHandler) OnJobTerminated(ctx context.Context, jobID string) {
+    log.Printf("Room monitoring job terminated: %s", jobID)
+}
+
+func (h *RoomMonitorHandler) monitorRoom(ctx context.Context, room *lksdk.Room) {
+    ticker := time.NewTicker(500 * time.Millisecond)
+    defer ticker.Stop()
+    
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            h.mu.Lock()
+            // Check for new participants and track changes
+            currentParticipants := room.GetRemoteParticipants()
+            
+            // Check for new participants
+            for _, p := range currentParticipants {
+                if _, exists := h.participants[p.SID()]; !exists {
+                    h.participants[p.SID()] = p
+                    log.Printf("Participant joined: %s (total: %d)", p.Identity(), len(h.participants))
+                    
+                    // Check their tracks
+                    for _, pub := range p.TrackPublications() {
+                        if remoteTrack := pub.TrackPublication().Track(); remoteTrack != nil {
+                            log.Printf("Track published: %s by %s", pub.TrackPublication().SID(), p.Identity())
+                        }
+                    }
+                }
+            }
+            
+            // Check for disconnected participants
+            for sid, p := range h.participants {
+                found := false
+                for _, current := range currentParticipants {
+                    if current.SID() == sid {
+                        found = true
+                        break
+                    }
+                }
+                if !found {
+                    delete(h.participants, sid)
+                    log.Printf("Participant left: %s (remaining: %d)", p.Identity(), len(h.participants))
+                }
+            }
+            h.mu.Unlock()
         }
-        
-        room.Callback.OnParticipantDisconnected = func(p *lksdk.RemoteParticipant) {
-            delete(participants, p.SID())
-            log.Printf("Participant left: %s (remaining: %d)", p.Identity(), len(participants))
-        }
-        
-        room.Callback.OnTrackPublished = func(publication *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-            log.Printf("Track published: %s by %s", publication.SID(), rp.Identity())
-        }
-        
-        // Stay in room until context is cancelled
-        <-ctx.Done()
-        return nil
-    },
+    }
 }
 ```
 
@@ -181,54 +247,66 @@ handler := &agent.JobHandlerFunc{
 An agent that publishes audio to a room:
 
 ```go
-handler := &agent.JobHandlerFunc{
-    OnJob: func(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
-        // Only handle publisher jobs
-        if job.Type != livekit.JobType_JT_PUBLISHER {
-            return nil
-        }
+type PublisherHandler struct{}
+
+func (h *PublisherHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+    // Only accept publisher jobs
+    if job.Type != livekit.JobType_JT_PUBLISHER {
+        return false, nil
+    }
+    return true, &agent.JobMetadata{
+        ParticipantIdentity: "audio-publisher",
+        ParticipantName:     "Audio Publisher Agent",
+    }
+}
+
+func (h *PublisherHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+    log.Printf("Publishing to room: %s", room.Name())
+    
+    // Create an audio track (example: sine wave generator)
+    track, err := webrtc.NewTrackLocalStaticSample(
+        webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
+        "audio",
+        "agent-audio",
+    )
+    if err != nil {
+        return err
+    }
+    
+    // Publish the track
+    publication, err := room.LocalParticipant.PublishTrack(track, &lksdk.TrackPublicationOptions{
+        Name: "Agent Audio",
+        Source: livekit.TrackSource_MICROPHONE,
+    })
+    if err != nil {
+        return err
+    }
+    
+    log.Printf("Published audio track: %s", publication.SID())
+    
+    // Generate and send audio samples
+    go func() {
+        ticker := time.NewTicker(20 * time.Millisecond)
+        defer ticker.Stop()
         
-        log.Printf("Publishing to room: %s", room.Name())
-        
-        // Create an audio track (example: sine wave generator)
-        track, err := webrtc.NewTrackLocalStaticSample(
-            webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
-            "audio",
-            "agent-audio",
-        )
-        if err != nil {
-            return err
-        }
-        
-        // Publish the track
-        publication, err := room.LocalParticipant.PublishTrack(track, &lksdk.TrackPublicationOptions{
-            Name: "Agent Audio",
-        })
-        if err != nil {
-            return err
-        }
-        
-        log.Printf("Published audio track: %s", publication.SID())
-        
-        // Generate and send audio samples
-        go func() {
-            ticker := time.NewTicker(20 * time.Millisecond)
-            defer ticker.Stop()
-            
-            for {
-                select {
-                case <-ctx.Done():
-                    return
-                case <-ticker.C:
-                    // Generate audio samples here
-                    // This is where you'd integrate with TTS, audio files, etc.
-                }
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case <-ticker.C:
+                // Generate audio samples here
+                // This is where you'd integrate with TTS, audio files, etc.
+                // Example: track.WriteSample(media.Sample{Data: audioData, Duration: 20 * time.Millisecond})
             }
-        }()
-        
-        <-ctx.Done()
-        return nil
-    },
+        }
+    }()
+    
+    <-ctx.Done()
+    return nil
+}
+
+func (h *PublisherHandler) OnJobTerminated(ctx context.Context, jobID string) {
+    log.Printf("Publisher job terminated: %s", jobID)
 }
 ```
 
@@ -244,7 +322,11 @@ worker := agent.NewWorker(
     "devkey",  // Default development key
     "secret",  // Default development secret
     handler,
-    agent.WorkerOptions{AgentName: "dev-agent"},
+    agent.WorkerOptions{
+        AgentName: "dev-agent",
+        JobType:   livekit.JobType_JT_ROOM,
+        MaxJobs:   5,
+    },
 )
 ```
 
@@ -260,7 +342,8 @@ worker := agent.NewWorker(
     handler,
     agent.WorkerOptions{
         AgentName: "production-agent",
-        MaxConcurrentJobs: 10,
+        JobType:   livekit.JobType_JT_ROOM,
+        MaxJobs:   10,
     },
 )
 ```
@@ -270,24 +353,42 @@ worker := agent.NewWorker(
 Always implement proper error handling in your job handler:
 
 ```go
-handler := &agent.JobHandlerFunc{
-    OnJob: func(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
-        // Wrap operations that might fail
-        if err := riskyOperation(); err != nil {
-            // Log the error
-            log.Printf("Error in job %s: %v", job.Id, err)
-            
-            // Decide whether to retry or fail the job
-            if isRetryable(err) {
-                return fmt.Errorf("retryable error: %w", err)
-            }
-            
-            // Non-retryable errors should still be returned
-            return fmt.Errorf("fatal error: %w", err)
+type ErrorHandlingHandler struct{}
+
+func (h *ErrorHandlingHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+    // Validate job before accepting
+    if !isValidJob(job) {
+        log.Printf("Rejecting invalid job: %s", job.Id)
+        return false, nil
+    }
+    
+    return true, &agent.JobMetadata{
+        ParticipantIdentity: "error-handling-agent",
+        ParticipantName:     "Error Handling Agent",
+    }
+}
+
+func (h *ErrorHandlingHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+    // Wrap operations that might fail
+    if err := riskyOperation(); err != nil {
+        // Log the error
+        log.Printf("Error in job %s: %v", job.Id, err)
+        
+        // Decide whether to retry or fail the job
+        if isRetryable(err) {
+            return fmt.Errorf("retryable error: %w", err)
         }
         
-        return nil
-    },
+        // Non-retryable errors should still be returned
+        return fmt.Errorf("fatal error: %w", err)
+    }
+    
+    return nil
+}
+
+func (h *ErrorHandlingHandler) OnJobTerminated(ctx context.Context, jobID string) {
+    // Clean up any resources
+    log.Printf("Cleaning up after job: %s", jobID)
 }
 ```
 
@@ -321,7 +422,7 @@ func main() {
         shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
         defer shutdownCancel()
         
-        worker.Stop(shutdownCtx)
+        worker.Stop()
         
     case err := <-errChan:
         if err != nil {
@@ -364,7 +465,8 @@ func main() {
         handler,
         agent.WorkerOptions{
             AgentName: getEnvOrDefault("AGENT_NAME", "agent"),
-            MaxConcurrentJobs: getIntEnv("MAX_CONCURRENT_JOBS", 5),
+            JobType:   livekit.JobType_JT_ROOM,
+            MaxJobs:   getIntEnv("MAX_JOBS", 5),
         },
     )
 }
@@ -382,21 +484,32 @@ import "github.com/livekit/protocol/logger"
 // Set up logger
 logger.InitializeLogger("info", "production")
 
-handler := &agent.JobHandlerFunc{
-    OnJob: func(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
-        log := logger.GetLogger().WithValues(
-            "jobID", job.Id,
-            "roomName", room.Name(),
-            "jobType", job.Type.String(),
-        )
-        
-        log.Infow("Processing job")
-        
-        // Your agent logic here
-        
-        log.Infow("Job completed successfully")
-        return nil
-    },
+type LoggingHandler struct{}
+
+func (h *LoggingHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+    return true, &agent.JobMetadata{
+        ParticipantIdentity: "logging-agent",
+        ParticipantName:     "Logging Agent",
+    }
+}
+
+func (h *LoggingHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+    log := logger.GetLogger().WithValues(
+        "jobID", job.Id,
+        "roomName", room.Name(),
+        "jobType", job.Type.String(),
+    )
+    
+    log.Infow("Processing job")
+    
+    // Your agent logic here
+    
+    log.Infow("Job completed successfully")
+    return nil
+}
+
+func (h *LoggingHandler) OnJobTerminated(ctx context.Context, jobID string) {
+    logger.GetLogger().Infow("Job terminated", "jobID", jobID)
 }
 ```
 

@@ -28,7 +28,7 @@ import (
 //	controller := NewQualityController()
 //	controller.SetAdaptationPolicy(customPolicy)
 //	controller.StartMonitoring(track, subscription)
-//	
+//
 //	// Quality will be automatically adjusted based on conditions
 //	// Or manually control:
 //	controller.ApplyQualitySettings(track, livekit.VideoQuality_HIGH)
@@ -47,22 +47,22 @@ type QualityController struct {
 // statistics, quality history, and manages adaptation decisions.
 type TrackQualityMonitor struct {
 	// Track is the WebRTC track being monitored
-	Track              *webrtc.TrackRemote
-	
+	Track *webrtc.TrackRemote
+
 	// Subscription contains the track subscription details
-	Subscription       *PublisherTrackSubscription
-	
+	Subscription *PublisherTrackSubscription
+
 	// Stats contains current quality statistics
-	Stats              *TrackQualityStats
-	
+	Stats *TrackQualityStats
+
 	// LastStatsUpdate is when statistics were last updated
-	LastStatsUpdate    time.Time
-	
+	LastStatsUpdate time.Time
+
 	// QualityHistory tracks all quality changes for this track
-	QualityHistory     []QualityChange
-	
+	QualityHistory []QualityChange
+
 	// AdaptationEnabled controls whether automatic adaptation is active
-	AdaptationEnabled  bool
+	AdaptationEnabled bool
 }
 
 // TrackQualityStats contains quality-related statistics.
@@ -71,46 +71,46 @@ type TrackQualityMonitor struct {
 // provide visibility into track performance.
 type TrackQualityStats struct {
 	// CurrentQuality is the current video quality level
-	CurrentQuality    livekit.VideoQuality
-	
+	CurrentQuality livekit.VideoQuality
+
 	// PacketsReceived is the total number of packets received
-	PacketsReceived   uint64
-	
+	PacketsReceived uint64
+
 	// PacketsLost is the total number of packets lost
-	PacketsLost       uint32
-	
+	PacketsLost uint32
+
 	// Bitrate is the current bitrate in bits per second
-	Bitrate           uint64
-	
+	Bitrate uint64
+
 	// FrameRate is the current frame rate
-	FrameRate         float64
-	
+	FrameRate float64
+
 	// FrameWidth is the current frame width in pixels
-	FrameWidth        uint32
-	
+	FrameWidth uint32
+
 	// FrameHeight is the current frame height in pixels
-	FrameHeight       uint32
-	
+	FrameHeight uint32
+
 	// Jitter is the packet jitter in milliseconds
-	Jitter            float64
-	
+	Jitter float64
+
 	// RTT is the round-trip time in milliseconds
-	RTT               float64
-	
+	RTT float64
+
 	// LastKeyFrame is when the last key frame was received
-	LastKeyFrame      time.Time
-	
+	LastKeyFrame time.Time
+
 	// FreezeCount is the number of video freezes detected
-	FreezeCount       uint32
-	
+	FreezeCount uint32
+
 	// PauseCount is the number of video pauses detected
-	PauseCount        uint32
-	
+	PauseCount uint32
+
 	// TotalFreezeTime is the cumulative freeze duration
-	TotalFreezeTime   time.Duration
-	
+	TotalFreezeTime time.Duration
+
 	// TotalPauseTime is the cumulative pause duration
-	TotalPauseTime    time.Duration
+	TotalPauseTime time.Duration
 }
 
 // QualityChange represents a quality level change event.
@@ -120,15 +120,15 @@ type TrackQualityStats struct {
 type QualityChange struct {
 	// FromQuality is the quality level before the change
 	FromQuality livekit.VideoQuality
-	
+
 	// ToQuality is the quality level after the change
-	ToQuality   livekit.VideoQuality
-	
+	ToQuality livekit.VideoQuality
+
 	// Reason describes why the quality was changed
-	Reason      string
-	
+	Reason string
+
 	// Timestamp is when the change occurred
-	Timestamp   time.Time
+	Timestamp time.Time
 }
 
 // QualityAdaptationPolicy defines how quality should be adapted.
@@ -139,49 +139,49 @@ type QualityChange struct {
 // network conditions and use cases.
 type QualityAdaptationPolicy struct {
 	// Thresholds for quality changes
-	
+
 	// LossThresholdUp is the packet loss percentage that triggers quality decrease
-	LossThresholdUp     float64
-	
+	LossThresholdUp float64
+
 	// LossThresholdDown is the packet loss percentage threshold to allow quality increase
-	LossThresholdDown   float64
-	
+	LossThresholdDown float64
+
 	// BitrateThresholdUp is the bitrate utilization percentage to allow quality increase
-	BitrateThresholdUp  float64
-	
+	BitrateThresholdUp float64
+
 	// BitrateThresholdDown is the bitrate utilization percentage that triggers quality decrease
 	BitrateThresholdDown float64
-	
+
 	// RTTThresholdHigh is the RTT in milliseconds that triggers quality decrease
-	RTTThresholdHigh    float64
-	
+	RTTThresholdHigh float64
+
 	// RTTThresholdLow is the RTT in milliseconds threshold to allow quality increase
-	RTTThresholdLow     float64
-	
+	RTTThresholdLow float64
+
 	// Timing parameters
-	
+
 	// StableWindowUp is the time to wait before increasing quality
-	StableWindowUp      time.Duration
-	
+	StableWindowUp time.Duration
+
 	// StableWindowDown is the time to wait before decreasing quality
-	StableWindowDown    time.Duration
-	
+	StableWindowDown time.Duration
+
 	// MinTimeBetweenChanges is the minimum time between quality changes
 	MinTimeBetweenChanges time.Duration
-	
+
 	// Behavior flags
-	
+
 	// PreferTemporalScaling prefers reducing frame rate over resolution
 	PreferTemporalScaling bool
-	
+
 	// AllowDynamicFPS allows frame rate adjustments
-	AllowDynamicFPS      bool
-	
+	AllowDynamicFPS bool
+
 	// MaxQuality is the maximum allowed quality level
-	MaxQuality           livekit.VideoQuality
-	
+	MaxQuality livekit.VideoQuality
+
 	// MinQuality is the minimum allowed quality level
-	MinQuality           livekit.VideoQuality
+	MinQuality livekit.VideoQuality
 }
 
 // DefaultQualityAdaptationPolicy returns a default quality adaptation policy.
@@ -210,9 +210,9 @@ func DefaultQualityAdaptationPolicy() QualityAdaptationPolicy {
 		StableWindowDown:      2 * time.Second,
 		MinTimeBetweenChanges: 3 * time.Second,
 		PreferTemporalScaling: true,
-		AllowDynamicFPS:      true,
-		MaxQuality:           livekit.VideoQuality_HIGH,
-		MinQuality:           livekit.VideoQuality_LOW,
+		AllowDynamicFPS:       true,
+		MaxQuality:            livekit.VideoQuality_HIGH,
+		MinQuality:            livekit.VideoQuality_LOW,
 	}
 }
 
@@ -229,7 +229,7 @@ func NewQualityController() *QualityController {
 		monitors:         make(map[string]*TrackQualityMonitor),
 		adaptationPolicy: DefaultQualityAdaptationPolicy(),
 		updateInterval:   time.Second,
-		stopCh:          make(chan struct{}),
+		stopCh:           make(chan struct{}),
 	}
 }
 
@@ -279,8 +279,8 @@ func (qc *QualityController) StartMonitoring(track *webrtc.TrackRemote, subscrip
 		go qc.monitorLoop()
 	}
 
-	logger := logger.GetLogger()
-	logger.Infow("started quality monitoring", "trackID", track.ID())
+	getLogger := logger.GetLogger()
+	getLogger.Infow("started quality monitoring", "trackID", track.ID())
 }
 
 // StopMonitoring stops monitoring a track's quality.
@@ -302,8 +302,8 @@ func (qc *QualityController) StopMonitoring(track *webrtc.TrackRemote) {
 		qc.stopCh = make(chan struct{})
 	}
 
-	logger := logger.GetLogger()
-	logger.Infow("stopped quality monitoring", "trackID", track.ID())
+	getLogger := logger.GetLogger()
+	getLogger.Infow("stopped quality monitoring", "trackID", track.ID())
 }
 
 // monitorLoop continuously monitors track quality and adapts as needed
@@ -403,8 +403,8 @@ func (qc *QualityController) updateTrackQuality(monitor *TrackQualityMonitor, po
 			monitor.Subscription.CurrentQuality = targetQuality
 			monitor.Subscription.LastQualityChange = now
 
-			logger := logger.GetLogger()
-			logger.Infow("quality adapted",
+			getLogger := logger.GetLogger()
+			getLogger.Infow("quality adapted",
 				"trackID", monitor.Track.ID(),
 				"from", currentQuality.String(),
 				"to", targetQuality.String(),
@@ -416,22 +416,22 @@ func (qc *QualityController) updateTrackQuality(monitor *TrackQualityMonitor, po
 // shouldDecreaseQuality checks if quality should be decreased
 func (monitor *TrackQualityMonitor) shouldDecreaseQuality(policy QualityAdaptationPolicy) bool {
 	stats := monitor.Stats
-	
+
 	// Check freeze events
 	if stats.FreezeCount > 2 {
 		return true
 	}
-	
+
 	// Check bandwidth utilization
 	if stats.Bitrate > 0 && float64(stats.Bitrate) > policy.BitrateThresholdDown*float64(monitor.getTargetBitrate()) {
 		return true
 	}
-	
+
 	// Check jitter
 	if stats.Jitter > 50 { // 50ms jitter threshold
 		return true
 	}
-	
+
 	return false
 }
 
@@ -439,32 +439,32 @@ func (monitor *TrackQualityMonitor) shouldDecreaseQuality(policy QualityAdaptati
 func (monitor *TrackQualityMonitor) shouldIncreaseQuality(policy QualityAdaptationPolicy, lossRatio float64) bool {
 	stats := monitor.Stats
 	now := time.Now()
-	
+
 	// Check stability window
 	if monitor.Subscription.LastQualityChange.Add(policy.StableWindowUp).After(now) {
 		return false
 	}
-	
+
 	// Check packet loss
 	if lossRatio > policy.LossThresholdDown {
 		return false
 	}
-	
+
 	// Check RTT
 	if stats.RTT > policy.RTTThresholdLow {
 		return false
 	}
-	
+
 	// Check bandwidth headroom
 	if stats.Bitrate > 0 && float64(stats.Bitrate) > policy.BitrateThresholdUp*float64(monitor.getTargetBitrate()) {
 		return false
 	}
-	
+
 	// No recent freezes
 	if stats.FreezeCount > 0 {
 		return false
 	}
-	
+
 	return true
 }
 
@@ -552,14 +552,14 @@ func (qc *QualityController) CalculateOptimalQuality(connQuality livekit.Connect
 func (qc *QualityController) ApplyQualitySettings(track *webrtc.TrackRemote, quality livekit.VideoQuality) error {
 	// In the SDK, this would translate to sending UpdateTrackSettings
 	// For now, we'll log the intent
-	logger := logger.GetLogger()
-	logger.Infow("applying quality settings",
+	getLogger := logger.GetLogger()
+	getLogger.Infow("applying quality settings",
 		"trackID", track.ID(),
 		"quality", quality.String())
 
 	// TODO: When SDK supports it, this would call something like:
 	// track.SetPreferredQuality(quality)
-	
+
 	return nil
 }
 
@@ -572,15 +572,15 @@ func (qc *QualityController) ApplyQualitySettings(track *webrtc.TrackRemote, qua
 // Note: Currently logs the intent. Full implementation requires server
 // support for dynamic dimension adjustment.
 func (qc *QualityController) ApplyDimensionSettings(track *webrtc.TrackRemote, width, height uint32) error {
-	logger := logger.GetLogger()
-	logger.Infow("applying dimension settings",
+	getLogger := logger.GetLogger()
+	getLogger.Infow("applying dimension settings",
 		"trackID", track.ID(),
 		"width", width,
 		"height", height)
 
 	// TODO: When SDK supports it, this would call something like:
 	// track.SetPreferredDimensions(width, height)
-	
+
 	return nil
 }
 
@@ -593,14 +593,14 @@ func (qc *QualityController) ApplyDimensionSettings(track *webrtc.TrackRemote, w
 // Note: Currently logs the intent. Full implementation requires server
 // support for dynamic frame rate adjustment.
 func (qc *QualityController) ApplyFrameRateSettings(track *webrtc.TrackRemote, fps float64) error {
-	logger := logger.GetLogger()
-	logger.Infow("applying frame rate settings",
+	getLogger := logger.GetLogger()
+	getLogger.Infow("applying frame rate settings",
 		"trackID", track.ID(),
 		"fps", fps)
 
 	// TODO: When SDK supports it, this would call something like:
 	// track.SetPreferredFrameRate(fps)
-	
+
 	return nil
 }
 
@@ -617,8 +617,8 @@ func (qc *QualityController) EnableAdaptation(trackID string, enabled bool) {
 
 	if monitor, exists := qc.monitors[trackID]; exists {
 		monitor.AdaptationEnabled = enabled
-		logger := logger.GetLogger()
-		logger.Infow("quality adaptation state changed",
+		getLogger := logger.GetLogger()
+		getLogger.Infow("quality adaptation state changed",
 			"trackID", trackID,
 			"enabled", enabled)
 	}

@@ -16,20 +16,20 @@ import (
 
 // MockWebSocketConn implements a mock WebSocket connection for testing
 type MockWebSocketConn struct {
-	mu              sync.Mutex
-	writeErr        error
+	mu               sync.Mutex
+	writeErr         error
 	writeDeadlineErr error
-	writtenMessages [][]byte
-	writeCallCount  int
-	partialWriteAt  int // Simulate partial write at this call number
+	writtenMessages  [][]byte
+	writeCallCount   int
+	partialWriteAt   int // Simulate partial write at this call number
 }
 
 func (m *MockWebSocketConn) WriteMessage(messageType int, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	m.writeCallCount++
-	
+
 	// Simulate partial write
 	if m.partialWriteAt > 0 && m.writeCallCount == m.partialWriteAt {
 		return &net.OpError{
@@ -37,11 +37,11 @@ func (m *MockWebSocketConn) WriteMessage(messageType int, data []byte) error {
 			Err: &tempError{message: "temporary write error"},
 		}
 	}
-	
+
 	if m.writeErr != nil {
 		return m.writeErr
 	}
-	
+
 	m.writtenMessages = append(m.writtenMessages, data)
 	return nil
 }
@@ -73,29 +73,31 @@ func TestNetworkHandlerPartialWrite(t *testing.T) {
 	mockConn := &MockWebSocketConn{
 		partialWriteAt: 1, // Fail on first write
 	}
-	
+
 	// Create a type assertion wrapper
 	conn := &wsConnWrapper{mock: mockConn}
-	
+
 	// First write should fail with temporary error
 	data := []byte("test message")
 	err := handler.WriteMessageWithRetry(conn, websocket.TextMessage, data)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "partial write")
-	
+	if err != nil {
+		assert.Contains(t, err.Error(), "partial write")
+	}
+
 	// Verify partial write was saved
 	assert.True(t, handler.HasPartialWrite())
 	msgType, savedData := handler.GetPartialWriteData()
 	assert.Equal(t, websocket.TextMessage, msgType)
 	assert.Equal(t, data, savedData)
-	
+
 	// Reset mock to succeed
 	mockConn.partialWriteAt = 0
-	
+
 	// Retry should succeed
 	err = handler.WriteMessageWithRetry(conn, websocket.TextMessage, data)
 	assert.NoError(t, err)
-	
+
 	// Verify partial write was cleared
 	assert.False(t, handler.HasPartialWrite())
 }
@@ -103,7 +105,7 @@ func TestNetworkHandlerPartialWrite(t *testing.T) {
 // TestNetworkHandlerNetworkErrors tests network error detection
 func TestNetworkHandlerNetworkErrors(t *testing.T) {
 	handler := NewNetworkHandler()
-	
+
 	testCases := []struct {
 		name     string
 		err      error
@@ -117,14 +119,14 @@ func TestNetworkHandlerNetworkErrors(t *testing.T) {
 		{"normal error", errors.New("some other error"), false},
 		{"nil error", nil, false},
 	}
-	
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			mockConn := &MockWebSocketConn{writeErr: tc.err}
 			conn := &wsConnWrapper{mock: mockConn}
-			
+
 			err := handler.WriteMessageWithRetry(conn, websocket.TextMessage, []byte("test"))
-			
+
 			if tc.expected {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), "network error detected")
@@ -141,22 +143,22 @@ func TestNetworkHandlerNetworkErrors(t *testing.T) {
 // TestNetworkPartitionDetection tests network partition detection
 func TestNetworkPartitionDetection(t *testing.T) {
 	handler := NewNetworkHandler()
-	
+
 	// Initially no partition
 	assert.False(t, handler.DetectNetworkPartition())
-	
+
 	// Update activity
 	handler.UpdateNetworkActivity()
 	assert.False(t, handler.DetectNetworkPartition())
-	
+
 	// Manually set partition detected
 	handler.networkPartitionDetected = true
 	assert.True(t, handler.DetectNetworkPartition())
-	
+
 	// Update activity should clear partition flag
 	handler.UpdateNetworkActivity()
 	assert.False(t, handler.DetectNetworkPartition())
-	
+
 	// Test timeout-based detection
 	handler.partitionTimeout = 100 * time.Millisecond
 	handler.lastNetworkActivity = time.Now().Add(-200 * time.Millisecond)
@@ -167,26 +169,26 @@ func TestNetworkPartitionDetection(t *testing.T) {
 func TestDNSResolutionWithRetry(t *testing.T) {
 	handler := NewNetworkHandler()
 	handler.maxDNSRetries = 2
-	
+
 	ctx := context.Background()
-	
+
 	// Test successful resolution
 	addrs, err := handler.ResolveDNSWithRetry(ctx, "localhost")
 	assert.NoError(t, err)
 	assert.NotEmpty(t, addrs)
 	assert.Equal(t, int32(0), handler.GetDNSFailureCount())
-	
+
 	// Test non-existent host (should fail after retries)
 	addrs, err = handler.ResolveDNSWithRetry(ctx, "non-existent-host-12345.invalid")
 	assert.Error(t, err)
 	assert.Empty(t, addrs)
 	assert.Greater(t, handler.GetDNSFailureCount(), int32(0))
-	
+
 	// Test context cancellation
 	cancelCtx, cancel := context.WithCancel(context.Background())
 	cancel()
-	
-	addrs, err = handler.ResolveDNSWithRetry(cancelCtx, "example.com")
+
+	_, err = handler.ResolveDNSWithRetry(cancelCtx, "example.com")
 	assert.Error(t, err)
 	assert.Equal(t, context.Canceled, err)
 }
@@ -195,28 +197,28 @@ func TestDNSResolutionWithRetry(t *testing.T) {
 func TestNetworkMonitor(t *testing.T) {
 	handler := NewNetworkHandler()
 	monitor := NewNetworkMonitor(handler, 50*time.Millisecond)
-	
+
 	partitionDetected := false
 	var mu sync.Mutex
-	
+
 	monitor.Start(func() {
 		mu.Lock()
 		partitionDetected = true
 		mu.Unlock()
 	})
-	
+
 	// Simulate network partition
-	handler.networkPartitionDetected = true
-	
+	handler.SetNetworkPartition(true)
+
 	// Wait for monitor to detect
 	time.Sleep(100 * time.Millisecond)
-	
+
 	mu.Lock()
 	detected := partitionDetected
 	mu.Unlock()
-	
+
 	assert.True(t, detected)
-	
+
 	// Stop monitor
 	monitor.Stop()
 }
@@ -229,15 +231,15 @@ func TestRetryableWriteMessage(t *testing.T) {
 		Retries:     0,
 		MaxRetries:  3,
 	}
-	
+
 	// Should be able to retry
 	assert.True(t, msg.CanRetry())
-	
+
 	// Increment retries
 	msg.IncrementRetries()
 	assert.Equal(t, 1, msg.Retries)
 	assert.True(t, msg.CanRetry())
-	
+
 	// Max out retries
 	msg.Retries = 3
 	assert.False(t, msg.CanRetry())
@@ -246,17 +248,17 @@ func TestRetryableWriteMessage(t *testing.T) {
 // TestPartialWriteBufferClear tests clearing partial write buffer
 func TestPartialWriteBufferClear(t *testing.T) {
 	handler := NewNetworkHandler()
-	
+
 	// Set partial write data
 	handler.partialWriteBuffer = []byte("partial data")
 	handler.partialWriteMessageType = websocket.TextMessage
 	handler.partialWriteOffset = 5
-	
+
 	assert.True(t, handler.HasPartialWrite())
-	
+
 	// Clear
 	handler.clearPartialWrite()
-	
+
 	assert.False(t, handler.HasPartialWrite())
 	msgType, data := handler.GetPartialWriteData()
 	assert.Equal(t, 0, msgType)
@@ -270,10 +272,12 @@ func TestWriteDeadlineError(t *testing.T) {
 		writeDeadlineErr: errors.New("deadline error"),
 	}
 	conn := &wsConnWrapper{mock: mockConn}
-	
+
 	err := handler.WriteMessageWithRetry(conn, websocket.TextMessage, []byte("test"))
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to set write deadline")
+	if err != nil {
+		assert.Contains(t, err.Error(), "failed to set write deadline")
+	}
 }
 
 // wsConnWrapper wraps mock connection to implement minimal websocket.Conn interface

@@ -13,25 +13,25 @@ import (
 type ActivityType string
 
 const (
-	ActivityTypeJoined            ActivityType = "joined"
-	ActivityTypeLeft              ActivityType = "left"
-	ActivityTypeTrackPublished    ActivityType = "track_published"
-	ActivityTypeTrackUnpublished  ActivityType = "track_unpublished"
-	ActivityTypeDataReceived      ActivityType = "data_received"
-	ActivityTypeSpeaking          ActivityType = "speaking"
-	ActivityTypeMetadataChanged   ActivityType = "metadata_changed"
+	ActivityTypeJoined           ActivityType = "joined"
+	ActivityTypeLeft             ActivityType = "left"
+	ActivityTypeTrackPublished   ActivityType = "track_published"
+	ActivityTypeTrackUnpublished ActivityType = "track_unpublished"
+	ActivityTypeDataReceived     ActivityType = "data_received"
+	ActivityTypeSpeaking         ActivityType = "speaking"
+	ActivityTypeMetadataChanged  ActivityType = "metadata_changed"
 )
 
 // MultiParticipantCoordinator coordinates activities across multiple participants
 type MultiParticipantCoordinator struct {
-	mu                 sync.RWMutex
-	participants       map[string]*CoordinatedParticipant
-	groups             map[string]*ParticipantGroup
-	interactions       []ParticipantInteraction
-	coordinationRules  []CoordinationRule
-	eventHandlers      map[string][]CoordinationEventHandler
-	activityThreshold  time.Duration
-	interactionWindow  time.Duration
+	mu                sync.RWMutex
+	participants      map[string]*CoordinatedParticipant
+	groups            map[string]*ParticipantGroup
+	interactions      []ParticipantInteraction
+	coordinationRules []CoordinationRule
+	eventHandlers     map[string][]CoordinationEventHandler
+	activityThreshold time.Duration
+	interactionWindow time.Duration
 }
 
 // CoordinatedParticipant represents a participant in the coordination system
@@ -65,35 +65,35 @@ type ParticipantGroup struct {
 
 // ParticipantInteraction represents an interaction between participants
 type ParticipantInteraction struct {
-	From        string
-	To          string
-	Type        string
-	Timestamp   time.Time
+	From          string
+	To            string
+	Type          string
+	Timestamp     time.Time
 	Bidirectional bool
-	Data        interface{}
+	Data          interface{}
 }
 
 // CoordinationRule defines rules for participant coordination
 type CoordinationRule interface {
 	// Evaluate evaluates if the rule applies to the given participants
 	Evaluate(participants map[string]*CoordinatedParticipant) (bool, []CoordinationAction)
-	
+
 	// GetName returns the rule name
 	GetName() string
 }
 
 // CoordinationAction represents an action to take based on coordination rules
 type CoordinationAction struct {
-	Type        string
-	Target      string
-	Parameters  map[string]interface{}
+	Type       string
+	Target     string
+	Parameters map[string]interface{}
 }
 
 // GroupRule defines rules for participant groups
 type GroupRule interface {
 	// CanJoinGroup checks if a participant can join the group
 	CanJoinGroup(participant *CoordinatedParticipant, group *ParticipantGroup) bool
-	
+
 	// OnGroupChange is called when group membership changes
 	OnGroupChange(group *ParticipantGroup, added, removed []string)
 }
@@ -103,20 +103,20 @@ type CoordinationEventHandler func(event CoordinationEvent)
 
 // CoordinationEvent represents a coordination event
 type CoordinationEvent struct {
-	Type        string
-	Timestamp   time.Time
+	Type         string
+	Timestamp    time.Time
 	Participants []string
-	Data        map[string]interface{}
+	Data         map[string]interface{}
 }
 
 // NewMultiParticipantCoordinator creates a new coordinator
 func NewMultiParticipantCoordinator() *MultiParticipantCoordinator {
 	return &MultiParticipantCoordinator{
 		participants:      make(map[string]*CoordinatedParticipant),
-		groups:           make(map[string]*ParticipantGroup),
-		interactions:     make([]ParticipantInteraction, 0),
+		groups:            make(map[string]*ParticipantGroup),
+		interactions:      make([]ParticipantInteraction, 0),
 		coordinationRules: make([]CoordinationRule, 0),
-		eventHandlers:    make(map[string][]CoordinationEventHandler),
+		eventHandlers:     make(map[string][]CoordinationEventHandler),
 		activityThreshold: 30 * time.Second,
 		interactionWindow: 5 * time.Minute,
 	}
@@ -165,7 +165,7 @@ func (c *MultiParticipantCoordinator) UnregisterParticipant(identity string) {
 	for _, groupID := range participant.Groups {
 		if group, exists := c.groups[groupID]; exists {
 			delete(group.Participants, identity)
-			
+
 			// Check if group should be disbanded
 			if len(group.Participants) == 0 {
 				delete(c.groups, groupID)
@@ -281,8 +281,8 @@ func (c *MultiParticipantCoordinator) CreateGroup(id, name string, metadata map[
 
 	c.groups[id] = group
 
-	logger := logger.GetLogger()
-	logger.Infow("created participant group",
+	getLogger := logger.GetLogger()
+	getLogger.Infow("created participant group",
 		"id", id,
 		"name", name)
 
@@ -326,7 +326,7 @@ func (c *MultiParticipantCoordinator) AddParticipantToGroup(identity, groupID st
 		Timestamp:    time.Now(),
 		Participants: []string{identity},
 		Data: map[string]interface{}{
-			"group_id": groupID,
+			"group_id":   groupID,
 			"group_size": len(group.Participants),
 		},
 	})
@@ -351,7 +351,7 @@ func (c *MultiParticipantCoordinator) RemoveParticipantFromGroup(identity, group
 
 	// Remove from group
 	delete(group.Participants, identity)
-	
+
 	// Remove from participant's group list
 	newGroups := make([]string, 0)
 	for _, g := range participant.Groups {
@@ -470,8 +470,8 @@ func (c *MultiParticipantCoordinator) GetActivityMetrics() ActivityMetrics {
 	defer c.mu.RUnlock()
 
 	metrics := ActivityMetrics{
-		TotalActivities:  0,
-		ActivitiesByType: make(map[ActivityType]int64),
+		TotalActivities:    0,
+		ActivitiesByType:   make(map[ActivityType]int64),
 		ActiveParticipants: 0,
 	}
 
@@ -481,7 +481,7 @@ func (c *MultiParticipantCoordinator) GetActivityMetrics() ActivityMetrics {
 		if participant.LastActivity.After(time.Now().Add(-c.activityThreshold)) {
 			metrics.ActiveParticipants++
 		}
-		
+
 		for _, activity := range participant.ActivityHistory {
 			metrics.ActivitiesByType[activity.Type]++
 		}
@@ -534,8 +534,8 @@ func (c *MultiParticipantCoordinator) checkAutoGrouping(participant *Coordinated
 	if participant.Participant != nil && participant.Participant.Metadata() != "" {
 		// Parse metadata and check for group tags
 		// This is a simplified example
-		logger := logger.GetLogger()
-		logger.Debugw("checking auto-grouping for participant",
+		getLogger := logger.GetLogger()
+		getLogger.Debugw("checking auto-grouping for participant",
 			"identity", participant.Identity,
 			"metadata", participant.Participant.Metadata())
 	}
@@ -554,8 +554,8 @@ func (c *MultiParticipantCoordinator) evaluateRules() {
 
 // executeAction executes a coordination action
 func (c *MultiParticipantCoordinator) executeAction(action CoordinationAction) {
-	logger := logger.GetLogger()
-	logger.Debugw("executing coordination action",
+	getLogger := logger.GetLogger()
+	getLogger.Debugw("executing coordination action",
 		"type", action.Type,
 		"target", action.Target,
 		"parameters", action.Parameters)
@@ -588,7 +588,7 @@ func (c *MultiParticipantCoordinator) emitEvent(eventType string, event Coordina
 
 // ProximityRule groups participants based on interaction frequency
 type ProximityRule struct {
-	name              string
+	name                 string
 	interactionThreshold int
 	timeWindow           time.Duration
 }
@@ -598,7 +598,7 @@ func NewProximityRule(threshold int, window time.Duration) *ProximityRule {
 	return &ProximityRule{
 		name:                 "proximity_grouping",
 		interactionThreshold: threshold,
-		timeWindow:          window,
+		timeWindow:           window,
 	}
 }
 
@@ -678,8 +678,8 @@ func (r *SizeBasedGroupRule) CanJoinGroup(participant *CoordinatedParticipant, g
 func (r *SizeBasedGroupRule) OnGroupChange(group *ParticipantGroup, added, removed []string) {
 	// Log group changes
 	if len(added) > 0 || len(removed) > 0 {
-		logger := logger.GetLogger()
-		logger.Debugw("group membership changed",
+		getLogger := logger.GetLogger()
+		getLogger.Debugw("group membership changed",
 			"group", group.ID,
 			"size", len(group.Participants),
 			"added", added,

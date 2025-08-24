@@ -129,7 +129,8 @@ func deployRegionalWorkers(configs []RegionalWorkerConfig) []*agent.Worker {
                 handler,
                 agent.WorkerOptions{
                     AgentName: fmt.Sprintf("%s-worker-%d", config.Region, i),
-                    MaxConcurrentJobs: config.MaxJobsPerWorker,
+                    JobType: livekit.JobType_JT_ROOM,
+                    MaxJobs: config.MaxJobsPerWorker,
                     Metadata: map[string]string{
                         "region": config.Region,
                         "zone":   getAvailabilityZone(),
@@ -224,7 +225,7 @@ type CheckpointingHandler struct {
     storage           CheckpointStorage
 }
 
-func (h *CheckpointingHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *CheckpointingHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
     // Create checkpoint manager
     checkpoint := agent.NewJobCheckpoint(job.Id)
     
@@ -338,7 +339,7 @@ worker := agent.NewWorker(url, key, secret, handler, agent.WorkerOptions{
 })
 
 // Or use in handler
-func (h *MyHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *MyHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
     // Check resources before intensive operation
     if err := h.limiter.CheckMemory(); err != nil {
         return &agent.RetryableError{
@@ -373,7 +374,7 @@ type MemoryAwareHandler struct {
     gcThreshold   uint64
 }
 
-func (h *MemoryAwareHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *MemoryAwareHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
     // Monitor memory usage
     ticker := time.NewTicker(10 * time.Second)
     defer ticker.Stop()
@@ -794,7 +795,7 @@ type TracingHandler struct {
     handler agent.JobHandler
 }
 
-func (h *TracingHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *TracingHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
     // Start span
     ctx, span := h.tracer.Start(ctx, "job.process",
         trace.WithAttributes(
@@ -809,7 +810,7 @@ func (h *TracingHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksd
     span.AddEvent("job.started")
     
     // Process job
-    err := h.handler.OnJob(ctx, job, room)
+    err := h.handler.OnJobAssigned(ctx, job, room)
     
     if err != nil {
         span.RecordError(err)
@@ -883,7 +884,7 @@ type RateLimitedHandler struct {
     mu      sync.RWMutex
 }
 
-func (h *RateLimitedHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *RateLimitedHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
     // Global rate limit
     if err := h.limiter.Wait(ctx); err != nil {
         return &agent.RetryableError{
@@ -901,7 +902,7 @@ func (h *RateLimitedHandler) OnJob(ctx context.Context, job *livekit.Job, room *
         }
     }
     
-    return h.handler.OnJob(ctx, job, room)
+    return h.handler.OnJobAssigned(ctx, job, room)
 }
 
 func (h *RateLimitedHandler) getRoomLimiter(roomName string) *rate.Limiter {

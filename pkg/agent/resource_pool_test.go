@@ -19,7 +19,12 @@ func TestResourcePool(t *testing.T) {
 		MaxIdleTime: 1 * time.Minute,
 	})
 	assert.NoError(t, err)
-	defer pool.Close()
+	defer func(pool *ResourcePool) {
+		err := pool.Close()
+		if err != nil {
+			t.Errorf("Failed to close pool: %v", err)
+		}
+	}(pool)
 
 	// Check initial state
 	assert.Equal(t, 2, pool.Size())
@@ -51,7 +56,12 @@ func TestResourcePoolMaxSize(t *testing.T) {
 		MaxIdleTime: 1 * time.Minute,
 	})
 	assert.NoError(t, err)
-	defer pool.Close()
+	defer func(pool *ResourcePool) {
+		err := pool.Close()
+		if err != nil {
+			t.Errorf("Failed to close pool: %v", err)
+		}
+	}(pool)
 
 	ctx := context.Background()
 	resources := make([]Resource, 0)
@@ -88,14 +98,19 @@ func TestResourcePoolValidation(t *testing.T) {
 		MaxIdleTime: 1 * time.Minute,
 	})
 	assert.NoError(t, err)
-	defer pool.Close()
+	defer func(pool *ResourcePool) {
+		err := pool.Close()
+		if err != nil {
+			t.Errorf("Failed to close pool: %v", err)
+		}
+	}(pool)
 
 	ctx := context.Background()
 
 	// Acquire and modify resource to make it unhealthy
 	resource, err := pool.Acquire(ctx)
 	assert.NoError(t, err)
-	
+
 	workerRes := resource.(*WorkerResource)
 	workerRes.mu.Lock()
 	workerRes.healthy = false
@@ -104,10 +119,10 @@ func TestResourcePoolValidation(t *testing.T) {
 	// Release unhealthy resource
 	initialDestroyed := pool.Stats()["destroyed"]
 	pool.Release(resource)
-	
+
 	// Should have been destroyed
 	assert.Equal(t, initialDestroyed+1, pool.Stats()["destroyed"])
-	
+
 	// Pool should maintain minimum size
 	time.Sleep(100 * time.Millisecond) // Allow async creation
 	assert.GreaterOrEqual(t, pool.Size(), 1)
@@ -122,7 +137,12 @@ func TestResourcePoolConcurrency(t *testing.T) {
 		MaxIdleTime: 1 * time.Minute,
 	})
 	assert.NoError(t, err)
-	defer pool.Close()
+	defer func(pool *ResourcePool) {
+		err := pool.Close()
+		if err != nil {
+			t.Errorf("Failed to close pool: %v", err)
+		}
+	}(pool)
 
 	ctx := context.Background()
 	var wg sync.WaitGroup
@@ -133,10 +153,10 @@ func TestResourcePoolConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			
+
 			// Add some jitter to avoid all goroutines hitting at once
 			time.Sleep(time.Duration(id) * time.Millisecond)
-			
+
 			resource, err := pool.Acquire(ctx)
 			if err != nil {
 				// It's OK if we hit capacity limits in concurrent test
@@ -145,10 +165,10 @@ func TestResourcePoolConcurrency(t *testing.T) {
 				}
 				return
 			}
-			
+
 			// Simulate work
 			time.Sleep(10 * time.Millisecond)
-			
+
 			pool.Release(resource)
 		}(i)
 	}
@@ -175,7 +195,12 @@ func TestResourcePoolIdleCleanup(t *testing.T) {
 		MaxIdleTime: 200 * time.Millisecond, // Very short for testing
 	})
 	assert.NoError(t, err)
-	defer pool.Close()
+	defer func(pool *ResourcePool) {
+		err := pool.Close()
+		if err != nil {
+			t.Errorf("Failed to close pool: %v", err)
+		}
+	}(pool)
 
 	ctx := context.Background()
 
@@ -234,7 +259,7 @@ func TestWorkerResourceFactory(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, res)
 		resources[i] = res
-		
+
 		// Check unique IDs
 		workerRes := res.(*WorkerResource)
 		assert.Contains(t, workerRes.ID, "worker-")
@@ -252,7 +277,9 @@ func TestWorkerResourceFactory(t *testing.T) {
 	}
 	err = factory.Validate(oldResource)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "too old")
+	if err != nil {
+		assert.Contains(t, err.Error(), "too old")
+	}
 
 	// Test overused resource validation
 	overusedResource := &WorkerResource{
@@ -262,7 +289,9 @@ func TestWorkerResourceFactory(t *testing.T) {
 	}
 	err = factory.Validate(overusedResource)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "exceeded use limit")
+	if err != nil {
+		assert.Contains(t, err.Error(), "exceeded use limit")
+	}
 }
 
 // TestResourcePoolStats tests pool statistics
@@ -274,11 +303,16 @@ func TestResourcePoolStats(t *testing.T) {
 		MaxIdleTime: 1 * time.Minute,
 	})
 	assert.NoError(t, err)
-	defer pool.Close()
+	defer func(pool *ResourcePool) {
+		err := pool.Close()
+		if err != nil {
+			t.Errorf("Failed to close pool: %v", err)
+		}
+	}(pool)
 
 	ctx := context.Background()
 	stats := pool.Stats()
-	
+
 	// Initial stats
 	assert.Equal(t, int64(2), stats["created"])
 	assert.Equal(t, int64(2), stats["available"])
@@ -298,7 +332,7 @@ func TestResourcePoolStats(t *testing.T) {
 	workerRes.mu.Lock()
 	workerRes.healthy = false
 	workerRes.mu.Unlock()
-	
+
 	pool.Release(resource)
 	stats = pool.Stats()
 	assert.Equal(t, int64(1), stats["destroyed"])
@@ -315,11 +349,11 @@ func TestResourcePoolClose(t *testing.T) {
 	assert.NoError(t, err)
 
 	ctx := context.Background()
-	
+
 	// Acquire a resource
 	resource, err := pool.Acquire(ctx)
 	assert.NoError(t, err)
-	
+
 	// Close the pool
 	err = pool.Close()
 	assert.NoError(t, err)

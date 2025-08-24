@@ -47,11 +47,11 @@ func NewTrackSubscriptionManager() *TrackSubscriptionManager {
 		subscribeAudio: true,
 		subscribeVideo: true,
 		sourcePriorities: map[livekit.TrackSource]int{
-			livekit.TrackSource_CAMERA:     100,
-			livekit.TrackSource_MICROPHONE: 100,
-			livekit.TrackSource_SCREEN_SHARE: 90,
+			livekit.TrackSource_CAMERA:             100,
+			livekit.TrackSource_MICROPHONE:         100,
+			livekit.TrackSource_SCREEN_SHARE:       90,
 			livekit.TrackSource_SCREEN_SHARE_AUDIO: 90,
-			livekit.TrackSource_UNKNOWN:    50,
+			livekit.TrackSource_UNKNOWN:            50,
 		},
 		filters: make([]TrackSubscriptionFilter, 0),
 	}
@@ -115,7 +115,7 @@ func (tm *TrackSubscriptionManager) ClearFilters() {
 // ShouldAutoSubscribe determines if a track should be automatically subscribed based
 // on the current configuration, filters, and track properties. This method evaluates:
 // 1. Whether auto-subscription is enabled
-// 2. Track type (audio/video) preferences  
+// 2. Track type (audio/video) preferences
 // 3. All custom filters in order
 // Returns true if the track should be subscribed, false otherwise.
 func (tm *TrackSubscriptionManager) ShouldAutoSubscribe(publication *lksdk.RemoteTrackPublication) bool {
@@ -206,8 +206,8 @@ func (cm *ConnectionQualityMonitor) StartMonitoring(participant *lksdk.RemotePar
 	cm.lastUpdate = time.Now()
 	cm.qualityHistory = make([]QualityMeasurement, 0)
 
-	logger := logger.GetLogger()
-	logger.Infow("started connection quality monitoring",
+	getLogger := logger.GetLogger()
+	getLogger.Infow("started connection quality monitoring",
 		"participant", participant.Identity())
 }
 
@@ -219,8 +219,8 @@ func (cm *ConnectionQualityMonitor) StopMonitoring() {
 	defer cm.mu.Unlock()
 
 	if cm.participant != nil {
-		logger := logger.GetLogger()
-		logger.Infow("stopped connection quality monitoring",
+		getLogger := logger.GetLogger()
+		getLogger.Infow("stopped connection quality monitoring",
 			"participant", cm.participant.Identity())
 	}
 
@@ -280,7 +280,7 @@ func (cm *ConnectionQualityMonitor) GetCurrentQuality() livekit.ConnectionQualit
 func (cm *ConnectionQualityMonitor) GetQualityHistory() []QualityMeasurement {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
-	
+
 	// Return a copy
 	result := make([]QualityMeasurement, len(cm.qualityHistory))
 	copy(result, cm.qualityHistory)

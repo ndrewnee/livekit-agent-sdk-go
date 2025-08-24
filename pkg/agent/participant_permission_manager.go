@@ -42,14 +42,14 @@ type PermissionChange struct {
 type PermissionPolicy interface {
 	// EvaluatePermissionRequest evaluates if a permission change should be allowed
 	EvaluatePermissionRequest(identity string, current, requested *livekit.ParticipantPermission) (bool, string)
-	
+
 	// GetDefaultPermissions returns default permissions for a participant
 	GetDefaultPermissions(identity string) *livekit.ParticipantPermission
 }
 
 // AgentCapabilities defines what the agent is allowed to do
 type AgentCapabilities struct {
-	CanManagePermissions   bool
+	CanManagePermissions  bool
 	CanSendData           bool
 	CanSubscribeToTracks  bool
 	CanPublishTracks      bool
@@ -71,10 +71,10 @@ func NewParticipantPermissionManager() *ParticipantPermissionManager {
 		},
 		agentCaps: &AgentCapabilities{
 			CanManagePermissions: true,
-			CanSendData:         true,
+			CanSendData:          true,
 			CanSubscribeToTracks: true,
-			CanPublishTracks:    true,
-			MaxDataMessageSize:  15 * 1024, // 15KB default
+			CanPublishTracks:     true,
+			MaxDataMessageSize:   15 * 1024, // 15KB default
 		},
 	}
 }
@@ -104,7 +104,7 @@ func (m *ParticipantPermissionManager) UpdateParticipantPermissions(identity str
 			Approved:  true,
 		}
 		existing.ChangeHistory = append(existing.ChangeHistory, change)
-		
+
 		// Keep only last 10 changes
 		if len(existing.ChangeHistory) > 10 {
 			existing.ChangeHistory = existing.ChangeHistory[len(existing.ChangeHistory)-10:]
@@ -181,7 +181,7 @@ func (m *ParticipantPermissionManager) ValidatePermissions(perms *livekit.Partic
 			livekit.TrackSource_SCREEN_SHARE:       true,
 			livekit.TrackSource_SCREEN_SHARE_AUDIO: true,
 		}
-		
+
 		for _, source := range perms.CanPublishSources {
 			if !validSources[source] {
 				return fmt.Errorf("invalid track source: %v", source)
@@ -219,7 +219,7 @@ func (m *ParticipantPermissionManager) RequestPermissionChange(identity string, 
 	// Evaluate against policies
 	approved := true
 	var reason string
-	
+
 	for _, policy := range m.policies {
 		policyApproved, policyReason := policy.EvaluatePermissionRequest(identity, participant.Current, requested)
 		if !policyApproved {
@@ -240,8 +240,8 @@ func (m *ParticipantPermissionManager) RequestPermissionChange(identity string, 
 	participant.ChangeHistory = append(participant.ChangeHistory, change)
 
 	if approved {
-		logger := logger.GetLogger()
-		logger.Infow("permission change approved",
+		getLogger := logger.GetLogger()
+		getLogger.Infow("permission change approved",
 			"identity", identity,
 			"changes", describePermissionChanges(participant.Current, requested))
 	}
@@ -387,7 +387,7 @@ func (p *TimeBasedPolicy) GetDefaultPermissions(identity string) *livekit.Partic
 // describePermissionChanges describes what changed between two permission sets
 func describePermissionChanges(from, to *livekit.ParticipantPermission) string {
 	changes := []string{}
-	
+
 	if from.CanSubscribe != to.CanSubscribe {
 		changes = append(changes, fmt.Sprintf("subscribe: %v->%v", from.CanSubscribe, to.CanSubscribe))
 	}
@@ -400,7 +400,7 @@ func describePermissionChanges(from, to *livekit.ParticipantPermission) string {
 	if from.Hidden != to.Hidden {
 		changes = append(changes, fmt.Sprintf("hidden: %v->%v", from.Hidden, to.Hidden))
 	}
-	
+
 	if len(changes) == 0 {
 		return "no changes"
 	}

@@ -26,50 +26,104 @@ Understanding the job lifecycle is crucial for building reliable agents:
 | JS_SUCCESS | Job completed successfully | None (terminal) |
 | JS_FAILED | Job failed | None (terminal) |
 
-## Implementing Job Handlers
+## Implementing Job Handlers with UniversalWorker
 
 ### Basic Handler Structure
 
 ```go
-type JobHandler interface {
-    OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error
+type UniversalHandler interface {
+    // Called when a job is available - decide whether to accept it
+    OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata)
+    
+    // Called when the job is assigned - perform the actual work
+    OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error
+    
+    // Called when the job is terminated - clean up resources
+    OnJobTerminated(ctx context.Context, jobID string)
+    
+    // Optional participant event handlers
+    OnParticipantJoined(ctx context.Context, participant *lksdk.RemoteParticipant)
+    OnParticipantLeft(ctx context.Context, participant *lksdk.RemoteParticipant)
+    OnTrackPublished(ctx context.Context, publication *lksdk.RemoteTrackPublication, participant *lksdk.RemoteParticipant)
+    OnTrackUnpublished(ctx context.Context, publication *lksdk.RemoteTrackPublication, participant *lksdk.RemoteParticipant)
 }
 ```
 
-The handler receives:
-- **Context**: For cancellation and deadline management
-- **Job**: Contains job details and metadata
-- **Room**: Pre-connected room instance
+The handler methods:
+- **OnJobRequest**: Decide whether to accept the job and provide agent metadata
+- **OnJobAssigned**: Main processing logic with JobContext containing job, room, and metadata
+- **OnJobTerminated**: Clean up when job ends (voluntarily or involuntarily)
+- **Event handlers**: Optional methods for participant and track events
 
-### Function-Based Handler
+### Simple Handler Implementation
 
-For simple use cases, use `JobHandlerFunc`:
+Using SimpleUniversalHandler for convenience:
 
 ```go
-handler := &agent.JobHandlerFunc{
-    OnJob: func(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
-        log.Printf("Processing job %s for room %s", job.Id, room.Name())
+handler := &agent.SimpleUniversalHandler{
+    JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+        // Accept all jobs
+        return true, &agent.JobMetadata{
+            ParticipantIdentity: "simple-agent",
+            ParticipantName:     "Simple Agent",
+        }
+    },
+    
+    JobAssignedFunc: func(ctx context.Context, jobCtx *agent.JobContext) error {
+        log.Printf("Processing job %s for room %s", jobCtx.Job.Id, jobCtx.Room.Name())
         
         // Your job logic here
+        <-ctx.Done()
         
         return nil // Success
     },
+    
+    JobTerminatedFunc: func(ctx context.Context, jobID string) {
+        log.Printf("Job %s terminated", jobID)
+    },
+    
+    // Optional: Handle participant events
+    ParticipantJoinedFunc: func(ctx context.Context, p *lksdk.RemoteParticipant) {
+        log.Printf("Participant joined: %s", p.Identity())
+    },
 }
+
+// Create and start worker
+worker := agent.NewUniversalWorker(url, apiKey, apiSecret, handler, opts)
 ```
 
 ### Struct-Based Handler
 
-For complex agents with state:
+For complex agents with state, embed BaseHandler:
 
 ```go
 type MyAgentHandler struct {
+    agent.BaseHandler // Embed base handler for default implementations
     config     *Config
     database   *Database
     metrics    *MetricsCollector
     jobStates  sync.Map
 }
 
-func (h *MyAgentHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *MyAgentHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+    // Check if we can handle this job type
+    if !h.canHandleJobType(job.Type) {
+        return false, nil
+    }
+    
+    // Check resource availability
+    if !h.hasAvailableResources() {
+        return false, nil
+    }
+    
+    return true, &agent.JobMetadata{
+        ParticipantIdentity: fmt.Sprintf("agent-%s", job.Id),
+        ParticipantName:     "My Agent",
+        ParticipantMetadata: `{"version": "1.0"}`,
+    }
+}
+
+func (h *MyAgentHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
     // Initialize job state
     state := &JobState{
         ID:        job.Id,
@@ -77,7 +131,6 @@ func (h *MyAgentHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksd
         Status:    "initializing",
     }
     h.jobStates.Store(job.Id, state)
-    defer h.jobStates.Delete(job.Id)
     
     // Record metrics
     h.metrics.JobStarted(job.Id)
@@ -96,6 +149,18 @@ func (h *MyAgentHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksd
     default:
         return fmt.Errorf("unsupported job type: %v", job.Type)
     }
+}
+
+func (h *MyAgentHandler) OnJobTerminated(ctx context.Context, jobID string) {
+    // Clean up job state
+    if state, ok := h.jobStates.LoadAndDelete(jobID); ok {
+        if jobState, ok := state.(*JobState); ok {
+            log.Printf("Job %s terminated after %v", jobID, time.Since(jobState.StartTime))
+        }
+    }
+    
+    // Perform any additional cleanup
+    h.releaseResources(jobID)
 }
 ```
 
@@ -126,7 +191,7 @@ func parseJobMetadata(job *livekit.Job) (*JobMetadata, error) {
     return &metadata, nil
 }
 
-func (h *MyAgentHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *MyAgentHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
     metadata, err := parseJobMetadata(job)
     if err != nil {
         return err
@@ -241,7 +306,7 @@ func (e *ValidationError) Error() string {
 ### Error Handler Implementation
 
 ```go
-func (h *MyAgentHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *MyAgentHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
     err := h.processJob(ctx, job, room)
     if err == nil {
         return nil
@@ -291,7 +356,7 @@ Proper context handling ensures clean shutdowns:
 ### Timeout Management
 
 ```go
-func (h *MyAgentHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *MyAgentHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
     // Add job-specific timeout
     metadata, _ := parseJobMetadata(job)
     timeout := 5 * time.Minute // default
@@ -370,7 +435,7 @@ type LongRunningHandler struct {
     heartbeatInterval time.Duration
 }
 
-func (h *LongRunningHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *LongRunningHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
     // Start heartbeat
     heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
     defer cancelHeartbeat()
@@ -426,7 +491,7 @@ type CheckpointingHandler struct {
     storage CheckpointStorage
 }
 
-func (h *CheckpointingHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *CheckpointingHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
     // Load checkpoint if exists
     checkpoint, err := h.storage.LoadCheckpoint(job.Id)
     if err != nil && !errors.Is(err, ErrCheckpointNotFound) {
@@ -486,7 +551,7 @@ type CoordinatedHandler struct {
     coordinator JobCoordinator
 }
 
-func (h *CoordinatedHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *CoordinatedHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
     // Try to become leader for this room
     isLeader, err := h.coordinator.ElectLeader(ctx, room.Name(), job.Id)
     if err != nil {
@@ -528,7 +593,7 @@ type CommunicatingHandler struct {
     pubsub PubSubService
 }
 
-func (h *CommunicatingHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *CommunicatingHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
     // Subscribe to job coordination channel
     channel := fmt.Sprintf("room:%s:jobs", room.Name())
     sub, err := h.pubsub.Subscribe(ctx, channel)
@@ -578,7 +643,7 @@ type ProcessingStage interface {
     Name() string
 }
 
-func (h *PipelineHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *PipelineHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
     // Initialize pipeline
     pipeline := make(chan interface{}, 100)
     errors := make(chan error, len(h.stages))
@@ -636,7 +701,7 @@ type Transition struct {
     Action    func(ctx context.Context) error
 }
 
-func (h *StateMachineHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *StateMachineHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
     h.currentState = JobStateInitial
     
     for {
@@ -681,7 +746,7 @@ type PooledResourceHandler struct {
     resourcePool *ResourcePool
 }
 
-func (h *PooledResourceHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *PooledResourceHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
     // Acquire resources from pool
     resources, err := h.resourcePool.Acquire(ctx)
     if err != nil {
@@ -706,7 +771,7 @@ type BatchingHandler struct {
     processBatch  func([]interface{}) error
 }
 
-func (h *BatchingHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *BatchingHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
     batch := make([]interface{}, 0, h.batchSize)
     timer := time.NewTimer(h.batchTimeout)
     defer timer.Stop()
@@ -795,13 +860,14 @@ func TestJobHandlerIntegration(t *testing.T) {
     
     // Create worker with handler
     handler := &MyAgentHandler{}
-    worker := agent.NewWorker(
+    worker := agent.NewUniversalWorker(
         server.URL,
         "test-key",
         "test-secret",
         handler,
         agent.WorkerOptions{
             AgentName: "test-agent",
+            JobType:   livekit.JobType_JT_ROOM,
         },
     )
     

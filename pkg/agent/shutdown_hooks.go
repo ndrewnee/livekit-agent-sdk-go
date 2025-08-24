@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,23 +28,23 @@ type ShutdownPhase string
 const (
 	// ShutdownPhasePreStop is executed before any jobs are terminated.
 	// Use this phase for preparation tasks like notifying external systems.
-	ShutdownPhasePreStop     ShutdownPhase = "pre_stop"
-	
+	ShutdownPhasePreStop ShutdownPhase = "pre_stop"
+
 	// ShutdownPhaseStopJobs is executed during job termination.
 	// Use this phase for job-specific cleanup that must happen during shutdown.
-	ShutdownPhaseStopJobs    ShutdownPhase = "stop_jobs"
-	
+	ShutdownPhaseStopJobs ShutdownPhase = "stop_jobs"
+
 	// ShutdownPhasePostJobs is executed after all jobs have completed or been terminated.
 	// Use this phase for cleanup that depends on jobs being stopped.
-	ShutdownPhasePostJobs    ShutdownPhase = "post_jobs"
-	
+	ShutdownPhasePostJobs ShutdownPhase = "post_jobs"
+
 	// ShutdownPhaseCleanup is executed during general resource cleanup.
 	// Use this phase for releasing resources like database connections.
-	ShutdownPhaseCleanup     ShutdownPhase = "cleanup"
-	
+	ShutdownPhaseCleanup ShutdownPhase = "cleanup"
+
 	// ShutdownPhaseFinal is executed as the last step before worker termination.
 	// Use this phase for final tasks like flushing logs or metrics.
-	ShutdownPhaseFinal       ShutdownPhase = "final"
+	ShutdownPhaseFinal ShutdownPhase = "final"
 )
 
 // ShutdownHookManager manages registration and execution of shutdown hooks across all phases.
@@ -79,28 +80,28 @@ func NewShutdownHookManager(logger *zap.Logger) *ShutdownHookManager {
 func (m *ShutdownHookManager) AddHook(phase ShutdownPhase, hook ShutdownHook) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	if _, exists := m.hooks[phase]; !exists {
 		return fmt.Errorf("invalid shutdown phase: %s", phase)
 	}
-	
+
 	// Set default timeout if not specified
 	if hook.Timeout == 0 {
 		hook.Timeout = 5 * time.Second
 	}
-	
+
 	m.hooks[phase] = append(m.hooks[phase], hook)
-	
+
 	// Sort hooks by priority
 	m.sortHooks(phase)
-	
-	m.logger.Debug("Added shutdown hook", 
-		zap.String("phase", string(phase)), 
-		zap.String("name", hook.Name), 
+
+	m.logger.Debug("Added shutdown hook",
+		zap.String("phase", string(phase)),
+		zap.String("name", hook.Name),
 		zap.Int("priority", hook.Priority),
 		zap.Duration("timeout", hook.Timeout),
 	)
-	
+
 	return nil
 }
 
@@ -125,17 +126,17 @@ func (m *ShutdownHookManager) ExecutePhase(ctx context.Context, phase ShutdownPh
 	hooks := make([]ShutdownHook, len(m.hooks[phase]))
 	copy(hooks, m.hooks[phase])
 	m.mu.RUnlock()
-	
+
 	if len(hooks) == 0 {
 		return nil
 	}
-	
+
 	m.logger.Info("Executing shutdown hooks", zap.String("phase", string(phase)), zap.Int("count", len(hooks)))
-	
+
 	var firstError error
 	for _, hook := range hooks {
 		if err := m.executeHook(ctx, hook); err != nil {
-			m.logger.Error("Shutdown hook failed", 
+			m.logger.Error("Shutdown hook failed",
 				zap.String("phase", string(phase)),
 				zap.String("name", hook.Name),
 				zap.Error(err),
@@ -146,7 +147,7 @@ func (m *ShutdownHookManager) ExecutePhase(ctx context.Context, phase ShutdownPh
 			// Continue executing other hooks even if one fails
 		}
 	}
-	
+
 	return firstError
 }
 
@@ -155,10 +156,10 @@ func (m *ShutdownHookManager) executeHook(ctx context.Context, hook ShutdownHook
 	// Create timeout context for this hook
 	hookCtx, cancel := context.WithTimeout(ctx, hook.Timeout)
 	defer cancel()
-	
+
 	// Channel to receive result
 	done := make(chan error, 1)
-	
+
 	// Execute hook in goroutine
 	go func() {
 		defer func() {
@@ -168,7 +169,7 @@ func (m *ShutdownHookManager) executeHook(ctx context.Context, hook ShutdownHook
 		}()
 		done <- hook.Handler(hookCtx)
 	}()
-	
+
 	// Wait for completion or timeout
 	select {
 	case err := <-done:
@@ -188,12 +189,12 @@ func (m *ShutdownHookManager) executeHook(ctx context.Context, hook ShutdownHook
 func (m *ShutdownHookManager) RemoveHook(phase ShutdownPhase, name string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	hooks, exists := m.hooks[phase]
 	if !exists {
 		return false
 	}
-	
+
 	for i, hook := range hooks {
 		if hook.Name == name {
 			// Remove hook
@@ -202,7 +203,7 @@ func (m *ShutdownHookManager) RemoveHook(phase ShutdownPhase, name string) bool 
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -212,7 +213,7 @@ func (m *ShutdownHookManager) RemoveHook(phase ShutdownPhase, name string) bool 
 func (m *ShutdownHookManager) GetHooks(phase ShutdownPhase) []ShutdownHook {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	hooks := make([]ShutdownHook, len(m.hooks[phase]))
 	copy(hooks, m.hooks[phase])
 	return hooks
@@ -223,7 +224,7 @@ func (m *ShutdownHookManager) GetHooks(phase ShutdownPhase) []ShutdownHook {
 func (m *ShutdownHookManager) ClearHooks(phase ShutdownPhase) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	if _, exists := m.hooks[phase]; exists {
 		m.hooks[phase] = []ShutdownHook{}
 		m.logger.Debug("Cleared shutdown hooks", zap.String("phase", string(phase)))
@@ -235,7 +236,7 @@ func (m *ShutdownHookManager) ClearHooks(phase ShutdownPhase) {
 func (m *ShutdownHookManager) ClearAllHooks() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	for phase := range m.hooks {
 		m.hooks[phase] = []ShutdownHook{}
 	}
@@ -247,7 +248,7 @@ func (m *ShutdownHookManager) ClearAllHooks() {
 func (m *ShutdownHookManager) GetHookCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	count := 0
 	for _, hooks := range m.hooks {
 		count += len(hooks)
@@ -284,7 +285,15 @@ func (d DefaultShutdownHooks) NewLogFlushHook(logger *zap.Logger) ShutdownHook {
 		Priority: 200,
 		Timeout:  2 * time.Second,
 		Handler: func(ctx context.Context) error {
-			return logger.Sync()
+			err := logger.Sync()
+			// Ignore errors about syncing stderr/stdout in test environments
+			if err != nil && strings.Contains(err.Error(), "/dev/stderr") {
+				return nil
+			}
+			if err != nil && strings.Contains(err.Error(), "/dev/stdout") {
+				return nil
+			}
+			return err
 		},
 	}
 }

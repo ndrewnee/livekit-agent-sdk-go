@@ -55,15 +55,15 @@ func TestSimpleJobHandler(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(tt.wantName, func(t *testing.T) {
 				accept, metadata := handler.OnJobRequest(context.Background(), tt.job)
-				
+
 				if !accept {
 					t.Error("Expected job to be accepted")
 				}
-				
+
 				if metadata.ParticipantIdentity != tt.wantID {
 					t.Errorf("Expected identity %s, got %s", tt.wantID, metadata.ParticipantIdentity)
 				}
-				
+
 				if metadata.ParticipantName != tt.wantName {
 					t.Errorf("Expected name %s, got %s", tt.wantName, metadata.ParticipantName)
 				}
@@ -172,7 +172,7 @@ func TestJobContext(t *testing.T) {
 		job := &livekit.Job{Id: "test-job"}
 		room := &lksdk.Room{}
 
-		jc := NewJobContext(ctx, job, room)
+		jc := NewJobUtils(ctx, job, room)
 
 		if jc.Job != job {
 			t.Error("Job not set correctly")
@@ -189,7 +189,7 @@ func TestJobContext(t *testing.T) {
 
 	t.Run("done channel", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-		jc := NewJobContext(ctx, &livekit.Job{}, &lksdk.Room{})
+		jc := NewJobUtils(ctx, &livekit.Job{}, &lksdk.Room{})
 
 		select {
 		case <-jc.Done():
@@ -210,7 +210,7 @@ func TestJobContext(t *testing.T) {
 
 	t.Run("sleep", func(t *testing.T) {
 		ctx := context.Background()
-		jc := NewJobContext(ctx, &livekit.Job{}, &lksdk.Room{})
+		jc := NewJobUtils(ctx, &livekit.Job{}, &lksdk.Room{})
 
 		start := time.Now()
 		err := jc.Sleep(50 * time.Millisecond)
@@ -227,7 +227,7 @@ func TestJobContext(t *testing.T) {
 
 	t.Run("sleep cancelled", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-		jc := NewJobContext(ctx, &livekit.Job{}, &lksdk.Room{})
+		jc := NewJobUtils(ctx, &livekit.Job{}, &lksdk.Room{})
 
 		go func() {
 			time.Sleep(20 * time.Millisecond)
@@ -323,8 +323,8 @@ func TestLoadBalancer(t *testing.T) {
 		lb := NewLoadBalancer()
 
 		// Add workers at capacity
-		lb.UpdateWorker("w1", 1.0, 5, 5)  // At capacity
-		lb.UpdateWorker("w2", 0.8, 4, 5)  // Below capacity
+		lb.UpdateWorker("w1", 1.0, 5, 5) // At capacity
+		lb.UpdateWorker("w2", 0.8, 4, 5) // Below capacity
 
 		worker := lb.GetLeastLoadedWorker()
 		if worker == nil {
@@ -338,9 +338,9 @@ func TestLoadBalancer(t *testing.T) {
 
 	t.Run("concurrent access", func(t *testing.T) {
 		lb := NewLoadBalancer()
-		
+
 		var wg sync.WaitGroup
-		
+
 		// Multiple goroutines updating workers
 		for i := 0; i < 10; i++ {
 			wg.Add(1)
@@ -350,12 +350,12 @@ func TestLoadBalancer(t *testing.T) {
 					workerID := fmt.Sprintf("w%d", id)
 					load := float32(j) / 100.0
 					lb.UpdateWorker(workerID, load, j, 100)
-					
+
 					if j%10 == 0 {
 						lb.GetLeastLoadedWorker()
 						lb.GetWorkerCount()
 					}
-					
+
 					if j%20 == 0 {
 						lb.RemoveWorker(workerID)
 					}
@@ -364,7 +364,7 @@ func TestLoadBalancer(t *testing.T) {
 		}
 
 		wg.Wait()
-		
+
 		// Should complete without race conditions or panics
 	})
 }

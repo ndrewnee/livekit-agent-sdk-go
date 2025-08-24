@@ -15,16 +15,16 @@ import (
 type EventType string
 
 const (
-	EventTypeParticipantJoined    EventType = "participant_joined"
-	EventTypeParticipantLeft      EventType = "participant_left"
-	EventTypeTrackPublished       EventType = "track_published"
-	EventTypeTrackUnpublished     EventType = "track_unpublished"
-	EventTypeMetadataChanged      EventType = "metadata_changed"
-	EventTypeNameChanged          EventType = "name_changed"
-	EventTypePermissionsChanged   EventType = "permissions_changed"
-	EventTypeSpeakingChanged      EventType = "speaking_changed"
-	EventTypeDataReceived         EventType = "data_received"
-	EventTypeConnectionQuality    EventType = "connection_quality"
+	EventTypeParticipantJoined  EventType = "participant_joined"
+	EventTypeParticipantLeft    EventType = "participant_left"
+	EventTypeTrackPublished     EventType = "track_published"
+	EventTypeTrackUnpublished   EventType = "track_unpublished"
+	EventTypeMetadataChanged    EventType = "metadata_changed"
+	EventTypeNameChanged        EventType = "name_changed"
+	EventTypePermissionsChanged EventType = "permissions_changed"
+	EventTypeSpeakingChanged    EventType = "speaking_changed"
+	EventTypeDataReceived       EventType = "data_received"
+	EventTypeConnectionQuality  EventType = "connection_quality"
 )
 
 // ParticipantEvent represents an event related to a participant
@@ -66,34 +66,34 @@ type EventFilter func(event ParticipantEvent) bool
 type BatchEventProcessor interface {
 	// ShouldBatch determines if an event should be batched
 	ShouldBatch(event ParticipantEvent) bool
-	
+
 	// ProcessBatch processes a batch of events
 	ProcessBatch(events []ParticipantEvent) error
-	
+
 	// GetBatchSize returns the preferred batch size
 	GetBatchSize() int
-	
+
 	// GetBatchTimeout returns the batch timeout
 	GetBatchTimeout() time.Duration
 }
 
 // EventProcessingMetrics tracks event processing metrics
 type EventProcessingMetrics struct {
-	mu               sync.RWMutex
-	totalEvents      int64
-	processedEvents  int64
-	failedEvents     int64
-	filteredEvents   int64
-	batchedEvents    int64
-	processingTimes  map[EventType][]time.Duration
-	eventCounts      map[EventType]int64
-	lastProcessedAt  time.Time
+	mu              sync.RWMutex
+	totalEvents     int64
+	processedEvents int64
+	failedEvents    int64
+	filteredEvents  int64
+	batchedEvents   int64
+	processingTimes map[EventType][]time.Duration
+	eventCounts     map[EventType]int64
+	lastProcessedAt time.Time
 }
 
 // NewParticipantEventProcessor creates a new event processor
 func NewParticipantEventProcessor() *ParticipantEventProcessor {
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	processor := &ParticipantEventProcessor{
 		eventQueue:      make(chan ParticipantEvent, 1000),
 		handlers:        make(map[EventType][]EventHandler),
@@ -148,8 +148,8 @@ func (p *ParticipantEventProcessor) QueueEvent(event ParticipantEvent) {
 	case p.eventQueue <- event:
 		// Event queued successfully
 	case <-time.After(1 * time.Second):
-		logger := logger.GetLogger()
-		logger.Warnw("event queue full, dropping event", nil,
+		getLogger := logger.GetLogger()
+		getLogger.Warnw("event queue full, dropping event", nil,
 			"eventType", event.Type,
 			"participant", event.Participant.Identity())
 	}
@@ -289,8 +289,8 @@ func (p *ParticipantEventProcessor) processEvent(event ParticipantEvent) {
 	for _, handler := range handlers {
 		if handlerErr := handler(event); handlerErr != nil {
 			err = handlerErr
-			logger := logger.GetLogger()
-			logger.Errorw("event handler failed", handlerErr,
+			getLogger := logger.GetLogger()
+			getLogger.Errorw("event handler failed", handlerErr,
 				"eventType", event.Type,
 				"eventID", event.ID)
 		}
@@ -305,17 +305,17 @@ func (p *ParticipantEventProcessor) processEvent(event ParticipantEvent) {
 		p.processingMetrics.processedEvents++
 	}
 	p.processingMetrics.lastProcessedAt = time.Now()
-	
+
 	// Track processing time
 	if _, exists := p.processingMetrics.processingTimes[event.Type]; !exists {
 		p.processingMetrics.processingTimes[event.Type] = make([]time.Duration, 0)
 	}
 	p.processingMetrics.processingTimes[event.Type] = append(
 		p.processingMetrics.processingTimes[event.Type], duration)
-	
+
 	// Keep only last 100 measurements per type
 	if len(p.processingMetrics.processingTimes[event.Type]) > 100 {
-		p.processingMetrics.processingTimes[event.Type] = 
+		p.processingMetrics.processingTimes[event.Type] =
 			p.processingMetrics.processingTimes[event.Type][1:]
 	}
 	p.processingMetrics.mu.Unlock()
@@ -334,11 +334,11 @@ func (p *ParticipantEventProcessor) processBatches() {
 			// Process remaining batches
 			for processor, events := range batchMap {
 				if len(events) > 0 {
-					processor.ProcessBatch(events)
+					_ = processor.ProcessBatch(events)
 				}
 			}
 			return
-			
+
 		case event := <-p.eventQueue:
 			// Check which batch processors want this event
 			for _, processor := range p.batchProcessors {
@@ -346,7 +346,7 @@ func (p *ParticipantEventProcessor) processBatches() {
 					// Add to batch
 					if _, exists := batchMap[processor]; !exists {
 						batchMap[processor] = make([]ParticipantEvent, 0)
-						
+
 						// Start timer
 						timer := time.AfterFunc(processor.GetBatchTimeout(), func() {
 							p.processBatch(processor, batchMap[processor])
@@ -355,9 +355,9 @@ func (p *ParticipantEventProcessor) processBatches() {
 						})
 						timers[processor] = timer
 					}
-					
+
 					batchMap[processor] = append(batchMap[processor], event)
-					
+
 					// Check if batch is full
 					if len(batchMap[processor]) >= processor.GetBatchSize() {
 						timers[processor].Stop()
@@ -365,7 +365,7 @@ func (p *ParticipantEventProcessor) processBatches() {
 						delete(batchMap, processor)
 						delete(timers, processor)
 					}
-					
+
 					// Update metrics
 					p.processingMetrics.mu.Lock()
 					p.processingMetrics.batchedEvents++
@@ -379,8 +379,8 @@ func (p *ParticipantEventProcessor) processBatches() {
 // processBatch processes a batch of events
 func (p *ParticipantEventProcessor) processBatch(processor BatchEventProcessor, events []ParticipantEvent) {
 	if err := processor.ProcessBatch(events); err != nil {
-		logger := logger.GetLogger()
-		logger.Errorw("batch processing failed", err,
+		getLogger := logger.GetLogger()
+		getLogger.Errorw("batch processing failed", err,
 			"batchSize", len(events))
 	}
 }
@@ -389,8 +389,8 @@ func (p *ParticipantEventProcessor) processBatch(processor BatchEventProcessor, 
 
 // LoggingEventHandler logs all events
 func LoggingEventHandler(event ParticipantEvent) error {
-	logger := logger.GetLogger()
-	logger.Infow("participant event",
+	getLogger := logger.GetLogger()
+	getLogger.Infow("participant event",
 		"type", event.Type,
 		"participant", event.Participant.Identity(),
 		"timestamp", event.Timestamp)

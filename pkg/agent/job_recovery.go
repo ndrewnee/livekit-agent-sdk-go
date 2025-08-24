@@ -102,7 +102,7 @@ func (d *DefaultJobRecoveryHandler) OnJobRecoveryFailed(ctx context.Context, job
 //   - Concurrent recovery attempts
 //   - Room reconnection support
 type JobRecoveryManager struct {
-	worker          *Worker
+	worker          WorkerInterface
 	recoveryHandler JobRecoveryHandler
 	mu              sync.Mutex
 	pendingRecovery map[string]*RecoverableJob
@@ -115,20 +115,20 @@ type JobRecoveryManager struct {
 // everything needed to restore the job when the worker reconnects.
 type RecoverableJob struct {
 	// JobID is the unique identifier of the job
-	JobID       string
-	
+	JobID string
+
 	// JobState contains the runtime state of the job
-	JobState    *JobState
-	
+	JobState *JobState
+
 	// JobData is the original job assignment from the server
-	JobData     *livekit.Job
-	
+	JobData *livekit.Job
+
 	// RoomToken is the authentication token for the room (if available)
-	RoomToken   string
-	
+	RoomToken string
+
 	// LastUpdate tracks when this job was last active
-	LastUpdate  time.Time
-	
+	LastUpdate time.Time
+
 	// RecoveryAttempts counts how many times recovery has been tried
 	RecoveryAttempts int
 }
@@ -137,7 +137,7 @@ type RecoverableJob struct {
 //
 // If handler is nil, DefaultJobRecoveryHandler will be used.
 // The manager uses a 30-second timeout for recovery attempts by default.
-func NewJobRecoveryManager(worker *Worker, handler JobRecoveryHandler) *JobRecoveryManager {
+func NewJobRecoveryManager(worker WorkerInterface, handler JobRecoveryHandler) *JobRecoveryManager {
 	if handler == nil {
 		handler = &DefaultJobRecoveryHandler{}
 	}
@@ -182,7 +182,7 @@ func (m *JobRecoveryManager) SaveJobForRecovery(jobID string, job *livekit.Job, 
 // This method should be called after the worker successfully reconnects
 // to the server. It will:
 //  1. Check each saved job with the recovery handler
-//  2. Skip jobs that are too old or declined by the handler  
+//  2. Skip jobs that are too old or declined by the handler
 //  3. Attempt to recover approved jobs concurrently
 //  4. Update job states based on recovery results
 //
@@ -198,6 +198,7 @@ func (m *JobRecoveryManager) AttemptJobRecovery(ctx context.Context) map[string]
 
 	results := make(map[string]error)
 	var wg sync.WaitGroup
+	var resultsMu sync.Mutex
 
 	for jobID, recoverableJob := range jobs {
 		// Check if handler wants to recover this job
@@ -217,10 +218,12 @@ func (m *JobRecoveryManager) AttemptJobRecovery(ctx context.Context) map[string]
 		wg.Add(1)
 		go func(jobID string, job *RecoverableJob) {
 			defer wg.Done()
-			
+
 			err := m.recoverJob(ctx, jobID, job)
+			resultsMu.Lock()
 			results[jobID] = err
-			
+			resultsMu.Unlock()
+
 			if err != nil {
 				m.recoveryHandler.OnJobRecoveryFailed(ctx, jobID, err)
 				// Keep in recovery queue for potential retry
@@ -244,39 +247,45 @@ func (m *JobRecoveryManager) recoverJob(ctx context.Context, jobID string, recov
 		// Set up room callbacks
 		roomCallback := &lksdk.RoomCallback{
 			OnDisconnected: func() {
-				m.worker.logger.Info("Recovered job disconnected from room", "jobID", jobID)
+				if logger := m.worker.GetLogger(); logger != nil {
+					logger.Info("Recovered job disconnected from room", "jobID", jobID)
+				}
 			},
 		}
 
 		// Try to connect with the saved token
-		room, err := lksdk.ConnectToRoomWithToken(m.worker.serverURL, recoverableJob.RoomToken, roomCallback, lksdk.WithAutoSubscribe(false))
+		room, err := lksdk.ConnectToRoomWithToken(m.worker.GetServerURL(), recoverableJob.RoomToken, roomCallback, lksdk.WithAutoSubscribe(false))
 		if err == nil {
 			// Successfully reconnected to room
-			m.worker.logger.Info("Successfully recovered job", "jobID", jobID)
-			
+			if logger := m.worker.GetLogger(); logger != nil {
+				logger.Info("Successfully recovered job", "jobID", jobID)
+			}
+
 			// Re-register the job in activeJobs
-			m.worker.mu.Lock()
-			m.worker.activeJobs[jobID] = &activeJob{
+			m.worker.SetActiveJob(jobID, &activeJob{
 				job:       recoverableJob.JobData,
 				room:      room,
 				status:    livekit.JobStatus_JS_RUNNING,
 				startedAt: recoverableJob.JobState.StartedAt,
-			}
-			m.worker.mu.Unlock()
+			})
 
 			// Notify handler of successful recovery
 			m.recoveryHandler.OnJobRecovered(ctx, recoverableJob.JobData, room)
 			return nil
 		}
-		
+
 		// Token might be expired or room might be gone
-		m.worker.logger.Warn("Failed to reconnect to room for job recovery", "jobID", jobID, "error", err)
+		if logger := m.worker.GetLogger(); logger != nil {
+			logger.Warn("Failed to reconnect to room for job recovery", "jobID", jobID, "error", err)
+		}
 	}
 
 	// Without a valid token or if room connection failed, we can only maintain job state
 	// and wait for new instructions from the server
-	m.worker.logger.Info("Job marked for recovery but requires new assignment", "jobID", jobID)
-	
+	if logger := m.worker.GetLogger(); logger != nil {
+		logger.Info("Job marked for recovery but requires new assignment", "jobID", jobID)
+	}
+
 	// Keep the job in a recoverable state
 	return fmt.Errorf("job recovery requires new room token")
 }
@@ -290,7 +299,7 @@ func (m *JobRecoveryManager) removeFromRecovery(jobID string) {
 func (m *JobRecoveryManager) incrementRecoveryAttempts(jobID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	if job, exists := m.pendingRecovery[jobID]; exists {
 		job.RecoveryAttempts++
 		if job.RecoveryAttempts > 3 {
@@ -310,7 +319,7 @@ func (m *JobRecoveryManager) incrementRecoveryAttempts(jobID string) {
 func (m *JobRecoveryManager) GetRecoverableJobs() map[string]*RecoverableJob {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	jobs := make(map[string]*RecoverableJob)
 	for id, job := range m.pendingRecovery {
 		jobs[id] = job
@@ -446,17 +455,17 @@ func (b *PartialMessageBuffer) IsStale(timeout time.Duration) bool {
 // system-level information and application-specific checkpoint data.
 type JobResumptionData struct {
 	// JobID uniquely identifies the job
-	JobID         string                 `json:"job_id"`
-	
+	JobID string `json:"job_id"`
+
 	// WorkerID identifies the worker that was handling the job
-	WorkerID      string                 `json:"worker_id"`
-	
+	WorkerID string `json:"worker_id"`
+
 	// LastStatus is the job's status at the time of suspension
-	LastStatus    livekit.JobStatus      `json:"last_status"`
-	
+	LastStatus livekit.JobStatus `json:"last_status"`
+
 	// LastUpdate is when the job state was last updated
-	LastUpdate    time.Time              `json:"last_update"`
-	
+	LastUpdate time.Time `json:"last_update"`
+
 	// CheckpointData contains application-specific state for resumption
 	CheckpointData map[string]interface{} `json:"checkpoint_data,omitempty"`
 }
@@ -472,7 +481,7 @@ type JobResumptionData struct {
 //	checkpoint := NewJobCheckpoint(jobID)
 //	checkpoint.Save("processed_count", 150)
 //	checkpoint.Save("last_timestamp", time.Now())
-//	
+//
 //	// Later, after recovery
 //	if count, ok := checkpoint.Load("processed_count"); ok {
 //	    processedCount := count.(int)
@@ -531,7 +540,7 @@ func (c *JobCheckpoint) Load(key string) (interface{}, bool) {
 func (c *JobCheckpoint) GetAll() map[string]interface{} {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	
+
 	result := make(map[string]interface{})
 	for k, v := range c.data {
 		result[k] = v

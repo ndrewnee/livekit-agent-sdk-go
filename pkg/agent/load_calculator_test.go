@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/livekit/protocol/livekit"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -174,12 +173,9 @@ func TestPredictiveLoadCalculator(t *testing.T) {
 // TestLoadBatcher tests the load update batching
 func TestLoadBatcher(t *testing.T) {
 	// Test the batching behavior without relying on actual network send
-	handler := &testJobHandler{}
-	worker := newTestableWorker(handler, WorkerOptions{
-		JobType: livekit.JobType_JT_ROOM,
-	})
+	worker := newMockWorker(nil)
 
-	batcher := NewLoadBatcher(worker.Worker, 100*time.Millisecond)
+	batcher := NewLoadBatcher(worker, 100*time.Millisecond)
 	batcher.Start()
 
 	// Send multiple updates rapidly
@@ -192,7 +188,7 @@ func TestLoadBatcher(t *testing.T) {
 	pendingLoad := batcher.pendingLoad
 	pendingStatus := batcher.pendingStatus
 	batcher.mu.Unlock()
-	
+
 	// Should have pending updates
 	assert.NotNil(t, pendingLoad)
 	assert.NotNil(t, pendingStatus)
@@ -207,7 +203,7 @@ func TestLoadBatcher(t *testing.T) {
 	pendingLoadAfter := batcher.pendingLoad
 	pendingStatusAfter := batcher.pendingStatus
 	batcher.mu.Unlock()
-	
+
 	// Should have been flushed
 	assert.Nil(t, pendingLoadAfter)
 	assert.Nil(t, pendingStatusAfter)
@@ -235,68 +231,7 @@ func TestSystemMetricsCollector(t *testing.T) {
 	assert.LessOrEqual(t, usedMB, totalMB)
 }
 
-// TestWorkerWithCustomLoadCalculator tests worker with custom load calculator
-func TestWorkerWithCustomLoadCalculator(t *testing.T) {
-	customCalc := &mockLoadCalculator{
-		returnLoad: 0.75,
-	}
-
-	handler := &testJobHandler{}
-	worker := NewWorker("http://localhost:7880", "key", "secret", handler, WorkerOptions{
-		JobType:        livekit.JobType_JT_ROOM,
-		MaxJobs:        5,
-		LoadCalculator: customCalc,
-	})
-
-	// Verify custom calculator is used
-	assert.Equal(t, customCalc, worker.loadCalculator)
-
-	// Test that updateLoad uses custom calculator
-	worker.updateLoad()
-	assert.Equal(t, 1, customCalc.callCount)
-}
-
-// TestWorkerWithCPUMemoryLoad tests worker with CPU/memory load calculation
-func TestWorkerWithCPUMemoryLoad(t *testing.T) {
-	handler := &testJobHandler{}
-	worker := NewWorker("http://localhost:7880", "key", "secret", handler, WorkerOptions{
-		JobType:             livekit.JobType_JT_ROOM,
-		MaxJobs:             5,
-		EnableCPUMemoryLoad: true,
-	})
-
-	// Verify CPU/memory calculator is used
-	_, ok := worker.loadCalculator.(*CPUMemoryLoadCalculator)
-	assert.True(t, ok)
-	assert.NotNil(t, worker.metricsCollector)
-}
-
-// TestWorkerWithLoadPrediction tests worker with load prediction
-func TestWorkerWithLoadPrediction(t *testing.T) {
-	handler := &testJobHandler{}
-	worker := NewWorker("http://localhost:7880", "key", "secret", handler, WorkerOptions{
-		JobType:              livekit.JobType_JT_ROOM,
-		MaxJobs:              5,
-		EnableLoadPrediction: true,
-	})
-
-	// Verify predictive calculator is used
-	_, ok := worker.loadCalculator.(*PredictiveLoadCalculator)
-	assert.True(t, ok)
-}
-
-// TestWorkerWithStatusUpdateBatching tests worker with status update batching
-func TestWorkerWithStatusUpdateBatching(t *testing.T) {
-	handler := &testJobHandler{}
-	worker := NewWorker("http://localhost:7880", "key", "secret", handler, WorkerOptions{
-		JobType:                   livekit.JobType_JT_ROOM,
-		MaxJobs:                   5,
-		StatusUpdateBatchInterval: 500 * time.Millisecond,
-	})
-
-	// Verify load batcher is created
-	assert.NotNil(t, worker.loadBatcher)
-}
+// Worker-specific tests removed - use UniversalWorker tests instead
 
 // mockLoadCalculator for testing
 type mockLoadCalculator struct {

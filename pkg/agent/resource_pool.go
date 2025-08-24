@@ -31,13 +31,13 @@ type ResourcePool struct {
 	minSize     int
 	maxSize     int
 	maxIdleTime time.Duration
-	
+
 	// Metrics
-	created     int64
-	inUse       int64
-	available   int64
-	destroyed   int64
-	
+	created   int64
+	inUse     int64
+	available int64
+	destroyed int64
+
 	mu          sync.Mutex
 	closed      bool
 	cleanupStop chan struct{}
@@ -78,7 +78,10 @@ func NewResourcePool(factory ResourceFactory, opts ResourcePoolOptions) (*Resour
 		resource, err := factory.Create(ctx)
 		if err != nil {
 			// Clean up any created resources
-			pool.Close()
+			err := pool.Close()
+			if err != nil {
+				return nil, err
+			}
 			return nil, fmt.Errorf("failed to create initial resource: %w", err)
 		}
 		pool.resources <- resource
@@ -106,27 +109,33 @@ func (pool *ResourcePool) Acquire(ctx context.Context) (Resource, error) {
 	select {
 	case resource := <-pool.resources:
 		atomic.AddInt64(&pool.available, -1)
-		
+
 		// Validate the resource
 		if err := pool.factory.Validate(resource); err != nil {
 			// Resource is invalid, destroy it
-			resource.Close()
+			err := resource.Close()
+			if err != nil {
+				return nil, err
+			}
 			atomic.AddInt64(&pool.destroyed, 1)
-			
+
 			// Try to create a new one
 			return pool.createNew(ctx)
 		}
-		
+
 		// Reset for reuse
 		if err := resource.Reset(); err != nil {
-			resource.Close()
+			err := resource.Close()
+			if err != nil {
+				return nil, err
+			}
 			atomic.AddInt64(&pool.destroyed, 1)
 			return pool.createNew(ctx)
 		}
-		
+
 		atomic.AddInt64(&pool.inUse, 1)
 		return resource, nil
-		
+
 	default:
 		// No resources available, try to create new one
 		return pool.createNew(ctx)
@@ -145,16 +154,22 @@ func (pool *ResourcePool) Release(resource Resource) {
 	atomic.AddInt64(&pool.inUse, -1)
 
 	if pool.closed {
-		resource.Close()
+		err := resource.Close()
+		if err != nil {
+			panic(err)
+		}
 		atomic.AddInt64(&pool.destroyed, 1)
 		return
 	}
 
 	// Check if resource is still healthy
 	if !resource.IsHealthy() {
-		resource.Close()
+		err := resource.Close()
+		if err != nil {
+			panic(err)
+		}
 		atomic.AddInt64(&pool.destroyed, 1)
-		
+
 		// Try to maintain minimum pool size
 		if pool.Size() < pool.minSize {
 			go pool.createAsync()
@@ -168,7 +183,10 @@ func (pool *ResourcePool) Release(resource Resource) {
 		atomic.AddInt64(&pool.available, 1)
 	default:
 		// Pool is full, close the resource
-		resource.Close()
+		err := resource.Close()
+		if err != nil {
+			panic(err)
+		}
 		atomic.AddInt64(&pool.destroyed, 1)
 	}
 }
@@ -217,7 +235,10 @@ func (pool *ResourcePool) Close() error {
 	// Close all resources
 	close(pool.resources)
 	for resource := range pool.resources {
-		resource.Close()
+		err := resource.Close()
+		if err != nil {
+			return err
+		}
 		atomic.AddInt64(&pool.destroyed, 1)
 	}
 
@@ -254,7 +275,10 @@ func (pool *ResourcePool) createAsync() {
 	pool.mu.Lock()
 	if pool.closed {
 		pool.mu.Unlock()
-		resource.Close()
+		err := resource.Close()
+		if err != nil {
+			panic(err)
+		}
 		return
 	}
 	pool.mu.Unlock()
@@ -264,7 +288,10 @@ func (pool *ResourcePool) createAsync() {
 		atomic.AddInt64(&pool.created, 1)
 		atomic.AddInt64(&pool.available, 1)
 	default:
-		resource.Close()
+		err := resource.Close()
+		if err != nil {
+			panic(err)
+		}
 		atomic.AddInt64(&pool.destroyed, 1)
 	}
 }
@@ -272,7 +299,7 @@ func (pool *ResourcePool) createAsync() {
 // cleanupIdleResources periodically cleans up idle resources
 func (pool *ResourcePool) cleanupIdleResources() {
 	defer pool.wg.Done()
-	
+
 	ticker := time.NewTicker(pool.maxIdleTime / 2)
 	defer ticker.Stop()
 
@@ -299,7 +326,10 @@ func (pool *ResourcePool) cleanupIdle() {
 		select {
 		case resource := <-pool.resources:
 			atomic.AddInt64(&pool.available, -1)
-			resource.Close()
+			err := resource.Close()
+			if err != nil {
+				panic(err)
+			}
 			atomic.AddInt64(&pool.destroyed, 1)
 		default:
 			return
@@ -309,12 +339,12 @@ func (pool *ResourcePool) cleanupIdle() {
 
 // WorkerResource represents a pooled worker resource
 type WorkerResource struct {
-	ID          string
-	CreatedAt   time.Time
-	LastUsedAt  time.Time
-	UseCount    int64
-	healthy     bool
-	mu          sync.Mutex
+	ID         string
+	CreatedAt  time.Time
+	LastUsedAt time.Time
+	UseCount   int64
+	healthy    bool
+	mu         sync.Mutex
 }
 
 func (w *WorkerResource) IsHealthy() bool {
@@ -357,16 +387,16 @@ func (f *WorkerResourceFactory) Validate(resource Resource) error {
 	if !ok {
 		return fmt.Errorf("invalid resource type")
 	}
-	
+
 	// Check if resource is too old
 	if time.Since(worker.CreatedAt) > 1*time.Hour {
 		return fmt.Errorf("resource too old")
 	}
-	
+
 	// Check if resource has been used too many times
 	if atomic.LoadInt64(&worker.UseCount) > 1000 {
 		return fmt.Errorf("resource exceeded use limit")
 	}
-	
+
 	return nil
 }

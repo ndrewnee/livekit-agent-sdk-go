@@ -31,20 +31,23 @@ type RoomAgentHandler struct {
     analyticsCollector   AnalyticsCollector
 }
 
-func (h *RoomAgentHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *RoomAgentHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
     if job.Type != livekit.JobType_JT_ROOM {
-        return fmt.Errorf("expected room job, got %v", job.Type)
+        return false, nil // Only accept room jobs
     }
     
+    return true, &agent.JobMetadata{
+        ParticipantIdentity: "room-agent",
+        ParticipantName:     "Room Agent",
+        ParticipantMetadata: `{"agent_type": "room_monitor"}`,
+    }
+}
+
+func (h *RoomAgentHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
     log.Printf("Room agent started for room: %s", room.Name())
     
-    // Set up room event handlers
-    room.Callback.OnParticipantConnected = h.handleParticipantConnected
-    room.Callback.OnParticipantDisconnected = h.handleParticipantDisconnected
-    room.Callback.OnTrackPublished = h.handleTrackPublished
-    room.Callback.OnTrackUnpublished = h.handleTrackUnpublished
-    room.Callback.OnDataReceived = h.handleDataReceived
-    room.Callback.OnConnectionQualityChanged = h.handleQualityChange
+    // Since we can't modify callbacks after connection, use polling pattern
+    go h.monitorRoom(ctx, room)
     
     // Process existing participants
     for _, participant := range room.GetRemoteParticipants() {
@@ -57,6 +60,61 @@ func (h *RoomAgentHandler) OnJob(ctx context.Context, job *livekit.Job, room *lk
     // Cleanup
     h.cleanup(room)
     return nil
+}
+
+func (h *RoomAgentHandler) OnJobTerminated(ctx context.Context, jobID string) {
+    log.Printf("Room agent job terminated: %s", jobID)
+    // Perform any additional cleanup
+}
+
+func (h *RoomAgentHandler) monitorRoom(ctx context.Context, room *lksdk.Room) {
+    ticker := time.NewTicker(500 * time.Millisecond)
+    defer ticker.Stop()
+    
+    knownParticipants := make(map[string]*lksdk.RemoteParticipant)
+    knownTracks := make(map[string]bool)
+    
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            // Check for participant changes
+            currentParticipants := room.GetRemoteParticipants()
+            
+            // New participants
+            for _, p := range currentParticipants {
+                if _, exists := knownParticipants[p.SID()]; !exists {
+                    knownParticipants[p.SID()] = p
+                    h.handleParticipantConnected(p)
+                }
+                
+                // Check for new tracks
+                for _, pub := range p.TrackPublications() {
+                    trackKey := fmt.Sprintf("%s-%s", p.SID(), pub.TrackPublication().SID())
+                    if !knownTracks[trackKey] {
+                        knownTracks[trackKey] = true
+                        h.handleTrackPublished(pub.TrackPublication(), p)
+                    }
+                }
+            }
+            
+            // Disconnected participants
+            for sid, p := range knownParticipants {
+                found := false
+                for _, current := range currentParticipants {
+                    if current.SID() == sid {
+                        found = true
+                        break
+                    }
+                }
+                if !found {
+                    delete(knownParticipants, sid)
+                    h.handleParticipantDisconnected(p)
+                }
+            }
+        }
+    }
 }
 
 func (h *RoomAgentHandler) handleTrackPublished(
@@ -113,8 +171,11 @@ type ResourceManagedRoomAgent struct {
     startTime       time.Time
 }
 
-func (a *ResourceManagedRoomAgent) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (a *ResourceManagedRoomAgent) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
     a.startTime = time.Now()
+    
+    // Create cancellable context
+    jobCtx, cancel := context.WithCancel(ctx)
     
     // Monitor resource usage
     ticker := time.NewTicker(30 * time.Second)
@@ -128,13 +189,15 @@ func (a *ResourceManagedRoomAgent) OnJob(ctx context.Context, job *livekit.Job, 
                     log.Println("Resource limits reached, terminating agent")
                     cancel() // Cancel context to trigger shutdown
                 }
-            case <-ctx.Done():
+            case <-jobCtx.Done():
                 return
             }
         }
     }()
     
-    // ... rest of implementation
+    // Wait for context cancellation
+    <-jobCtx.Done()
+    return nil
 }
 ```
 
@@ -177,59 +240,86 @@ Participant agents focus on individual participants, enabling personalized inter
 - **Gaming**: Player-specific NPCs or companions
 - **Education**: Personalized tutoring
 
-### Implementation
+### Implementation with UniversalWorker
 
 ```go
-type ParticipantAgentHandler struct {
-    agentID string
-    targetParticipantIdentity string
+// Using SimpleUniversalHandler for participant agents
+var targetIdentity string // Store target participant identity
+
+handler := &agent.SimpleUniversalHandler{
+    JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+        if job.Type != livekit.JobType_JT_PARTICIPANT {
+            return false, nil
+        }
+        
+        return true, &agent.JobMetadata{
+            ParticipantIdentity: "participant-agent-" + job.Id,
+            ParticipantName:     "Participant Agent",
+            ParticipantMetadata: `{"agent_type": "participant_monitor"}`,
+        }
+    },
+    
+    JobAssignedFunc: func(ctx context.Context, jobCtx *agent.JobContext) error {
+        // Extract target participant from job metadata
+        var metadata map[string]string
+        if err := json.Unmarshal([]byte(jobCtx.Job.Metadata), &metadata); err == nil {
+            targetIdentity = metadata["participant_identity"]
+        }
+        
+        log.Printf("Participant agent started for: %s", targetIdentity)
+        
+        // Check if participant is already in room
+        for _, p := range jobCtx.Room.GetRemoteParticipants() {
+            if p.Identity() == targetIdentity {
+                handleTargetParticipantConnected(p)
+                break
+            }
+        }
+        
+        // Run until cancelled
+        <-ctx.Done()
+        return nil
+    },
+    
+    JobTerminatedFunc: func(ctx context.Context, jobID string) {
+        log.Printf("Participant agent job terminated: %s", jobID)
+    },
+    
+    // Direct event handling for participants
+    ParticipantJoinedFunc: func(ctx context.Context, p *lksdk.RemoteParticipant) {
+        if p.Identity() == targetIdentity {
+            handleTargetParticipantConnected(p)
+        }
+    },
+    
+    ParticipantLeftFunc: func(ctx context.Context, p *lksdk.RemoteParticipant) {
+        if p.Identity() == targetIdentity {
+            log.Printf("Target participant disconnected: %s", p.Identity())
+        }
+    },
+    
+    TrackPublishedFunc: func(ctx context.Context, pub *lksdk.RemoteTrackPublication, p *lksdk.RemoteParticipant) {
+        if p.Identity() == targetIdentity {
+            log.Printf("Target participant published track: %s", pub.SID())
+            // Process track from target participant
+        }
+    },
 }
 
-func (h *ParticipantAgentHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
-    if job.Type != livekit.JobType_JT_PARTICIPANT {
-        return fmt.Errorf("expected participant job, got %v", job.Type)
-    }
-    
-    // Extract target participant from job metadata
-    var metadata map[string]string
-    if err := json.Unmarshal([]byte(job.Metadata), &metadata); err == nil {
-        h.targetParticipantIdentity = metadata["participant_identity"]
-    }
-    
-    log.Printf("Participant agent started for: %s", h.targetParticipantIdentity)
-    
-    // Wait for target participant
-    var targetParticipant *lksdk.RemoteParticipant
-    
-    room.Callback.OnParticipantConnected = func(p *lksdk.RemoteParticipant) {
-        if p.Identity() == h.targetParticipantIdentity {
-            targetParticipant = p
-            h.handleTargetParticipantConnected(p)
-        }
-    }
-    
-    room.Callback.OnParticipantDisconnected = func(p *lksdk.RemoteParticipant) {
-        if p.Identity() == h.targetParticipantIdentity {
-            log.Println("Target participant disconnected, ending agent")
-            cancel() // End the agent
-        }
-    }
-    
-    // Check if participant is already in room
-    for _, p := range room.GetRemoteParticipants() {
-        if p.Identity() == h.targetParticipantIdentity {
-            targetParticipant = p
-            h.handleTargetParticipantConnected(p)
-            break
-        }
-    }
-    
-    // Run until cancelled
-    <-ctx.Done()
-    return nil
-}
+// Create worker for participant agents
+worker := agent.NewUniversalWorker(
+    "ws://localhost:7880",
+    "api-key",
+    "api-secret",
+    handler,
+    agent.WorkerOptions{
+        AgentName: "participant-agent",
+        JobType:   livekit.JobType_JT_PARTICIPANT,
+        MaxJobs:   20, // Handle many participants
+    },
+)
 
-func (h *ParticipantAgentHandler) handleTargetParticipantConnected(p *lksdk.RemoteParticipant) {
+func handleTargetParticipantConnected(p *lksdk.RemoteParticipant) {
     log.Printf("Target participant connected: %s", p.Identity())
     
     // Subscribe to participant's tracks
@@ -333,66 +423,99 @@ Publisher agents join rooms to publish media streams, acting as synthetic partic
 - **Notifications**: Audio announcements
 - **Interactive NPCs**: Game characters with voice
 
-### Implementation
+### Implementation with UniversalWorker
 
 ```go
-type PublisherAgentHandler struct {
-    audioTrack *webrtc.TrackLocalStaticSample
-    videoTrack *webrtc.TrackLocalStaticSample
-    ttsService TTSService
-}
+// Using SimpleUniversalHandler for publisher agents
+var audioTrack *webrtc.TrackLocalStaticSample
+var videoTrack *webrtc.TrackLocalStaticSample
 
-func (h *PublisherAgentHandler) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
-    if job.Type != livekit.JobType_JT_PUBLISHER {
-        return fmt.Errorf("expected publisher job, got %v", job.Type)
-    }
+handler := &agent.SimpleUniversalHandler{
+    JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+        if job.Type != livekit.JobType_JT_PUBLISHER {
+            return false, nil
+        }
+        
+        return true, &agent.JobMetadata{
+            ParticipantIdentity: "publisher-agent",
+            ParticipantName:     "Media Publisher",
+            ParticipantMetadata: `{"agent_type": "publisher"}`,
+        }
+    },
     
-    log.Printf("Publisher agent started for room: %s", room.Name())
-    
-    // Create and publish audio track
-    audioTrack, err := h.createAudioTrack()
-    if err != nil {
-        return fmt.Errorf("failed to create audio track: %w", err)
-    }
-    
-    audioPublication, err := room.LocalParticipant.PublishTrack(audioTrack, &lksdk.TrackPublicationOptions{
-        Name: "Agent Audio",
-        Source: livekit.TrackSource_MICROPHONE,
-    })
-    if err != nil {
-        return fmt.Errorf("failed to publish audio: %w", err)
-    }
-    
-    // Create and publish video track (optional)
-    videoTrack, err := h.createVideoTrack()
-    if err == nil {
-        videoPublication, err := room.LocalParticipant.PublishTrack(videoTrack, &lksdk.TrackPublicationOptions{
-            Name: "Agent Video",
-            Source: livekit.TrackSource_CAMERA,
+    JobAssignedFunc: func(ctx context.Context, jobCtx *agent.JobContext) error {
+        log.Printf("Publisher agent started for room: %s", jobCtx.Room.Name())
+        
+        // Create and publish audio track
+        var err error
+        audioTrack, err = createAudioTrack()
+        if err != nil {
+            return fmt.Errorf("failed to create audio track: %w", err)
+        }
+        
+        audioPublication, err := jobCtx.Room.LocalParticipant.PublishTrack(audioTrack, &lksdk.TrackPublicationOptions{
+            Name: "Agent Audio",
+            Source: livekit.TrackSource_MICROPHONE,
         })
         if err != nil {
-            log.Printf("Failed to publish video: %v", err)
+            return fmt.Errorf("failed to publish audio: %w", err)
         }
-    }
+        
+        // Create and publish video track (optional)
+        videoTrack, err = createVideoTrack()
+        if err == nil {
+            _, err := jobCtx.Room.LocalParticipant.PublishTrack(videoTrack, &lksdk.TrackPublicationOptions{
+                Name: "Agent Video",
+                Source: livekit.TrackSource_CAMERA,
+            })
+            if err != nil {
+                log.Printf("Failed to publish video: %v", err)
+            }
+        }
+        
+        // Start media generation
+        go generateAudioContent(ctx, audioTrack)
+        if videoTrack != nil {
+            go generateVideoContent(ctx, videoTrack)
+        }
+        
+        // Run until cancelled
+        <-ctx.Done()
+        
+        // Cleanup
+        jobCtx.Room.LocalParticipant.UnpublishTrack(audioPublication.SID())
+        return nil
+    },
     
-    // Set up interaction handlers
-    room.Callback.OnDataReceived = h.handleDataReceived
+    JobTerminatedFunc: func(ctx context.Context, jobID string) {
+        log.Printf("Publisher job terminated: %s", jobID)
+    },
     
-    // Start media generation
-    go h.generateAudioContent(ctx, audioTrack)
-    if videoTrack != nil {
-        go h.generateVideoContent(ctx, videoTrack)
-    }
-    
-    // Run until cancelled
-    <-ctx.Done()
-    
-    // Cleanup
-    room.LocalParticipant.UnpublishTrack(audioPublication.SID())
-    return nil
+    // Handle data messages for controlling publishing
+    DataReceivedFunc: func(ctx context.Context, data []byte, p *lksdk.RemoteParticipant) {
+        // Process control messages
+        var msg map[string]interface{}
+        if err := json.Unmarshal(data, &msg); err == nil {
+            // Handle commands like start/stop publishing, change content, etc.
+            log.Printf("Received command from %s: %v", p.Identity(), msg)
+        }
+    },
 }
 
-func (h *PublisherAgentHandler) createAudioTrack() (*webrtc.TrackLocalStaticSample, error) {
+// Create worker for publisher agents
+worker := agent.NewUniversalWorker(
+    "ws://localhost:7880",
+    "api-key",
+    "api-secret",
+    handler,
+    agent.WorkerOptions{
+        AgentName: "publisher-agent",
+        JobType:   livekit.JobType_JT_PUBLISHER,
+        MaxJobs:   10,
+    },
+)
+
+func createAudioTrack() (*webrtc.TrackLocalStaticSample, error) {
     return webrtc.NewTrackLocalStaticSample(
         webrtc.RTPCodecCapability{
             MimeType:  webrtc.MimeTypeOpus,
@@ -404,7 +527,7 @@ func (h *PublisherAgentHandler) createAudioTrack() (*webrtc.TrackLocalStaticSamp
     )
 }
 
-func (h *PublisherAgentHandler) generateAudioContent(ctx context.Context, track *webrtc.TrackLocalStaticSample) {
+func generateAudioContent(ctx context.Context, track *webrtc.TrackLocalStaticSample) {
     ticker := time.NewTicker(20 * time.Millisecond) // 50Hz for Opus
     defer ticker.Stop()
     
@@ -606,21 +729,24 @@ You can deploy multiple agent types together:
 
 ```go
 // Deploy room agent for recording
-roomWorker := agent.NewWorker(url, key, secret, roomHandler, agent.WorkerOptions{
+roomWorker := agent.NewUniversalWorker(url, key, secret, roomHandler, agent.WorkerOptions{
     AgentName: "recorder",
-    JobTypes: []livekit.JobType{livekit.JobType_JT_ROOM},
+    JobType:   livekit.JobType_JT_ROOM,
+    MaxJobs:   5,
 })
 
 // Deploy participant agents for personal assistance  
-participantWorker := agent.NewWorker(url, key, secret, assistantHandler, agent.WorkerOptions{
+participantWorker := agent.NewUniversalWorker(url, key, secret, assistantHandler, agent.WorkerOptions{
     AgentName: "assistant",
-    JobTypes: []livekit.JobType{livekit.JobType_JT_PARTICIPANT},
+    JobType:   livekit.JobType_JT_PARTICIPANT,
+    MaxJobs:   20,
 })
 
 // Deploy publisher agent for announcements
-publisherWorker := agent.NewWorker(url, key, secret, announcerHandler, agent.WorkerOptions{
+publisherWorker := agent.NewUniversalWorker(url, key, secret, announcerHandler, agent.WorkerOptions{
     AgentName: "announcer",
-    JobTypes: []livekit.JobType{livekit.JobType_JT_PUBLISHER},
+    JobType:   livekit.JobType_JT_PUBLISHER,
+    MaxJobs:   10,
 })
 ```
 
@@ -636,7 +762,7 @@ type LifecycleAwareAgent struct {
     healthCheck func() error
 }
 
-func (a *LifecycleAwareAgent) OnJob(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (a *LifecycleAwareAgent) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
     // Initialize
     a.onStart()
     defer a.onStop()
@@ -679,18 +805,40 @@ func (a *LifecycleAwareAgent) OnJob(ctx context.Context, job *livekit.Job, room 
 func optimizeRoomAgent(room *lksdk.Room, maxSubscriptions int) {
     subscriptions := 0
     
-    room.Callback.OnTrackPublished = func(pub *lksdk.RemoteTrackPublication, p *lksdk.RemoteParticipant) {
-        if subscriptions >= maxSubscriptions {
-            log.Printf("Subscription limit reached, skipping track")
-            return
-        }
+    // Monitor tracks using polling pattern
+    go func() {
+        ticker := time.NewTicker(500 * time.Millisecond)
+        defer ticker.Stop()
         
-        // Only subscribe to needed tracks
-        if shouldSubscribe(pub, p) {
-            pub.SetSubscribed(true)
-            subscriptions++
+        knownTracks := make(map[string]bool)
+        
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case <-ticker.C:
+                for _, p := range room.GetRemoteParticipants() {
+                    for _, pub := range p.TrackPublications() {
+                        trackID := pub.TrackPublication().SID()
+                        if !knownTracks[trackID] {
+                            knownTracks[trackID] = true
+                            
+                            if subscriptions >= maxSubscriptions {
+                                log.Printf("Subscription limit reached, skipping track")
+                                continue
+                            }
+                            
+                            // Only subscribe to needed tracks
+                            if shouldSubscribe(pub.TrackPublication(), p) {
+                                pub.TrackPublication().SetSubscribed(true)
+                                subscriptions++
+                            }
+                        }
+                    }
+                }
+            }
         }
-    }
+    }()
 }
 
 // For Publisher Agents - adaptive quality

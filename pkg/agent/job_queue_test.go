@@ -23,7 +23,7 @@ func TestJobQueue(t *testing.T) {
 		Type: livekit.JobType_JT_ROOM,
 		Room: &livekit.Room{Name: "room-1"},
 	}
-	
+
 	err := queue.Enqueue(job1, JobPriorityNormal, "token-1", "url-1")
 	assert.NoError(t, err)
 	assert.Equal(t, 1, queue.Size())
@@ -76,7 +76,7 @@ func TestJobQueuePriority(t *testing.T) {
 
 	// Dequeue should return in priority order
 	expectedOrder := []string{"urgent-1", "urgent-2", "high-1", "normal-1", "normal-2", "low-1"}
-	
+
 	for _, expected := range expectedOrder {
 		item, ok := queue.Dequeue()
 		assert.True(t, ok)
@@ -98,7 +98,7 @@ func TestJobQueueMaxSize(t *testing.T) {
 
 	assert.NoError(t, queue.Enqueue(job1, JobPriorityNormal, "token", "url"))
 	assert.NoError(t, queue.Enqueue(job2, JobPriorityNormal, "token", "url"))
-	
+
 	// Third job should fail
 	err := queue.Enqueue(job3, JobPriorityNormal, "token", "url")
 	assert.Error(t, err)
@@ -112,7 +112,8 @@ func TestJobQueueDequeueWithContext(t *testing.T) {
 
 	// Test immediate return when job available
 	job := &livekit.Job{Id: "job-1", Type: livekit.JobType_JT_ROOM, Room: &livekit.Room{Name: "room"}}
-	queue.Enqueue(job, JobPriorityNormal, "token", "url")
+	err := queue.Enqueue(job, JobPriorityNormal, "token", "url")
+	assert.NoError(t, err)
 
 	ctx := context.Background()
 	item, err := queue.DequeueWithContext(ctx)
@@ -130,7 +131,7 @@ func TestJobQueueDequeueWithContext(t *testing.T) {
 	start := time.Now()
 	item, err = queue.DequeueWithContext(ctx)
 	duration := time.Since(start)
-	
+
 	assert.Error(t, err)
 	assert.Equal(t, context.Canceled, err)
 	assert.Nil(t, item)
@@ -149,7 +150,8 @@ func TestJobQueuePeek(t *testing.T) {
 
 	// Add job and peek
 	job := &livekit.Job{Id: "job-1", Type: livekit.JobType_JT_ROOM, Room: &livekit.Room{Name: "room"}}
-	queue.Enqueue(job, JobPriorityHigh, "token", "url")
+	err := queue.Enqueue(job, JobPriorityHigh, "token", "url")
+	assert.NoError(t, err)
 
 	item, ok = queue.Peek()
 	assert.True(t, ok)
@@ -172,7 +174,8 @@ func TestJobQueueRemoveJob(t *testing.T) {
 			Type: livekit.JobType_JT_ROOM,
 			Room: &livekit.Room{Name: "room"},
 		}
-		queue.Enqueue(job, JobPriorityNormal, "token", "url")
+		err := queue.Enqueue(job, JobPriorityNormal, "token", "url")
+		assert.NoError(t, err)
 	}
 
 	assert.Equal(t, 3, queue.Size())
@@ -210,7 +213,8 @@ func TestJobQueueGetJobsByPriority(t *testing.T) {
 			Type: livekit.JobType_JT_ROOM,
 			Room: &livekit.Room{Name: "room"},
 		}
-		queue.Enqueue(job, priority, "token", "url")
+		err := queue.Enqueue(job, priority, "token", "url")
+		assert.NoError(t, err)
 	}
 
 	// Check counts by priority
@@ -291,7 +295,8 @@ func TestJobQueueConcurrency(t *testing.T) {
 				Room: &livekit.Room{Name: "room"},
 			}
 			priority := JobPriority(id % 4)
-			queue.Enqueue(job, priority, "token", "url")
+			err := queue.Enqueue(job, priority, "token", "url")
+			assert.NoError(t, err)
 			done <- true
 		}(i)
 	}

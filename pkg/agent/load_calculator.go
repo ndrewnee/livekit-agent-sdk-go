@@ -41,24 +41,24 @@ type LoadCalculator interface {
 // need to be populated - calculators should handle missing data gracefully.
 type LoadMetrics struct {
 	// ActiveJobs is the current number of jobs being processed
-	ActiveJobs  int
-	
+	ActiveJobs int
+
 	// MaxJobs is the maximum number of concurrent jobs allowed (0 = unlimited)
-	MaxJobs     int
-	
+	MaxJobs int
+
 	// JobDuration maps job IDs to their processing duration.
 	// This helps identify long-running jobs that might indicate higher load.
 	JobDuration map[string]time.Duration
 
 	// CPUPercent is the current CPU usage percentage (0-100)
-	CPUPercent    float64
-	
+	CPUPercent float64
+
 	// MemoryPercent is the current memory usage percentage (0-100)
 	MemoryPercent float64
-	
+
 	// MemoryUsedMB is the actual memory used in megabytes
-	MemoryUsedMB  uint64
-	
+	MemoryUsedMB uint64
+
 	// MemoryTotalMB is the total available memory in megabytes
 	MemoryTotalMB uint64
 
@@ -109,11 +109,11 @@ func (d *DefaultLoadCalculator) Calculate(metrics LoadMetrics) float32 {
 // where system resources are the limiting factor.
 type CPUMemoryLoadCalculator struct {
 	// JobWeight is the weight given to job count (default: 0.4)
-	JobWeight    float32
-	
+	JobWeight float32
+
 	// CPUWeight is the weight given to CPU usage (default: 0.3)
-	CPUWeight    float32
-	
+	CPUWeight float32
+
 	// MemoryWeight is the weight given to memory usage (default: 0.3)
 	MemoryWeight float32
 }
@@ -225,7 +225,7 @@ func NewPredictiveLoadCalculator(base LoadCalculator, windowSize int) *Predictiv
 // Returns the base calculation if insufficient history exists.
 func (p *PredictiveLoadCalculator) Calculate(metrics LoadMetrics) float32 {
 	currentLoad := p.baseCalculator.Calculate(metrics)
-	
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -248,7 +248,7 @@ func (p *PredictiveLoadCalculator) Calculate(metrics LoadMetrics) float32 {
 
 	// Calculate trend
 	trend := p.calculateTrend()
-	
+
 	// Predict future load based on trend
 	predictedLoad := currentLoad + trend*0.2 // Conservative prediction
 
@@ -300,13 +300,13 @@ func (p *PredictiveLoadCalculator) calculateTrend() float32 {
 //
 // Only the most recent update within each interval is sent.
 type LoadBatcher struct {
-	worker       *Worker
-	interval     time.Duration
-	mu           sync.Mutex
-	pendingLoad  *float32
+	worker        WorkerInterface
+	interval      time.Duration
+	mu            sync.Mutex
+	pendingLoad   *float32
 	pendingStatus *WorkerStatus
-	timer        *time.Timer
-	closed       bool
+	timer         *time.Timer
+	closed        bool
 }
 
 // NewLoadBatcher creates a new load update batcher.
@@ -317,7 +317,7 @@ type LoadBatcher struct {
 //
 // The batcher will hold updates for the specified interval before
 // sending them to the server.
-func NewLoadBatcher(worker *Worker, interval time.Duration) *LoadBatcher {
+func NewLoadBatcher(worker WorkerInterface, interval time.Duration) *LoadBatcher {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
@@ -350,7 +350,7 @@ func (b *LoadBatcher) Stop() {
 
 	// Send final update if pending
 	if b.pendingLoad != nil && b.pendingStatus != nil {
-		b.worker.UpdateStatus(*b.pendingStatus, *b.pendingLoad)
+		_ = b.worker.UpdateStatus(*b.pendingStatus, *b.pendingLoad)
 	}
 }
 
@@ -393,7 +393,7 @@ func (b *LoadBatcher) flush() {
 	}
 
 	// Send the update
-	b.worker.UpdateStatus(*b.pendingStatus, *b.pendingLoad)
+	_ = b.worker.UpdateStatus(*b.pendingStatus, *b.pendingLoad)
 
 	// Clear pending
 	b.pendingLoad = nil

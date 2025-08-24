@@ -1,0 +1,26 @@
+# LiveKit development server configuration
+# This configuration enables agent support for local development
+
+port: 7880
+bind: 0.0.0.0
+
+# Development keys (DO NOT USE IN PRODUCTION)
+keys:
+  devkey: secret
+
+# Enable agent dispatching
+agent:
+  enabled: true
+  default_jobs:
+    - type: JT_ROOM
+      namespace: default
+      
+# Room configuration
+room:
+  auto_create: true
+  empty_timeout: 300
+  
+# Logging
+logging:
+  level: info
+  sample: false

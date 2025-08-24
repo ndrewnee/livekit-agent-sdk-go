@@ -1,0 +1,60 @@
+# LiveKit Server Configuration for Local Development
+# This configuration enables all agent types for testing
+
+port: 7880
+bind: 0.0.0.0
+
+# Development API keys (DO NOT USE IN PRODUCTION)
+keys:
+  devkey: secret
+
+# Redis for distributed coordination (optional)
+# redis:
+#   address: localhost:6379
+
+# Room configuration
+room:
+  auto_create: true
+  empty_timeout: 300
+  max_participants: 100
+
+# Agent dispatch configuration
+agent:
+  enabled: true
+  
+  # Default job assignments
+  default_jobs:
+    # Room-level jobs
+    - type: JT_ROOM
+      namespace: default
+      
+    # Participant-level jobs  
+    - type: JT_PARTICIPANT
+      namespace: default
+      
+    # Publisher jobs
+    - type: JT_PUBLISHER
+      namespace: default
+
+# Logging configuration
+logging:
+  level: info
+  sample: false
+  
+# Development mode settings
+development: true
+
+# WebRTC configuration
+rtc:
+  port_range_start: 50000
+  port_range_end: 60000
+  
+# Turn server configuration (for local testing)
+turn:
+  enabled: true
+  domain: localhost
+  cert_file: ""
+  key_file: ""
+  tls_port: 5349
+  udp_port: 3478
+  external_tls: false

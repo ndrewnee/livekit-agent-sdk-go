@@ -20,14 +20,14 @@ const (
 
 // ProtocolHandler manages protocol-level operations and compatibility
 type ProtocolHandler struct {
-	mu                     sync.RWMutex
-	logger                 *zap.Logger
-	serverVersion          string
-	negotiatedVersion      string
-	unknownMessageCount    int64
+	mu                      sync.RWMutex
+	logger                  *zap.Logger
+	serverVersion           string
+	negotiatedVersion       string
+	unknownMessageCount     int64
 	unsupportedMessageTypes map[string]int64
 	versionMismatchDetected bool
-	strictMode             bool // If true, reject unknown message types
+	strictMode              bool // If true, reject unknown message types
 }
 
 // NewProtocolHandler creates a new protocol handler
@@ -35,7 +35,7 @@ func NewProtocolHandler(logger *zap.Logger) *ProtocolHandler {
 	return &ProtocolHandler{
 		logger:                  logger,
 		unsupportedMessageTypes: make(map[string]int64),
-		strictMode:             false, // By default, log but don't fail on unknown messages
+		strictMode:              false, // By default, log but don't fail on unknown messages
 	}
 }
 
@@ -53,7 +53,7 @@ func (p *ProtocolHandler) negotiateVersion(serverVersion string) string {
 	if serverVersion == "" {
 		return CurrentProtocolVersion
 	}
-	
+
 	// Check if server version is compatible
 	if !p.isVersionCompatible(serverVersion) {
 		p.versionMismatchDetected = true
@@ -64,7 +64,7 @@ func (p *ProtocolHandler) negotiateVersion(serverVersion string) string {
 			zap.String("maxSupported", MaxSupportedVersion),
 		)
 	}
-	
+
 	return serverVersion
 }
 
@@ -80,24 +80,24 @@ func (p *ProtocolHandler) isVersionCompatible(version string) bool {
 // HandleUnknownMessage processes unknown message types
 func (p *ProtocolHandler) HandleUnknownMessage(msgType string, data []byte) error {
 	atomic.AddInt64(&p.unknownMessageCount, 1)
-	
+
 	p.mu.Lock()
 	p.unsupportedMessageTypes[msgType]++
 	count := p.unsupportedMessageTypes[msgType]
 	strictMode := p.strictMode
 	p.mu.Unlock()
-	
+
 	p.logger.Warn("Received unknown message type",
 		zap.String("type", msgType),
 		zap.Int("dataSize", len(data)),
 		zap.Int64("occurrences", count),
 		zap.Int64("totalUnknown", atomic.LoadInt64(&p.unknownMessageCount)),
 	)
-	
+
 	if strictMode {
 		return fmt.Errorf("unknown message type: %s", msgType)
 	}
-	
+
 	// In non-strict mode, just log and continue
 	return nil
 }
@@ -111,7 +111,7 @@ func (p *ProtocolHandler) GetUnknownMessageCount() int64 {
 func (p *ProtocolHandler) GetUnsupportedMessageTypes() map[string]int64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	
+
 	result := make(map[string]int64)
 	for k, v := range p.unsupportedMessageTypes {
 		result[k] = v
@@ -138,17 +138,17 @@ func (p *ProtocolHandler) ValidateProtocolMessage(msg *livekit.ServerMessage) er
 	if msg == nil {
 		return fmt.Errorf("nil message")
 	}
-	
+
 	// Check for version compatibility in messages that contain version info
 	if reg := msg.GetRegister(); reg != nil && reg.ServerInfo != nil {
 		p.SetServerVersion(reg.ServerInfo.Version)
-		
+
 		if p.versionMismatchDetected && p.strictMode {
 			return fmt.Errorf("protocol version incompatible: server=%s, client=%s",
 				reg.ServerInfo.Version, CurrentProtocolVersion)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -156,17 +156,17 @@ func (p *ProtocolHandler) ValidateProtocolMessage(msg *livekit.ServerMessage) er
 func (p *ProtocolHandler) GetProtocolMetrics() map[string]interface{} {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	
+
 	metrics := map[string]interface{}{
 		"server_version":        p.serverVersion,
 		"negotiated_version":    p.negotiatedVersion,
 		"current_version":       CurrentProtocolVersion,
 		"unknown_message_count": atomic.LoadInt64(&p.unknownMessageCount),
 		"version_mismatch":      p.versionMismatchDetected,
-		"strict_mode":          p.strictMode,
-		"unsupported_types":    p.GetUnsupportedMessageTypes(),
+		"strict_mode":           p.strictMode,
+		"unsupported_types":     p.GetUnsupportedMessageTypes(),
 	}
-	
+
 	return metrics
 }
 
@@ -195,7 +195,7 @@ func NewMessageTypeRegistry(logger *zap.Logger) *MessageTypeRegistry {
 func (r *MessageTypeRegistry) RegisterHandler(handler MessageTypeHandler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	
+
 	msgType := handler.GetMessageType()
 	r.handlers[msgType] = handler
 	r.logger.Debug("Registered message type handler", zap.String("type", msgType))
@@ -206,11 +206,11 @@ func (r *MessageTypeRegistry) HandleMessage(ctx context.Context, msgType string,
 	r.mu.RLock()
 	handler, exists := r.handlers[msgType]
 	r.mu.RUnlock()
-	
+
 	if !exists {
 		return fmt.Errorf("no handler registered for message type: %s", msgType)
 	}
-	
+
 	return handler.HandleMessage(ctx, data)
 }
 
@@ -249,7 +249,7 @@ func (n *ProtocolNegotiator) NegotiateVersion(serverVersions []string) (string, 
 			}
 		}
 	}
-	
+
 	return "", fmt.Errorf("no compatible protocol version found")
 }
 
@@ -270,12 +270,12 @@ type ProtocolUpgradeHandler struct {
 func (h *ProtocolUpgradeHandler) PerformUpgrade(timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	
+
 	done := make(chan error, 1)
 	go func() {
 		done <- h.upgradeFunc()
 	}()
-	
+
 	select {
 	case err := <-done:
 		if err != nil && h.rollbackFunc != nil {
@@ -289,7 +289,7 @@ func (h *ProtocolUpgradeHandler) PerformUpgrade(timeout time.Duration) error {
 	case <-ctx.Done():
 		// Timeout - attempt rollback
 		if h.rollbackFunc != nil {
-			h.rollbackFunc()
+			_ = h.rollbackFunc()
 		}
 		return fmt.Errorf("protocol upgrade timed out")
 	}
