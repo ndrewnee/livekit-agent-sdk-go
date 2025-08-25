@@ -14,8 +14,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// MockWebSocketConn implements a mock WebSocket connection for testing
-type MockWebSocketConn struct {
+// MockNetworkWebSocketConn implements a mock WebSocket connection for network testing
+type MockNetworkWebSocketConn struct {
 	mu               sync.Mutex
 	writeErr         error
 	writeDeadlineErr error
@@ -24,7 +24,7 @@ type MockWebSocketConn struct {
 	partialWriteAt   int // Simulate partial write at this call number
 }
 
-func (m *MockWebSocketConn) WriteMessage(messageType int, data []byte) error {
+func (m *MockNetworkWebSocketConn) WriteMessage(messageType int, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -46,15 +46,15 @@ func (m *MockWebSocketConn) WriteMessage(messageType int, data []byte) error {
 	return nil
 }
 
-func (m *MockWebSocketConn) SetWriteDeadline(t time.Time) error {
+func (m *MockNetworkWebSocketConn) SetWriteDeadline(t time.Time) error {
 	return m.writeDeadlineErr
 }
 
-func (m *MockWebSocketConn) Close() error {
+func (m *MockNetworkWebSocketConn) Close() error {
 	return nil
 }
 
-func (m *MockWebSocketConn) ReadMessage() (messageType int, p []byte, err error) {
+func (m *MockNetworkWebSocketConn) ReadMessage() (messageType int, p []byte, err error) {
 	return 0, nil, fmt.Errorf("not implemented")
 }
 
@@ -70,7 +70,7 @@ func (t *tempError) Timeout() bool   { return false }
 // TestNetworkHandlerPartialWrite tests partial write handling
 func TestNetworkHandlerPartialWrite(t *testing.T) {
 	handler := NewNetworkHandler()
-	mockConn := &MockWebSocketConn{
+	mockConn := &MockNetworkWebSocketConn{
 		partialWriteAt: 1, // Fail on first write
 	}
 
@@ -122,7 +122,7 @@ func TestNetworkHandlerNetworkErrors(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			mockConn := &MockWebSocketConn{writeErr: tc.err}
+			mockConn := &MockNetworkWebSocketConn{writeErr: tc.err}
 			conn := &wsConnWrapper{mock: mockConn}
 
 			err := handler.WriteMessageWithRetry(conn, websocket.TextMessage, []byte("test"))
@@ -268,7 +268,7 @@ func TestPartialWriteBufferClear(t *testing.T) {
 // TestWriteDeadlineError tests handling of write deadline errors
 func TestWriteDeadlineError(t *testing.T) {
 	handler := NewNetworkHandler()
-	mockConn := &MockWebSocketConn{
+	mockConn := &MockNetworkWebSocketConn{
 		writeDeadlineErr: errors.New("deadline error"),
 	}
 	conn := &wsConnWrapper{mock: mockConn}
@@ -282,7 +282,7 @@ func TestWriteDeadlineError(t *testing.T) {
 
 // wsConnWrapper wraps mock connection to implement minimal websocket.Conn interface
 type wsConnWrapper struct {
-	mock *MockWebSocketConn
+	mock *MockNetworkWebSocketConn
 }
 
 func (w *wsConnWrapper) WriteMessage(messageType int, data []byte) error {

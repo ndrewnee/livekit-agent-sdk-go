@@ -357,6 +357,14 @@ func (w *UniversalWorker) Stop() error {
 			w.loadBatcher.Stop()
 		}
 
+		if w.eventProcessor != nil {
+			w.eventProcessor.Stop()
+		}
+
+		if w.metricsCollector != nil {
+			w.metricsCollector.Stop()
+		}
+
 		close(w.doneCh)
 	})
 
@@ -474,6 +482,23 @@ func (w *UniversalWorker) StopWithTimeout(timeout time.Duration) error {
 			w.conn.Close()
 		}
 		w.mu.Unlock()
+
+		// Stop background services
+		if w.resourceMonitor != nil {
+			w.resourceMonitor.Stop()
+		}
+
+		if w.loadBatcher != nil {
+			w.loadBatcher.Stop()
+		}
+
+		if w.eventProcessor != nil {
+			w.eventProcessor.Stop()
+		}
+
+		if w.metricsCollector != nil {
+			w.metricsCollector.Stop()
+		}
 
 		if w.shutdownHandler != nil {
 			w.shutdownHandler.ExecutePhase(ctx, ShutdownPhaseCleanup)

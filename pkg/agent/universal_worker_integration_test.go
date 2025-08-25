@@ -20,7 +20,7 @@ import (
 
 // Test configuration for local LiveKit server
 func getTestConfig() (url, apiKey, apiSecret string) {
-	url = "http://localhost:7880"
+	url = "ws://localhost:7880"
 	apiKey = "devkey"
 	apiSecret = "secret"
 	return

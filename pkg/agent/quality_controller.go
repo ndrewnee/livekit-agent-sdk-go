@@ -550,6 +550,10 @@ func (qc *QualityController) CalculateOptimalQuality(connQuality livekit.Connect
 // Note: Currently logs the intent. Full implementation requires server
 // support for dynamic quality adjustment.
 func (qc *QualityController) ApplyQualitySettings(track *webrtc.TrackRemote, quality livekit.VideoQuality) error {
+	if track == nil {
+		return fmt.Errorf("track cannot be nil")
+	}
+
 	// In the SDK, this would translate to sending UpdateTrackSettings
 	// For now, we'll log the intent
 	getLogger := logger.GetLogger()
@@ -572,6 +576,10 @@ func (qc *QualityController) ApplyQualitySettings(track *webrtc.TrackRemote, qua
 // Note: Currently logs the intent. Full implementation requires server
 // support for dynamic dimension adjustment.
 func (qc *QualityController) ApplyDimensionSettings(track *webrtc.TrackRemote, width, height uint32) error {
+	if track == nil {
+		return fmt.Errorf("track cannot be nil")
+	}
+
 	getLogger := logger.GetLogger()
 	getLogger.Infow("applying dimension settings",
 		"trackID", track.ID(),
@@ -593,6 +601,10 @@ func (qc *QualityController) ApplyDimensionSettings(track *webrtc.TrackRemote, w
 // Note: Currently logs the intent. Full implementation requires server
 // support for dynamic frame rate adjustment.
 func (qc *QualityController) ApplyFrameRateSettings(track *webrtc.TrackRemote, fps float64) error {
+	if track == nil {
+		return fmt.Errorf("track cannot be nil")
+	}
+
 	getLogger := logger.GetLogger()
 	getLogger.Infow("applying frame rate settings",
 		"trackID", track.ID(),

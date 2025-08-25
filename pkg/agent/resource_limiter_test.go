@@ -370,13 +370,14 @@ func TestResourceLimiterConcurrency(t *testing.T) {
 // TestWorkerResourceLimiterIntegration tests integration with UniversalWorker
 func TestWorkerResourceLimiterIntegration(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("http://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType:              livekit.JobType_JT_ROOM,
 		EnableResourceLimits: true,
 		HardMemoryLimitMB:    256, // Reasonable limit for testing
 		CPUQuotaPercent:      100, // 1 CPU core
 		MaxFileDescriptors:   200, // Reasonable FD limit
 	})
+	defer worker.Stop() // Ensure cleanup
 
 	// Verify limiter was created
 	if worker.resourceLimiter == nil {

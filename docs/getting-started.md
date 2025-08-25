@@ -16,7 +16,7 @@ Before you begin, ensure you have:
 Install the LiveKit Agent SDK using Go modules:
 
 ```bash
-go get github.com/livekit/agent-sdk-go
+go get github.com/am-sokolov/livekit-agent-sdk-go
 ```
 
 This will also install the required dependencies:
@@ -144,7 +144,7 @@ LiveKit supports three types of agent jobs:
 ### Basic Worker Configuration
 
 ```go
-worker := agent.NewWorker(serverURL, apiKey, apiSecret, handler, agent.WorkerOptions{
+worker := agent.NewUniversalWorker(serverURL, apiKey, apiSecret, handler, agent.WorkerOptions{
     AgentName:       "my-agent",           // Unique name for your agent
     JobType:         livekit.JobType_JT_ROOM,  // Single job type per worker
     MaxJobs:         5,                    // Maximum concurrent jobs
@@ -176,14 +176,14 @@ func (h *RoomMonitorHandler) OnJobRequest(ctx context.Context, job *livekit.Job)
     }
 }
 
-func (h *RoomMonitorHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
-    log.Printf("Monitoring room: %s", room.Name())
+func (h *RoomMonitorHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
+    log.Printf("Monitoring room: %s", jobCtx.Room.Name())
     
     // Initialize participants map
     h.participants = make(map[string]*lksdk.RemoteParticipant)
     
     // Monitor room using polling pattern
-    go h.monitorRoom(ctx, room)
+    go h.monitorRoom(ctx, jobCtx.Room)
     
     // Stay in room until context is cancelled
     <-ctx.Done()
@@ -260,8 +260,8 @@ func (h *PublisherHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (
     }
 }
 
-func (h *PublisherHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
-    log.Printf("Publishing to room: %s", room.Name())
+func (h *PublisherHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
+    log.Printf("Publishing to room: %s", jobCtx.Room.Name())
     
     // Create an audio track (example: sine wave generator)
     track, err := webrtc.NewTrackLocalStaticSample(
@@ -274,7 +274,7 @@ func (h *PublisherHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, 
     }
     
     // Publish the track
-    publication, err := room.LocalParticipant.PublishTrack(track, &lksdk.TrackPublicationOptions{
+    publication, err := jobCtx.Room.LocalParticipant.PublishTrack(track, &lksdk.TrackPublicationOptions{
         Name: "Agent Audio",
         Source: livekit.TrackSource_MICROPHONE,
     })
@@ -317,7 +317,7 @@ func (h *PublisherHandler) OnJobTerminated(ctx context.Context, jobID string) {
 For local development with a LiveKit server running on your machine:
 
 ```go
-worker := agent.NewWorker(
+worker := agent.NewUniversalWorker(
     "ws://localhost:7880",
     "devkey",  // Default development key
     "secret",  // Default development secret
@@ -335,7 +335,7 @@ worker := agent.NewWorker(
 For production, use secure WebSocket and proper credentials:
 
 ```go
-worker := agent.NewWorker(
+worker := agent.NewUniversalWorker(
     "wss://your-livekit-server.com",
     os.Getenv("LIVEKIT_API_KEY"),
     os.Getenv("LIVEKIT_API_SECRET"),
@@ -368,11 +368,11 @@ func (h *ErrorHandlingHandler) OnJobRequest(ctx context.Context, job *livekit.Jo
     }
 }
 
-func (h *ErrorHandlingHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *ErrorHandlingHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
     // Wrap operations that might fail
     if err := riskyOperation(); err != nil {
         // Log the error
-        log.Printf("Error in job %s: %v", job.Id, err)
+        log.Printf("Error in job %s: %v", jobCtx.Job.Id, err)
         
         // Decide whether to retry or fail the job
         if isRetryable(err) {
@@ -404,7 +404,7 @@ func main() {
     sigChan := make(chan os.Signal, 1)
     signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
     
-    worker := agent.NewWorker(/* ... */)
+    worker := agent.NewUniversalWorker(/* ... */)
     
     // Start worker in a goroutine
     errChan := make(chan error, 1)
@@ -458,7 +458,7 @@ func main() {
     // Load .env file if it exists
     godotenv.Load()
     
-    worker := agent.NewWorker(
+    worker := agent.NewUniversalWorker(
         getEnvOrDefault("LIVEKIT_URL", "ws://localhost:7880"),
         os.Getenv("LIVEKIT_API_KEY"),
         os.Getenv("LIVEKIT_API_SECRET"),
@@ -493,11 +493,11 @@ func (h *LoggingHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (bo
     }
 }
 
-func (h *LoggingHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
+func (h *LoggingHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.JobContext) error {
     log := logger.GetLogger().WithValues(
-        "jobID", job.Id,
-        "roomName", room.Name(),
-        "jobType", job.Type.String(),
+        "jobID", jobCtx.Job.Id,
+        "roomName", jobCtx.Room.Name(),
+        "jobType", jobCtx.Job.Type.String(),
     )
     
     log.Infow("Processing job")
@@ -520,7 +520,7 @@ Implement health checks for monitoring:
 ```go
 import "net/http"
 
-func startHealthServer(worker *agent.Worker) {
+func startHealthServer(worker *agent.UniversalWorker) {
     http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
         status := worker.GetStatus()
         if status == agent.WorkerStatus_WS_AVAILABLE {
@@ -573,4 +573,4 @@ logger.InitializeLogger("debug", "development")
 - Check the [Troubleshooting Guide](troubleshooting.md)
 - Visit [LiveKit Docs](https://docs.livekit.io)
 - Join the [LiveKit Community Slack](https://livekit.io/slack)
-- Open an issue on [GitHub](https://github.com/livekit/agent-sdk-go)
+- Open an issue on [GitHub](https://github.com/am-sokolov/livekit-agent-sdk-go)

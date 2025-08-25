@@ -86,7 +86,7 @@ Common issues and solutions when working with the LiveKit Agent SDK.
 1. **Network Stability**
    ```go
    // Enable connection monitoring
-   worker := agent.NewWorker(url, key, secret, handler, agent.WorkerOptions{
+   worker := agent.NewUniversalWorker(url, key, secret, handler, agent.WorkerOptions{
        HealthCheckInterval: 30 * time.Second,  // More frequent health checks
    })
    ```
@@ -139,7 +139,7 @@ Common issues and solutions when working with the LiveKit Agent SDK.
 1. **Job Type Mismatch**
    ```go
    // Ensure job types match
-   worker := agent.NewWorker(url, key, secret, handler, agent.WorkerOptions{
+   worker := agent.NewUniversalWorker(url, key, secret, handler, agent.WorkerOptions{
        JobTypes: []livekit.JobType{
            livekit.JobType_JT_ROOM,        // Must match dispatched jobs
            livekit.JobType_JT_PARTICIPANT,
@@ -150,7 +150,7 @@ Common issues and solutions when working with the LiveKit Agent SDK.
 2. **Namespace Configuration**
    ```go
    // Check namespace matches
-   worker := agent.NewWorker(url, key, secret, handler, agent.WorkerOptions{
+   worker := agent.NewUniversalWorker(url, key, secret, handler, agent.WorkerOptions{
        Namespace: "production",  // Must match job namespace
    })
    ```
@@ -158,7 +158,7 @@ Common issues and solutions when working with the LiveKit Agent SDK.
 3. **Agent Registration**
    ```go
    // Verify agent name is unique and descriptive
-   worker := agent.NewWorker(url, key, secret, handler, agent.WorkerOptions{
+   worker := agent.NewUniversalWorker(url, key, secret, handler, agent.WorkerOptions{
        AgentName: "my-unique-agent-v2",  // Should be unique
    })
    ```
@@ -166,7 +166,7 @@ Common issues and solutions when working with the LiveKit Agent SDK.
 4. **Load Balancing Issues**
    ```go
    // Check load calculation
-   worker := agent.NewWorker(url, key, secret, handler, agent.WorkerOptions{
+   worker := agent.NewUniversalWorker(url, key, secret, handler, agent.WorkerOptions{
        LoadCalculator: &CustomLoadCalculator{
            Calculator: func(stats WorkerStats) float64 {
                log.Printf("Current load: %f", stats.CurrentLoad)
@@ -203,7 +203,7 @@ Common issues and solutions when working with the LiveKit Agent SDK.
 2. **Increase Timeouts**
    ```go
    // Configure longer shutdown timeout
-   worker := agent.NewWorker(url, key, secret, handler, agent.WorkerOptions{
+   worker := agent.NewUniversalWorker(url, key, secret, handler, agent.WorkerOptions{
        ShutdownTimeout: 5 * time.Minute,  // Allow more cleanup time
    })
    ```
@@ -309,7 +309,7 @@ Common issues and solutions when working with the LiveKit Agent SDK.
 
 1. **Resource Limits**
    ```go
-   worker := agent.NewWorker(url, key, secret, handler, agent.WorkerOptions{
+   worker := agent.NewUniversalWorker(url, key, secret, handler, agent.WorkerOptions{
        ResourceLimiter: agent.NewResourceLimiter(agent.ResourceLimits{
            MaxCPUPercent: 70,  // Limit CPU usage
            OnCPULimit: func() {
@@ -322,7 +322,7 @@ Common issues and solutions when working with the LiveKit Agent SDK.
 
 2. **Concurrent Job Limiting**
    ```go
-   worker := agent.NewWorker(url, key, secret, handler, agent.WorkerOptions{
+   worker := agent.NewUniversalWorker(url, key, secret, handler, agent.WorkerOptions{
        MaxConcurrentJobs: 2,  // Reduce concurrent jobs
    })
    ```
@@ -354,7 +354,7 @@ Common issues and solutions when working with the LiveKit Agent SDK.
 
 1. **Memory Limits**
    ```go
-   worker := agent.NewWorker(url, key, secret, handler, agent.WorkerOptions{
+   worker := agent.NewUniversalWorker(url, key, secret, handler, agent.WorkerOptions{
        ResourceLimiter: agent.NewResourceLimiter(agent.ResourceLimits{
            MaxMemoryMB: 1024,  // Limit memory usage
            OnMemoryLimit: func() {
@@ -784,7 +784,7 @@ func (h *MyHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *l
 ### WebSocket Traffic Monitoring
 
 ```go
-worker := agent.NewWorker(url, key, secret, handler, agent.WorkerOptions{
+worker := agent.NewUniversalWorker(url, key, secret, handler, agent.WorkerOptions{
     WebSocketDebug: true,  // Enables WebSocket message logging
 })
 ```
@@ -855,7 +855,7 @@ If you're still experiencing issues:
 1. Check the [examples](examples/) for reference implementations
 2. Review the [API documentation](api-reference.md)
 3. Join the [LiveKit Community Slack](https://livekit.io/slack)
-4. File an issue on [GitHub](https://github.com/livekit/agent-sdk-go/issues)
+4. File an issue on [GitHub](https://github.com/am-sokolov/livekit-agent-sdk-go/issues)
 
 Include the following information when seeking help:
 - Agent SDK version

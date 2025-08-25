@@ -277,9 +277,10 @@ func TestShutdownHookBuilder(t *testing.T) {
 // TestWorkerShutdownHooks tests shutdown hooks integration with worker
 func TestWorkerShutdownHooks(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("http://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 	})
+	defer worker.Stop() // Ensure cleanup
 
 	// Add custom hooks
 	var hooksCalled int32

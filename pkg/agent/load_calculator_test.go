@@ -215,6 +215,7 @@ func TestLoadBatcher(t *testing.T) {
 // TestSystemMetricsCollector tests system metrics collection
 func TestSystemMetricsCollector(t *testing.T) {
 	collector := NewSystemMetricsCollector()
+	defer collector.Stop() // Ensure cleanup
 
 	// Give it time to collect initial metrics
 	time.Sleep(1100 * time.Millisecond)

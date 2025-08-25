@@ -56,7 +56,7 @@ This guide helps you migrate between versions safely and efficiently.
 
 ```bash
 # Update go.mod
-go get github.com/livekit/agent-sdk-go@v0.1.0
+go get github.com/am-sokolov/livekit-agent-sdk-go@latest
 
 # Clean module cache if needed
 go clean -modcache
@@ -316,12 +316,12 @@ echo "Migrating LiveKit Agent SDK from 0.0.x to 0.1.x"
 
 # 1. Update go.mod
 echo "Updating dependencies..."
-go get github.com/livekit/agent-sdk-go@v0.1.0
+go get github.com/am-sokolov/livekit-agent-sdk-go@latest
 go mod tidy
 
 # 2. Update imports
 echo "Updating imports..."
-find . -name "*.go" -exec sed -i 's|github.com/livekit/agent-sdk-go/v0|github.com/am-sokolov/livekit-agent-sdk-go/pkg/agent|g' {} \;
+find . -name "*.go" -exec sed -i 's|github.com/livekit/agent-sdk-go|github.com/am-sokolov/livekit-agent-sdk-go|g' {} \;
 
 # 3. Update method signatures
 echo "Updating method signatures..."
@@ -359,7 +359,7 @@ echo "See migration-guide.md for manual steps that may be required."
    - Standardized error handling
 
 4. **Import Paths**
-   - Changed from `github.com/livekit/agent-sdk-go/v0` to `github.com/am-sokolov/livekit-agent-sdk-go/pkg/agent`
+   - Changed from `github.com/livekit/agent-sdk-go` to `github.com/am-sokolov/livekit-agent-sdk-go`
 
 5. **Configuration**
    - Consolidated configuration options
@@ -411,7 +411,7 @@ echo "See migration-guide.md for manual steps that may be required."
 
 2. **Update Dependencies**
    ```bash
-   go get github.com/livekit/agent-sdk-go@v0.1.0
+   go get github.com/am-sokolov/livekit-agent-sdk-go@latest
    go mod tidy
    ```
 
@@ -573,7 +573,7 @@ func main() {
                     issues = append(issues, fmt.Sprintf("%s: Found HandleJob method, should be OnJob", path))
                 }
             case *ast.ImportSpec:
-                if x.Path.Value == `"github.com/livekit/agent-sdk-go/v0"` {
+                if x.Path.Value == `"github.com/livekit/agent-sdk-go"` {
                     issues = append(issues, fmt.Sprintf("%s: Old import path detected", path))
                 }
             }
@@ -668,7 +668,7 @@ If you encounter issues during migration:
 
 1. **Check Common Issues**: Review the [troubleshooting guide](troubleshooting.md)
 2. **Community Support**: Join [LiveKit Slack](https://livekit.io/slack)
-3. **GitHub Issues**: Report bugs or ask questions on [GitHub](https://github.com/livekit/agent-sdk-go/issues)
+3. **GitHub Issues**: Report bugs or ask questions on [GitHub](https://github.com/am-sokolov/livekit-agent-sdk-go/issues)
 4. **Documentation**: Review the complete [API reference](api-reference.md)
 
 When asking for help, include:

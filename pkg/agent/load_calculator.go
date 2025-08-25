@@ -416,6 +416,7 @@ type SystemMetricsCollector struct {
 	memoryPercent float64
 	memoryUsedMB  uint64
 	memoryTotalMB uint64
+	stopCh        chan struct{}
 }
 
 // NewSystemMetricsCollector creates a new system metrics collector.
@@ -427,7 +428,9 @@ type SystemMetricsCollector struct {
 //
 // The collector runs until the process exits.
 func NewSystemMetricsCollector() *SystemMetricsCollector {
-	collector := &SystemMetricsCollector{}
+	collector := &SystemMetricsCollector{
+		stopCh: make(chan struct{}),
+	}
 	go collector.collectLoop()
 	return collector
 }
@@ -436,9 +439,19 @@ func (s *SystemMetricsCollector) collectLoop() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		s.collect()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			s.collect()
+		}
 	}
+}
+
+// Stop stops the metrics collector
+func (s *SystemMetricsCollector) Stop() {
+	close(s.stopCh)
 }
 
 func (s *SystemMetricsCollector) collect() {

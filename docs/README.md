@@ -80,11 +80,11 @@ func main() {
 
 ## 🤝 Contributing
 
-Found an issue or want to contribute? Please check our [GitHub repository](https://github.com/livekit/agent-sdk-go) for:
+Found an issue or want to contribute? Please check our [GitHub repository](https://github.com/am-sokolov/livekit-agent-sdk-go) for:
 - Filing issues
 - Submitting pull requests
 - Viewing the source code
 
 ## 📄 License
 
-The LiveKit Agent SDK is licensed under the Apache License 2.0. See the [LICENSE](https://github.com/livekit/agent-sdk-go/blob/main/LICENSE) file for details.
+The LiveKit Agent SDK is licensed under the Apache License 2.0. See the [LICENSE](https://github.com/am-sokolov/livekit-agent-sdk-go/blob/main/LICENSE) file for details.

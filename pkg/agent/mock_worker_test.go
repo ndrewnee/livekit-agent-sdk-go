@@ -22,7 +22,7 @@ func newMockWorker(logger Logger) *mockWorker {
 		logger = NewDefaultLogger()
 	}
 	return &mockWorker{
-		serverURL:  "http://localhost:7880",
+		serverURL:  "ws://localhost:7880",
 		logger:     logger,
 		activeJobs: make(map[string]interface{}),
 	}

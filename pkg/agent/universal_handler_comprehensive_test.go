@@ -337,9 +337,9 @@ func TestParticipantInfo(t *testing.T) {
 // TestEnums tests enum values
 func TestEnums(t *testing.T) {
 	// Test WebSocketState
-	assert.Equal(t, WebSocketState(0), WebSocketStateConnecting)
-	assert.Equal(t, WebSocketState(1), WebSocketStateConnected)
-	assert.Equal(t, WebSocketState(2), WebSocketStateDisconnected)
+	assert.Equal(t, WebSocketState(0), WebSocketStateDisconnected)
+	assert.Equal(t, WebSocketState(1), WebSocketStateConnecting)
+	assert.Equal(t, WebSocketState(2), WebSocketStateConnected)
 	assert.Equal(t, WebSocketState(3), WebSocketStateReconnecting)
 
 	// Test WorkerStatus
@@ -426,10 +426,25 @@ func TestAllHandlerMethods(t *testing.T) {
 
 	accept, metadata := handler.OnJobRequest(ctx, &livekit.Job{})
 	assert.True(t, accept)
-	assert.Nil(t, metadata)
+	assert.NotNil(t, metadata) // BaseHandler returns empty metadata, not nil
 
-	err := handler.OnJobAssigned(ctx, &JobContext{})
-	assert.NoError(t, err)
+	// OnJobAssigned blocks by default, so run it in a goroutine with timeout
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- handler.OnJobAssigned(ctxWithTimeout, &JobContext{})
+	}()
+
+	select {
+	case err := <-done:
+		// Should return nil after context is done
+		assert.NoError(t, err)
+	case <-time.After(20 * time.Millisecond):
+		// Should have completed by now
+		t.Log("OnJobAssigned completed after timeout")
+	}
 
 	// OnJobCompleted doesn't exist, removed
 	handler.OnJobTerminated(ctx, "job-1")

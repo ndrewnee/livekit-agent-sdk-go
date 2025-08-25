@@ -163,6 +163,10 @@ func (jc *JobUtils) WaitForParticipant(identity string, timeout time.Duration) (
 // If destinationIdentities is provided, the data is sent only to those participants.
 // Otherwise, it's sent to all participants in the room.
 func (jc *JobUtils) PublishData(data []byte, reliable bool, destinationIdentities []string) error {
+	if jc.Room == nil || jc.Room.LocalParticipant == nil {
+		return fmt.Errorf("not connected to room")
+	}
+
 	// For now, revert to using the deprecated API until we can properly implement the new API
 	opts := lksdk.WithDataPublishReliable(reliable)
 	if len(destinationIdentities) > 0 {

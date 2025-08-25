@@ -13,7 +13,7 @@ import (
 // TestUniversalWorker_RaceConditions tests for race conditions in UniversalWorker
 func TestUniversalWorker_RaceConditions(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 		MaxJobs: 10,
 	})
@@ -91,7 +91,7 @@ func TestUniversalWorker_RaceConditions(t *testing.T) {
 // TestUniversalWorker_ConcurrentShutdown tests concurrent shutdown operations
 func TestUniversalWorker_ConcurrentShutdown(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 	})
 
@@ -113,7 +113,7 @@ func TestUniversalWorker_ConcurrentShutdown(t *testing.T) {
 // TestUniversalWorker_ConcurrentHooks tests concurrent hook operations
 func TestUniversalWorker_ConcurrentHooks(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 	})
 
@@ -213,7 +213,7 @@ func TestUniversalWorker_ConcurrentEventProcessing(t *testing.T) {
 // TestUniversalWorker_ConcurrentResourceOperations tests concurrent resource operations
 func TestUniversalWorker_ConcurrentResourceOperations(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType:              livekit.JobType_JT_ROOM,
 		EnableResourceLimits: true,
 		EnableResourcePool:   true,

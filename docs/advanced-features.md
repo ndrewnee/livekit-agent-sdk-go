@@ -364,6 +364,55 @@ func (h *MyHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *l
 }
 ```
 
+### Resource Monitor
+
+Monitor system resources with automatic detection of issues:
+
+```go
+// Create resource monitor
+monitor := agent.NewResourceMonitor(logger, agent.ResourceMonitorOptions{
+    CheckInterval:          10 * time.Second,
+    MemoryLimitMB:          2048,  // 2GB limit
+    GoroutineLimit:         1000,  // Max goroutines
+    GoroutineLeakThreshold: 5,     // Consecutive increases to detect leak
+})
+
+// Start monitoring
+monitor.Start()
+defer monitor.Stop()
+
+// Set callbacks for issues
+monitor.SetOOMCallback(func() {
+    log.Printf("OOM condition detected!")
+    // Trigger graceful degradation
+})
+
+monitor.SetLeakCallback(func(count int) {
+    log.Printf("Goroutine leak detected: %d goroutines", count)
+    // Alert operations team
+})
+
+// Check resource status
+status := monitor.GetResourceStatus()
+switch status.HealthLevel {
+case agent.ResourceHealthGood:
+    // Normal operation
+case agent.ResourceHealthWarning:
+    // Reduce load
+    log.Printf("Resource warning: %.1f%% memory, %d goroutines", 
+        status.MemoryPercent, status.GoroutineCount)
+case agent.ResourceHealthCritical:
+    // Emergency measures
+    log.Printf("Resource critical: %.1f%% memory, %d goroutines",
+        status.MemoryPercent, status.GoroutineCount)
+}
+```
+
+The monitor automatically detects:
+- **Memory pressure**: Triggers at 80% (warning) and 90% (critical)
+- **Goroutine leaks**: Detects consistent increases in goroutine count
+- **OOM conditions**: Monitors for out-of-memory situations
+
 ### Memory Management
 
 Implement memory-aware processing:
@@ -453,6 +502,146 @@ func (p *ConnectionPool) Get(url string) (*websocket.Conn, error) {
     
     return nil, errors.New("connection pool exhausted")
 }
+```
+
+## Participant Coordination
+
+### Multi-Participant Coordinator
+
+Coordinate activities across multiple participants:
+
+```go
+// Create coordinator
+coordinator := agent.NewMultiParticipantCoordinator()
+defer coordinator.Stop()
+
+// Register participants as they join
+coordinator.RegisterParticipant(participant.Identity(), participant)
+
+// Create groups for collaboration
+group, err := coordinator.CreateGroup("speakers", "Active Speakers", map[string]interface{}{
+    "maxSize": 4,
+    "type": "speakers",
+})
+
+// Track participant activities
+coordinator.UpdateParticipantActivity(participant.Identity(), agent.ActivityTypeSpeaking)
+
+// Record interactions
+coordinator.RecordInteraction(
+    sender.Identity(),
+    receiver.Identity(), 
+    "message",
+    map[string]interface{}{"content": messageContent},
+)
+
+// Get interaction patterns
+graph := coordinator.GetInteractionGraph()
+for from, interactions := range graph {
+    for to, count := range interactions {
+        log.Printf("%s -> %s: %d interactions", from, to, count)
+    }
+}
+
+// Get activity metrics
+metrics := coordinator.GetActivityMetrics()
+log.Printf("Total activities: %d, Active participants: %d", 
+    metrics.TotalActivities, metrics.ActiveParticipants)
+```
+
+### Participant Event Processing
+
+Process participant events with filtering and batching:
+
+```go
+// Create event processor
+processor := agent.NewParticipantEventProcessor()
+defer processor.Stop()
+
+// Register event handlers
+processor.RegisterHandler(agent.EventTypeParticipantJoined, func(event agent.ParticipantEvent) error {
+    log.Printf("Participant joined: %s", event.Participant.Identity())
+    return nil
+})
+
+processor.RegisterHandler(agent.EventTypeSpeakingChanged, func(event agent.ParticipantEvent) error {
+    if speaking, ok := event.Metadata["speaking"].(bool); ok && speaking {
+        log.Printf("%s started speaking", event.Participant.Identity())
+    }
+    return nil
+})
+
+// Add filters
+processor.AddFilter(func(event agent.ParticipantEvent) bool {
+    // Only process events from non-bot participants
+    return !strings.HasPrefix(event.Participant.Identity(), "bot-")
+})
+
+// Add batch processor for analytics
+processor.AddBatchProcessor(&AnalyticsBatchProcessor{
+    BatchSize: 100,
+    BatchTimeout: 30 * time.Second,
+})
+
+// Queue events for processing
+processor.QueueEvent(agent.ParticipantEvent{
+    Type: agent.EventTypeParticipantJoined,
+    Participant: participant,
+    Timestamp: time.Now(),
+})
+
+// Get metrics
+metrics := processor.GetMetrics()
+log.Printf("Processed: %d, Failed: %d, Filtered: %d", 
+    metrics["processed_events"], 
+    metrics["failed_events"],
+    metrics["filtered_events"])
+```
+
+### Coordination Rules
+
+Implement custom coordination rules:
+
+```go
+// Create proximity-based grouping rule
+proximityRule := agent.NewProximityRule(5, 1*time.Minute)
+coordinator.AddCoordinationRule(proximityRule)
+
+// Create activity-based rule
+activityRule := agent.NewActivityBasedRule(10, 5*time.Minute)
+coordinator.AddCoordinationRule(activityRule)
+
+// Custom rule implementation
+type TurnTakingRule struct {
+    maxSpeakTime time.Duration
+    currentSpeaker string
+    speakStartTime time.Time
+}
+
+func (r *TurnTakingRule) Evaluate(participants map[string]*agent.CoordinatedParticipant) (bool, []agent.CoordinationAction) {
+    // Check if current speaker exceeded time
+    if r.currentSpeaker != "" && time.Since(r.speakStartTime) > r.maxSpeakTime {
+        return true, []agent.CoordinationAction{
+            {
+                Type: "mute_participant",
+                Target: r.currentSpeaker,
+                Parameters: map[string]interface{}{
+                    "reason": "exceeded_speak_time",
+                },
+            },
+        }
+    }
+    return false, nil
+}
+
+func (r *TurnTakingRule) GetName() string {
+    return "turn_taking"
+}
+
+// Add custom rule
+coordinator.AddCoordinationRule(&TurnTakingRule{
+    maxSpeakTime: 2 * time.Minute,
+})
 ```
 
 ## Auto-Scaling

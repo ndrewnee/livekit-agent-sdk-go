@@ -13,57 +13,57 @@ import (
 	"github.com/stretchr/testify/mock"
 )
 
-// MockUniversalHandler for testing
-type MockUniversalHandler struct {
+// MockUniversalHandlerOld for testing
+type MockUniversalHandlerOld struct {
 	mock.Mock
 	BaseHandler
 }
 
-func (m *MockUniversalHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *JobMetadata) {
+func (m *MockUniversalHandlerOld) OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *JobMetadata) {
 	args := m.Called(ctx, job)
 	return args.Bool(0), args.Get(1).(*JobMetadata)
 }
 
-func (m *MockUniversalHandler) OnJobAssigned(ctx context.Context, jobCtx *JobContext) error {
+func (m *MockUniversalHandlerOld) OnJobAssigned(ctx context.Context, jobCtx *JobContext) error {
 	args := m.Called(ctx, jobCtx)
 	return args.Error(0)
 }
 
-func (m *MockUniversalHandler) OnJobTerminated(ctx context.Context, jobID string) {
+func (m *MockUniversalHandlerOld) OnJobTerminated(ctx context.Context, jobID string) {
 	m.Called(ctx, jobID)
 }
 
-func (m *MockUniversalHandler) OnParticipantJoined(ctx context.Context, participant *lksdk.RemoteParticipant) {
+func (m *MockUniversalHandlerOld) OnParticipantJoined(ctx context.Context, participant *lksdk.RemoteParticipant) {
 	m.Called(ctx, participant)
 }
 
-func (m *MockUniversalHandler) OnParticipantLeft(ctx context.Context, participant *lksdk.RemoteParticipant) {
+func (m *MockUniversalHandlerOld) OnParticipantLeft(ctx context.Context, participant *lksdk.RemoteParticipant) {
 	m.Called(ctx, participant)
 }
 
-func (m *MockUniversalHandler) OnParticipantMetadataChanged(ctx context.Context, participant *lksdk.RemoteParticipant, oldMetadata string) {
+func (m *MockUniversalHandlerOld) OnParticipantMetadataChanged(ctx context.Context, participant *lksdk.RemoteParticipant, oldMetadata string) {
 	m.Called(ctx, participant, oldMetadata)
 }
 
 func TestUniversalWorker_Creation(t *testing.T) {
-	handler := &MockUniversalHandler{}
+	handler := &MockUniversalHandlerOld{}
 	opts := WorkerOptions{
 		AgentName: "test-agent",
 		JobType:   livekit.JobType_JT_ROOM,
 	}
 
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, opts)
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, opts)
 	assert.NotNil(t, worker)
 	assert.Equal(t, "ws://localhost:7880", worker.serverURL)
-	assert.Equal(t, "key", worker.apiKey)
+	assert.Equal(t, "devkey", worker.apiKey)
 	assert.Equal(t, "secret", worker.apiSecret)
 	assert.Equal(t, handler, worker.handler)
 	assert.Equal(t, opts.AgentName, worker.opts.AgentName)
 }
 
 func TestUniversalWorker_JobContext(t *testing.T) {
-	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{})
+	handler := &MockUniversalHandlerOld{}
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{})
 
 	// Test empty job context
 	ctx, exists := worker.GetJobContext("non-existent")
@@ -90,11 +90,11 @@ func TestUniversalWorker_JobContext(t *testing.T) {
 }
 
 func TestUniversalWorker_LoadCalculation(t *testing.T) {
-	handler := &MockUniversalHandler{}
+	handler := &MockUniversalHandlerOld{}
 	opts := WorkerOptions{
 		MaxJobs: 5,
 	}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, opts)
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, opts)
 
 	// Initially should have 0 load
 	assert.Equal(t, 0, len(worker.activeJobs))
@@ -114,8 +114,8 @@ func TestUniversalWorker_LoadCalculation(t *testing.T) {
 }
 
 func TestUniversalWorker_ParticipantTracking(t *testing.T) {
-	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{})
+	handler := &MockUniversalHandlerOld{}
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{})
 
 	// Create a mock room
 	// Since Room.Name() will return empty string for a mock room,
@@ -172,8 +172,8 @@ func TestUniversalWorker_SimpleHandler(t *testing.T) {
 }
 
 func TestUniversalWorker_ConcurrentAccess(t *testing.T) {
-	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{})
+	handler := &MockUniversalHandlerOld{}
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{})
 
 	// Test concurrent job addition/removal
 	var wg sync.WaitGroup
@@ -241,8 +241,8 @@ func TestUniversalWorker_EventProcessor(t *testing.T) {
 }
 
 func TestUniversalWorker_StatusUpdates(t *testing.T) {
-	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{})
+	handler := &MockUniversalHandlerOld{}
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{})
 
 	// Test status queue
 	update := statusUpdate{
@@ -258,8 +258,8 @@ func TestUniversalWorker_StatusUpdates(t *testing.T) {
 }
 
 func TestUniversalWorker_RoomCallbacks(t *testing.T) {
-	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{})
+	handler := &MockUniversalHandlerOld{}
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{})
 
 	job := &livekit.Job{
 		Id:   "test-job",

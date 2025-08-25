@@ -397,12 +397,46 @@ func (h *MockUniversalHandler) OnDataReceived(ctx context.Context, data []byte, 
 	h.dataReceived = append(h.dataReceived, data)
 }
 
+// MockJobRecoveryHandler mock implementation for testing
+type MockJobRecoveryHandler struct {
+	mu              sync.Mutex
+	RecoveredJobs   []string
+	ShouldRecoverFn func(jobID string) bool
+}
+
+func (m *MockJobRecoveryHandler) OnJobRecovery(ctx context.Context, jobID string, checkpoint *JobCheckpoint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.RecoveredJobs = append(m.RecoveredJobs, jobID)
+	return nil
+}
+
+func (m *MockJobRecoveryHandler) ShouldRecover(jobID string) bool {
+	if m.ShouldRecoverFn != nil {
+		return m.ShouldRecoverFn(jobID)
+	}
+	return true
+}
+
+func (m *MockJobRecoveryHandler) OnJobRecovered(ctx context.Context, job *livekit.Job, room *lksdk.Room) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if job != nil {
+		m.RecoveredJobs = append(m.RecoveredJobs, job.Id)
+	}
+}
+
 func (h *MockUniversalHandler) OnConnectionQualityChanged(ctx context.Context, participant *lksdk.RemoteParticipant, quality livekit.ConnectionQuality) {
 	// Mock implementation
 }
 
 func (h *MockUniversalHandler) OnActiveSpeakersChanged(ctx context.Context, speakers []lksdk.Participant) {
 	// Mock implementation
+}
+
+func (h *MockUniversalHandler) GetJobMetadata(job *livekit.Job) *JobMetadata {
+	// Mock implementation
+	return h.jobMetadata
 }
 
 // Helper methods for verification

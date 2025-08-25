@@ -12,6 +12,8 @@ Complete reference documentation for all public APIs in the LiveKit Agent SDK.
 - [Load Balancing](#load-balancing)
 - [Recovery & Resilience](#recovery--resilience)
 - [Monitoring & Metrics](#monitoring--metrics)
+- [Participant Coordination](#participant-coordination)
+- [Resource Management](#resource-management)
 - [Configuration](#configuration)
 
 ## Core Types
@@ -478,6 +480,166 @@ Monitors worker health and triggers callbacks.
 
 ```go
 func NewHealthMonitor(opts HealthOptions) *HealthMonitor
+```
+
+### ResourceMonitor
+
+```go
+type ResourceMonitor struct {
+    // Internal fields
+}
+
+func NewResourceMonitor(logger *zap.Logger, opts ResourceMonitorOptions) *ResourceMonitor
+```
+
+Monitors system resources and detects issues like OOM conditions, goroutine leaks, and circular dependencies.
+
+**Methods:**
+
+- `Start()`: Begin monitoring resources
+- `Stop()`: Stop monitoring
+- `GetResourceStatus() ResourceStatus`: Get current resource status
+- `SetOOMCallback(func())`: Set callback for OOM detection
+- `SetLeakCallback(func(count int))`: Set callback for goroutine leak detection
+
+**ResourceStatus:**
+
+```go
+type ResourceStatus struct {
+    MemoryUsageMB       uint64
+    MemoryLimitMB       uint64
+    MemoryPercent       float64
+    GoroutineCount      int
+    GoroutineLimit      int
+    HealthLevel         ResourceHealthLevel
+    OOMDetected         bool
+    LeakDetected        bool
+    Timestamp           time.Time
+}
+
+const (
+    ResourceHealthGood     ResourceHealthLevel = iota // < 80% memory, < 5000 goroutines
+    ResourceHealthWarning                              // 80-90% memory, 5000-8000 goroutines
+    ResourceHealthCritical                             // > 90% memory, > 8000 goroutines
+)
+```
+
+## Participant Coordination
+
+### MultiParticipantCoordinator
+
+```go
+type MultiParticipantCoordinator struct {
+    // Internal fields
+}
+
+func NewMultiParticipantCoordinator() *MultiParticipantCoordinator
+```
+
+Coordinates activities across multiple participants in a room.
+
+**Methods:**
+
+- `RegisterParticipant(identity string, participant *lksdk.RemoteParticipant)`: Register a participant
+- `UnregisterParticipant(identity string)`: Remove a participant
+- `CreateGroup(id, name string, metadata map[string]interface{}) (*ParticipantGroup, error)`: Create a participant group
+- `AddParticipantToGroup(identity, groupID string) error`: Add participant to group
+- `RemoveParticipantFromGroup(identity, groupID string) error`: Remove from group
+- `UpdateParticipantActivity(identity string, activityType ActivityType)`: Update participant activity
+- `RecordInteraction(from, to, interactionType string, data interface{})`: Record interaction between participants
+- `GetActiveParticipants() []*CoordinatedParticipant`: Get active participants
+- `GetParticipantGroups(identity string) []*ParticipantGroup`: Get groups for a participant
+- `GetGroupMembers(groupID string) []string`: Get members of a group
+- `GetInteractionGraph() map[string]map[string]int`: Get interaction graph
+- `GetActivityMetrics() ActivityMetrics`: Get activity metrics
+- `AddCoordinationRule(rule CoordinationRule)`: Add coordination rule
+- `RegisterEventHandler(eventType string, handler CoordinationEventHandler)`: Register event handler
+- `Stop()`: Stop the coordinator
+
+**Activity Types:**
+
+```go
+const (
+    ActivityTypeJoined           ActivityType = "joined"
+    ActivityTypeLeft             ActivityType = "left"
+    ActivityTypeTrackPublished   ActivityType = "track_published"
+    ActivityTypeTrackUnpublished ActivityType = "track_unpublished"
+    ActivityTypeDataReceived     ActivityType = "data_received"
+    ActivityTypeSpeaking         ActivityType = "speaking"
+    ActivityTypeMetadataChanged  ActivityType = "metadata_changed"
+)
+```
+
+### ParticipantEventProcessor
+
+```go
+type ParticipantEventProcessor struct {
+    // Internal fields
+}
+
+func NewParticipantEventProcessor() *ParticipantEventProcessor
+```
+
+Processes participant events with filtering, batching, and async handling.
+
+**Methods:**
+
+- `QueueEvent(event ParticipantEvent)`: Queue an event for processing
+- `RegisterHandler(eventType EventType, handler EventHandler)`: Register event handler
+- `AddFilter(filter EventFilter)`: Add event filter
+- `AddBatchProcessor(processor BatchEventProcessor)`: Add batch processor
+- `ProcessPendingEvents()`: Process pending events synchronously
+- `GetEventHistory(limit int) []ParticipantEvent`: Get recent event history
+- `GetMetrics() map[string]interface{}`: Get processing metrics
+- `Stop()`: Stop the processor
+
+**Event Types:**
+
+```go
+const (
+    EventTypeParticipantJoined  EventType = "participant_joined"
+    EventTypeParticipantLeft    EventType = "participant_left"
+    EventTypeTrackPublished     EventType = "track_published"
+    EventTypeTrackUnpublished   EventType = "track_unpublished"
+    EventTypeMetadataChanged    EventType = "metadata_changed"
+    EventTypeSpeakingChanged    EventType = "speaking_changed"
+    EventTypeDataReceived       EventType = "data_received"
+    EventTypeConnectionQuality  EventType = "connection_quality"
+)
+```
+
+## Resource Management
+
+### ResourcePool
+
+```go
+type ResourcePool struct {
+    // Internal fields
+}
+
+func NewResourcePool(factory ResourceFactory, opts ResourcePoolOptions) (*ResourcePool, error)
+```
+
+Manages a pool of reusable resources for efficient resource allocation.
+
+**Methods:**
+
+- `Acquire(ctx context.Context) (Resource, error)`: Get a resource from the pool
+- `Release(resource Resource)`: Return a resource to the pool
+- `Size() int`: Get current pool size
+- `Available() int`: Get number of available resources
+- `InUse() int`: Get number of resources in use
+- `Stats() map[string]int64`: Get pool statistics
+- `Close() error`: Close the pool and release all resources
+
+**ResourcePoolOptions:**
+
+```go
+type ResourcePoolOptions struct {
+    MinSize     int           // Minimum pool size
+    MaxSize     int           // Maximum pool size
+    MaxIdleTime time.Duration // Max idle time before resource cleanup
+}
 ```
 
 ## Configuration

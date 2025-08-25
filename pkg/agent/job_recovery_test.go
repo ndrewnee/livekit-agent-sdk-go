@@ -61,7 +61,8 @@ func TestJobRecoveryAttempt(t *testing.T) {
 	}
 
 	for _, job := range jobs {
-		manager.SaveJobForRecovery(job.Id, job, "token-"+job.Id)
+		// Use empty token to avoid connection attempts during test
+		manager.SaveJobForRecovery(job.Id, job, "")
 	}
 
 	// Attempt recovery
@@ -71,7 +72,7 @@ func TestJobRecoveryAttempt(t *testing.T) {
 	// Should have results for both jobs
 	assert.Len(t, results, 2)
 
-	// Both should fail because we can't actually connect to rooms
+	// Both should fail because we don't have valid tokens
 	assert.NotNil(t, results["job-1"])
 	assert.NotNil(t, results["job-2"])
 
@@ -210,11 +211,12 @@ func TestWorkerJobRecoveryIntegration(t *testing.T) {
 
 	// Using UniversalWorker instead of deprecated Worker
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("http://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType:            livekit.JobType_JT_ROOM,
 		EnableJobRecovery:  true,
 		JobRecoveryHandler: recoveryHandler,
 	})
+	defer worker.Stop() // Ensure cleanup
 
 	// Verify recovery manager is created
 	assert.NotNil(t, worker.recoveryManager)

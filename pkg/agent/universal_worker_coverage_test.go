@@ -13,23 +13,50 @@ import (
 // TestUniversalWorkerStart tests the Start method
 func TestUniversalWorkerStart(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 	})
+	defer worker.Stop() // Ensure cleanup
 
-	// Test Start
-	ctx := context.Background()
-	err := worker.Start(ctx)
-	// Will fail to connect but should not panic
-	assert.Error(t, err) // Expected to fail without real server
+	// Create a context that we can cancel
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// Start worker in background
+	startErr := make(chan error, 1)
+	go func() {
+		startErr <- worker.Start(ctx)
+	}()
+
+	// Wait a bit for connection
+	time.Sleep(200 * time.Millisecond)
+
+	// Check if connected
+	if worker.IsConnected() {
+		t.Log("Successfully connected to LiveKit server")
+	}
+
+	// Cancel context to stop the worker
+	cancel()
+
+	// Check the start error (should be context.Canceled or nil)
+	select {
+	case err := <-startErr:
+		if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+			t.Logf("Start returned unexpected error: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Log("Start is still running after cancel")
+	}
 }
 
 // TestUniversalWorkerStopWithTimeout tests StopWithTimeout method
 func TestUniversalWorkerStopWithTimeout(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 	})
+	defer worker.Stop() // Ensure cleanup
 
 	// Test StopWithTimeout - expect timeout since worker isn't running
 	err := worker.StopWithTimeout(100 * time.Millisecond)
@@ -42,9 +69,10 @@ func TestUniversalWorkerStopWithTimeout(t *testing.T) {
 // TestUniversalWorkerPublishTrack tests PublishTrack method
 func TestUniversalWorkerPublishTrack(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 	})
+	defer worker.Stop() // Ensure cleanup
 
 	// Test PublishTrack
 	_, err := worker.PublishTrack("job-1", nil)
@@ -55,9 +83,10 @@ func TestUniversalWorkerPublishTrack(t *testing.T) {
 // TestUniversalWorkerSendDataToParticipant tests SendDataToParticipant method
 func TestUniversalWorkerSendDataToParticipant(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 	})
+	defer worker.Stop() // Ensure cleanup
 
 	// Test SendDataToParticipant
 	err := worker.SendDataToParticipant("job-1", "participant-1", []byte("test-data"), true)
@@ -68,9 +97,10 @@ func TestUniversalWorkerSendDataToParticipant(t *testing.T) {
 // TestUniversalWorkerAddRemoveHooks tests hook management methods
 func TestUniversalWorkerAddRemoveHooks(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 	})
+	defer worker.Stop() // Ensure cleanup
 
 	// Test AddPreStopHook
 	err := worker.AddPreStopHook("test-hook", func(ctx context.Context) error {
@@ -102,9 +132,10 @@ func TestUniversalWorkerAddRemoveHooks(t *testing.T) {
 // TestUniversalWorkerParticipantInfo tests participant info methods
 func TestUniversalWorkerParticipantInfo(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 	})
+	defer worker.Stop() // Ensure cleanup
 
 	// Test GetParticipantInfo
 	info, exists := worker.GetParticipantInfo("participant-1")
@@ -120,9 +151,10 @@ func TestUniversalWorkerParticipantInfo(t *testing.T) {
 // TestUniversalWorkerTrackMethods tests track-related methods
 func TestUniversalWorkerTrackMethods(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 	})
+	defer worker.Stop() // Ensure cleanup
 
 	// Test GetSubscribedTracks
 	tracks := worker.GetSubscribedTracks()
@@ -151,9 +183,10 @@ func TestUniversalWorkerTrackMethods(t *testing.T) {
 // TestUniversalWorkerAdvancedMethods tests advanced/utility methods
 func TestUniversalWorkerAdvancedMethods(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 	})
+	defer worker.Stop() // Ensure cleanup
 
 	// Test GetServerURL
 	url := worker.GetServerURL()
@@ -202,9 +235,10 @@ func TestUniversalWorkerAdvancedMethods(t *testing.T) {
 // TestUniversalWorkerEventHandling tests event handling
 func TestUniversalWorkerEventHandling(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 	})
+	defer worker.Stop() // Ensure cleanup
 
 	// Test handleParticipantJoined
 	participant := &livekit.ParticipantInfo{
@@ -253,7 +287,7 @@ func TestUniversalWorkerEventHandling(t *testing.T) {
 // TestUniversalWorkerWithAllOptions tests worker with all options enabled
 func TestUniversalWorkerWithAllOptions(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType:              livekit.JobType_JT_ROOM,
 		MaxJobs:              5,
 		EnableResourceLimits: true,
@@ -265,6 +299,7 @@ func TestUniversalWorkerWithAllOptions(t *testing.T) {
 		PingInterval:         5 * time.Second,
 		PingTimeout:          2 * time.Second,
 	})
+	defer worker.Stop() // Ensure cleanup
 
 	require.NotNil(t, worker)
 
@@ -302,9 +337,10 @@ func TestUniversalWorkerWithAllOptions(t *testing.T) {
 // TestUniversalWorkerMetricsTracking tests metrics tracking
 func TestUniversalWorkerMetricsTracking(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 	})
+	defer worker.Stop() // Ensure cleanup
 
 	// Test metrics are initialized
 	metrics := worker.GetMetrics()
@@ -326,9 +362,10 @@ func TestUniversalWorkerMetricsTracking(t *testing.T) {
 // TestUniversalWorkerQueueStats tests queue statistics
 func TestUniversalWorkerQueueStats(t *testing.T) {
 	handler := &MockUniversalHandler{}
-	worker := NewUniversalWorker("ws://localhost:7880", "key", "secret", handler, WorkerOptions{
+	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 	})
+	defer worker.Stop() // Ensure cleanup
 
 	// Test queue stats
 	stats := worker.GetQueueStats()

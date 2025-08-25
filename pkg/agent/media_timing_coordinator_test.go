@@ -202,10 +202,19 @@ func TestParticipantPermissionManagerOperations(t *testing.T) {
 	manager := NewParticipantPermissionManager()
 	require.NotNil(t, manager)
 
+	// Set agent capabilities
+	manager.SetAgentCapabilities(&AgentCapabilities{
+		CanPublishTracks:     true,
+		CanSubscribeToTracks: true,
+		CanSendData:          true,
+		CanManagePermissions: true, // Need this to be true for RequestPermissionChange to work
+	})
+
 	// Test UpdateParticipantPermissions
 	perms := &livekit.ParticipantPermission{
-		CanPublish:   true,
-		CanSubscribe: true,
+		CanPublish:     true,
+		CanSubscribe:   true,
+		CanPublishData: true, // Need this for CanSendDataTo to return true
 	}
 	manager.UpdateParticipantPermissions("participant-1", perms)
 
@@ -236,7 +245,7 @@ func TestParticipantPermissionManagerOperations(t *testing.T) {
 
 	// Test CanManagePermissions
 	canManage := manager.CanManagePermissions()
-	assert.False(t, canManage)
+	assert.True(t, canManage) // Should be true since we set it to true above
 
 	// Test SetCustomRestriction
 	manager.SetCustomRestriction("participant-1", "screen_share", false)

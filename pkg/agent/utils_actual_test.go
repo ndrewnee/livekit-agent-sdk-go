@@ -13,7 +13,10 @@ import (
 
 // TestJobUtilsActual tests the actual JobUtils struct from utils.go
 func TestJobUtilsActual(t *testing.T) {
-	ctx := context.Background()
+	// Use a cancellable context so Done() returns a non-nil channel
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	job := &livekit.Job{
 		Id:          "test-job",
 		Room:        &livekit.Room{Name: "test-room"},

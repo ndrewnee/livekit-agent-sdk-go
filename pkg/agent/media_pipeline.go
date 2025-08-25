@@ -405,6 +405,10 @@ func (mp *MediaPipeline) RegisterProcessor(processor MediaProcessor) {
 // The track will be processed until StopProcessingTrack is called
 // or the pipeline is destroyed.
 func (mp *MediaPipeline) StartProcessingTrack(track *webrtc.TrackRemote) error {
+	if track == nil {
+		return fmt.Errorf("track cannot be nil")
+	}
+
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
 
