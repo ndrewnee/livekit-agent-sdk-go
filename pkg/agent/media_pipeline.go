@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/livekit/protocol/logger"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -903,4 +904,541 @@ func (ts *TranscodingStage) Process(ctx context.Context, input MediaData) (Media
 	}
 	output.Metadata["transcoded"] = true
 	return output, nil
+}
+
+// WebRTCRoutingStage establishes WebRTC connections and routes media packets.
+//
+// This stage implements a WebRTC routing pipeline similar to OpenAI's Realtime API,
+// establishing peer connections with remote receivers and routing all incoming
+// media track packets to the appropriate destinations.
+//
+// Key features:
+//   - Establishes WebRTC peer connections with remote endpoints
+//   - Routes RTP packets from source tracks to receiver tracks
+//   - Handles ICE negotiation and connection state management
+//   - Supports multiple simultaneous peer connections
+//   - Implements packet forwarding with minimal latency
+//   - Manages STUN/TURN server configuration
+//
+// The stage acts as a selective forwarding unit (SFU) at the pipeline level,
+// similar to how OpenAI's Realtime API handles WebRTC media routing.
+type WebRTCRoutingStage struct {
+	name     string
+	priority int
+
+	// WebRTC configuration
+	config webrtc.Configuration
+
+	// Active peer connections mapped by receiver ID
+	mu          sync.RWMutex
+	connections map[string]*WebRTCRouterConnection
+
+	// Packet routing table: source track ID -> list of destination connections
+	routingTable map[string][]string
+
+	// Statistics
+	stats *WebRTCRoutingStats
+}
+
+// WebRTCRouterConnection represents a single WebRTC connection to a receiver.
+//
+// This manages the lifecycle of a peer connection including:
+//   - ICE candidate exchange
+//   - Media track management
+//   - Connection state monitoring
+//   - Packet forwarding
+type WebRTCRouterConnection struct {
+	ID             string
+	PeerConnection *webrtc.PeerConnection
+	DataChannel    *webrtc.DataChannel
+
+	// Tracks being sent to this receiver
+	localTracks map[string]*webrtc.TrackLocalStaticRTP
+
+	// Connection state
+	state    webrtc.PeerConnectionState
+	iceState webrtc.ICEConnectionState
+
+	// Timestamps
+	createdAt   time.Time
+	connectedAt time.Time
+
+	// Packet forwarding
+	packetChan chan *WebRTCPacket
+	closeChan  chan struct{}
+	wg         sync.WaitGroup
+}
+
+// WebRTCPacket represents a media packet to be routed.
+type WebRTCPacket struct {
+	TrackID   string
+	Timestamp time.Time
+	Data      []byte
+	RTPHeader *rtp.Header
+}
+
+// WebRTCRoutingStats tracks routing performance metrics.
+type WebRTCRoutingStats struct {
+	mu sync.RWMutex
+
+	// Connection metrics
+	TotalConnections  uint64
+	ActiveConnections uint64
+	FailedConnections uint64
+
+	// Packet metrics
+	PacketsRouted    uint64
+	PacketsDropped   uint64
+	BytesTransferred uint64
+
+	// Latency metrics (in milliseconds)
+	AverageLatency float64
+	MaxLatency     float64
+	MinLatency     float64
+}
+
+// NewWebRTCRoutingStage creates a new WebRTC routing stage.
+//
+// Parameters:
+//   - name: Unique identifier for this stage
+//   - priority: Execution order (lower runs first)
+//   - stunServers: List of STUN server URLs for ICE gathering
+//   - turnServers: List of TURN server configurations for relay
+//
+// The stage uses a configuration similar to OpenAI's Realtime API:
+//   - STUN for NAT traversal
+//   - Optional TURN servers for relay when direct connection fails
+//   - DataChannel for signaling and control messages
+func NewWebRTCRoutingStage(name string, priority int, stunServers []string, turnServers []webrtc.ICEServer) *WebRTCRoutingStage {
+	// Build ICE servers configuration
+	iceServers := make([]webrtc.ICEServer, 0, len(stunServers)+len(turnServers))
+
+	// Add STUN servers
+	for _, stun := range stunServers {
+		iceServers = append(iceServers, webrtc.ICEServer{
+			URLs: []string{stun},
+		})
+	}
+
+	// Add TURN servers
+	iceServers = append(iceServers, turnServers...)
+
+	return &WebRTCRoutingStage{
+		name:     name,
+		priority: priority,
+		config: webrtc.Configuration{
+			ICEServers:   iceServers,
+			SDPSemantics: webrtc.SDPSemanticsUnifiedPlan,
+		},
+		connections:  make(map[string]*WebRTCRouterConnection),
+		routingTable: make(map[string][]string),
+		stats:        &WebRTCRoutingStats{},
+	}
+}
+
+// GetName implements MediaPipelineStage.
+func (wrs *WebRTCRoutingStage) GetName() string { return wrs.name }
+
+// GetPriority implements MediaPipelineStage.
+func (wrs *WebRTCRoutingStage) GetPriority() int { return wrs.priority }
+
+// CanProcess implements MediaPipelineStage. Processes all media types.
+func (wrs *WebRTCRoutingStage) CanProcess(mediaType MediaType) bool { return true }
+
+// Process implements MediaPipelineStage.
+//
+// Routes incoming media data to all connected receivers.
+// This implementation follows the OpenAI Realtime API pattern of
+// selective forwarding based on track subscriptions.
+func (wrs *WebRTCRoutingStage) Process(ctx context.Context, input MediaData) (MediaData, error) {
+	// Create packet from input data
+	packet := &WebRTCPacket{
+		TrackID:   input.TrackID,
+		Timestamp: input.Timestamp,
+		Data:      input.Data,
+	}
+
+	// Extract RTP header if present in metadata
+	if rtpHeader, ok := input.Metadata["rtp_header"].(*rtp.Header); ok {
+		packet.RTPHeader = rtpHeader
+	}
+
+	// Route packet to all receivers subscribed to this track
+	wrs.routePacket(packet)
+
+	// Update statistics
+	wrs.updateStats(packet)
+
+	// Mark as routed in metadata
+	if input.Metadata == nil {
+		input.Metadata = make(map[string]interface{})
+	}
+	input.Metadata["webrtc_routed"] = true
+	input.Metadata["routed_at"] = time.Now()
+
+	return input, nil
+}
+
+// CreateReceiver establishes a new WebRTC connection to a receiver.
+//
+// This method sets up a peer connection following the OpenAI Realtime API pattern:
+//  1. Creates peer connection with configured ICE servers
+//  2. Sets up data channel for control messages
+//  3. Handles ICE gathering and candidate exchange
+//  4. Manages connection state changes
+//
+// Parameters:
+//   - receiverID: Unique identifier for the receiver
+//   - offer: SDP offer from the receiver (if receiver-initiated)
+//
+// Returns the answer SDP to be sent back to the receiver.
+func (wrs *WebRTCRoutingStage) CreateReceiver(ctx context.Context, receiverID string, offer *webrtc.SessionDescription) (*webrtc.SessionDescription, error) {
+	wrs.mu.Lock()
+	defer wrs.mu.Unlock()
+
+	// Check if connection already exists
+	if _, exists := wrs.connections[receiverID]; exists {
+		return nil, fmt.Errorf("receiver %s already connected", receiverID)
+	}
+
+	// Create peer connection
+	pc, err := webrtc.NewPeerConnection(wrs.config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create peer connection: %w", err)
+	}
+
+	// Create connection wrapper
+	conn := &WebRTCRouterConnection{
+		ID:             receiverID,
+		PeerConnection: pc,
+		localTracks:    make(map[string]*webrtc.TrackLocalStaticRTP),
+		createdAt:      time.Now(),
+		packetChan:     make(chan *WebRTCPacket, 100),
+		closeChan:      make(chan struct{}),
+	}
+
+	// Set up data channel for control messages (similar to OpenAI Realtime API)
+	dataChannel, err := pc.CreateDataChannel("control", &webrtc.DataChannelInit{
+		Ordered:        &[]bool{true}[0],
+		MaxRetransmits: &[]uint16{3}[0],
+	})
+	if err != nil {
+		pc.Close()
+		return nil, fmt.Errorf("failed to create data channel: %w", err)
+	}
+	conn.DataChannel = dataChannel
+
+	// Handle connection state changes
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		conn.state = state
+		wrs.handleConnectionStateChange(receiverID, state)
+	})
+
+	// Handle ICE connection state changes
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		conn.iceState = state
+		if state == webrtc.ICEConnectionStateConnected {
+			conn.connectedAt = time.Now()
+		}
+	})
+
+	// Handle data channel messages
+	dataChannel.OnMessage(func(msg webrtc.DataChannelMessage) {
+		wrs.handleControlMessage(receiverID, msg.Data)
+	})
+
+	// Process offer if provided (receiver-initiated connection)
+	var answer *webrtc.SessionDescription
+	if offer != nil {
+		if err := pc.SetRemoteDescription(*offer); err != nil {
+			pc.Close()
+			return nil, fmt.Errorf("failed to set remote description: %w", err)
+		}
+
+		// Create answer
+		answerSDP, err := pc.CreateAnswer(nil)
+		if err != nil {
+			pc.Close()
+			return nil, fmt.Errorf("failed to create answer: %w", err)
+		}
+
+		if err := pc.SetLocalDescription(answerSDP); err != nil {
+			pc.Close()
+			return nil, fmt.Errorf("failed to set local description: %w", err)
+		}
+
+		answer = &answerSDP
+	}
+
+	// Start packet forwarding goroutine
+	conn.wg.Add(1)
+	go wrs.forwardPackets(conn)
+
+	// Store connection
+	wrs.connections[receiverID] = conn
+	wrs.stats.TotalConnections++
+	wrs.stats.ActiveConnections++
+
+	getLogger := logger.GetLogger()
+	getLogger.Infow("created WebRTC receiver connection",
+		"receiverID", receiverID,
+		"hasOffer", offer != nil)
+
+	return answer, nil
+}
+
+// AddTrackToReceiver adds a media track to be forwarded to a receiver.
+//
+// This creates a local track that will receive packets from the source
+// and forward them to the receiver's peer connection.
+func (wrs *WebRTCRoutingStage) AddTrackToReceiver(receiverID string, sourceTrackID string, mediaType webrtc.RTPCodecType) error {
+	wrs.mu.Lock()
+	defer wrs.mu.Unlock()
+
+	conn, exists := wrs.connections[receiverID]
+	if !exists {
+		return fmt.Errorf("receiver %s not found", receiverID)
+	}
+
+	// Check if track already added
+	if _, exists := conn.localTracks[sourceTrackID]; exists {
+		return fmt.Errorf("track %s already added to receiver %s", sourceTrackID, receiverID)
+	}
+
+	// Create appropriate codec for the track
+	var codec webrtc.RTPCodecParameters
+	switch mediaType {
+	case webrtc.RTPCodecTypeAudio:
+		codec = webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType:  webrtc.MimeTypeOpus,
+				ClockRate: 48000,
+				Channels:  2,
+			},
+		}
+	case webrtc.RTPCodecTypeVideo:
+		codec = webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType:  webrtc.MimeTypeVP8,
+				ClockRate: 90000,
+			},
+		}
+	}
+
+	// Create local track for forwarding
+	localTrack, err := webrtc.NewTrackLocalStaticRTP(codec.RTPCodecCapability, sourceTrackID, sourceTrackID)
+	if err != nil {
+		return fmt.Errorf("failed to create local track: %w", err)
+	}
+
+	// Add track to peer connection
+	if _, err := conn.PeerConnection.AddTrack(localTrack); err != nil {
+		return fmt.Errorf("failed to add track to peer connection: %w", err)
+	}
+
+	// Store track reference
+	conn.localTracks[sourceTrackID] = localTrack
+
+	// Update routing table
+	if wrs.routingTable[sourceTrackID] == nil {
+		wrs.routingTable[sourceTrackID] = make([]string, 0)
+	}
+	wrs.routingTable[sourceTrackID] = append(wrs.routingTable[sourceTrackID], receiverID)
+
+	getLogger := logger.GetLogger()
+	getLogger.Infow("added track to receiver",
+		"receiverID", receiverID,
+		"trackID", sourceTrackID,
+		"mediaType", mediaType)
+
+	return nil
+}
+
+// RemoveReceiver closes the WebRTC connection to a receiver.
+func (wrs *WebRTCRoutingStage) RemoveReceiver(receiverID string) error {
+	wrs.mu.Lock()
+	defer wrs.mu.Unlock()
+
+	conn, exists := wrs.connections[receiverID]
+	if !exists {
+		return fmt.Errorf("receiver %s not found", receiverID)
+	}
+
+	// Signal shutdown
+	close(conn.closeChan)
+
+	// Wait for packet forwarding to stop
+	conn.wg.Wait()
+
+	// Close peer connection
+	conn.PeerConnection.Close()
+
+	// Remove from routing table
+	for trackID, receivers := range wrs.routingTable {
+		filtered := make([]string, 0, len(receivers))
+		for _, r := range receivers {
+			if r != receiverID {
+				filtered = append(filtered, r)
+			}
+		}
+		if len(filtered) == 0 {
+			delete(wrs.routingTable, trackID)
+		} else {
+			wrs.routingTable[trackID] = filtered
+		}
+	}
+
+	// Remove connection
+	delete(wrs.connections, receiverID)
+	wrs.stats.ActiveConnections--
+
+	getLogger := logger.GetLogger()
+	getLogger.Infow("removed receiver connection",
+		"receiverID", receiverID)
+
+	return nil
+}
+
+// routePacket forwards a packet to all subscribed receivers.
+func (wrs *WebRTCRoutingStage) routePacket(packet *WebRTCPacket) {
+	wrs.mu.RLock()
+	receivers := wrs.routingTable[packet.TrackID]
+	wrs.mu.RUnlock()
+
+	if len(receivers) == 0 {
+		return
+	}
+
+	// Send packet to each receiver
+	for _, receiverID := range receivers {
+		wrs.mu.RLock()
+		conn, exists := wrs.connections[receiverID]
+		wrs.mu.RUnlock()
+
+		if !exists {
+			continue
+		}
+
+		// Non-blocking send to avoid blocking the pipeline
+		select {
+		case conn.packetChan <- packet:
+			// Packet queued for forwarding
+		default:
+			// Channel full, drop packet
+			wrs.stats.mu.Lock()
+			wrs.stats.PacketsDropped++
+			wrs.stats.mu.Unlock()
+		}
+	}
+}
+
+// forwardPackets handles packet forwarding for a connection.
+func (wrs *WebRTCRoutingStage) forwardPackets(conn *WebRTCRouterConnection) {
+	defer conn.wg.Done()
+
+	for {
+		select {
+		case packet := <-conn.packetChan:
+			// Forward packet to the appropriate local track
+			if localTrack, exists := conn.localTracks[packet.TrackID]; exists {
+				// Write RTP packet
+				if packet.RTPHeader != nil {
+					rtpPacket := &rtp.Packet{
+						Header:  *packet.RTPHeader,
+						Payload: packet.Data,
+					}
+					if err := localTrack.WriteRTP(rtpPacket); err != nil {
+						getLogger := logger.GetLogger()
+						getLogger.Errorw("failed to write RTP packet", err,
+							"receiverID", conn.ID,
+							"trackID", packet.TrackID)
+					} else {
+						// Update stats
+						wrs.stats.mu.Lock()
+						wrs.stats.PacketsRouted++
+						wrs.stats.BytesTransferred += uint64(len(packet.Data))
+						wrs.stats.mu.Unlock()
+					}
+				}
+			}
+
+		case <-conn.closeChan:
+			return
+		}
+	}
+}
+
+// handleConnectionStateChange handles WebRTC connection state changes.
+func (wrs *WebRTCRoutingStage) handleConnectionStateChange(receiverID string, state webrtc.PeerConnectionState) {
+	getLogger := logger.GetLogger()
+	getLogger.Infow("WebRTC connection state changed",
+		"receiverID", receiverID,
+		"state", state.String())
+
+	if state == webrtc.PeerConnectionStateFailed {
+		wrs.stats.mu.Lock()
+		wrs.stats.FailedConnections++
+		wrs.stats.mu.Unlock()
+
+		// Attempt to remove the failed connection
+		wrs.RemoveReceiver(receiverID)
+	}
+}
+
+// handleControlMessage processes control messages from receivers.
+func (wrs *WebRTCRoutingStage) handleControlMessage(receiverID string, data []byte) {
+	// Handle control messages similar to OpenAI Realtime API
+	// This could include:
+	// - Track subscription requests
+	// - Quality preference updates
+	// - Custom application messages
+
+	getLogger := logger.GetLogger()
+	getLogger.Debugw("received control message",
+		"receiverID", receiverID,
+		"size", len(data))
+}
+
+// updateStats updates routing statistics.
+func (wrs *WebRTCRoutingStage) updateStats(packet *WebRTCPacket) {
+	wrs.stats.mu.Lock()
+	defer wrs.stats.mu.Unlock()
+
+	// Calculate latency if timestamp is available
+	if !packet.Timestamp.IsZero() {
+		latency := float64(time.Since(packet.Timestamp).Microseconds()) / 1000.0
+
+		// Update latency metrics
+		if wrs.stats.MinLatency == 0 || latency < wrs.stats.MinLatency {
+			wrs.stats.MinLatency = latency
+		}
+		if latency > wrs.stats.MaxLatency {
+			wrs.stats.MaxLatency = latency
+		}
+
+		// Update average (simple moving average)
+		if wrs.stats.AverageLatency == 0 {
+			wrs.stats.AverageLatency = latency
+		} else {
+			wrs.stats.AverageLatency = (wrs.stats.AverageLatency * 0.9) + (latency * 0.1)
+		}
+	}
+}
+
+// GetRoutingStats returns current routing statistics.
+func (wrs *WebRTCRoutingStage) GetRoutingStats() WebRTCRoutingStats {
+	wrs.stats.mu.RLock()
+	defer wrs.stats.mu.RUnlock()
+
+	return WebRTCRoutingStats{
+		TotalConnections:  wrs.stats.TotalConnections,
+		ActiveConnections: wrs.stats.ActiveConnections,
+		FailedConnections: wrs.stats.FailedConnections,
+		PacketsRouted:     wrs.stats.PacketsRouted,
+		PacketsDropped:    wrs.stats.PacketsDropped,
+		BytesTransferred:  wrs.stats.BytesTransferred,
+		AverageLatency:    wrs.stats.AverageLatency,
+		MaxLatency:        wrs.stats.MaxLatency,
+		MinLatency:        wrs.stats.MinLatency,
+	}
 }

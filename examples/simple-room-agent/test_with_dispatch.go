@@ -12,7 +12,7 @@ import (
 	lksdk "github.com/livekit/server-sdk-go/v2"
 )
 
-func testMain() {
+func main() {
 	// Configuration
 	host := getEnvTest("LIVEKIT_URL", "http://localhost:7880")
 	apiKey := getEnvTest("LIVEKIT_API_KEY", "devkey")
@@ -75,12 +75,4 @@ func getEnvTest(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
-}
-
-// Run this as a separate program
-func init() {
-	if len(os.Args) > 1 && os.Args[1] == "dispatch" {
-		testMain()
-		os.Exit(0)
-	}
 }
