@@ -314,6 +314,9 @@ func (w *UniversalWorker) Start(ctx context.Context) error {
 	go w.maintainConnection(ctx)
 	go w.handleStatusUpdateRetries(ctx)
 
+	// Send initial load update after registration
+	w.updateLoad()
+
 	if w.resourceMonitor != nil {
 		go w.resourceMonitor.Start(ctx)
 	}
@@ -377,6 +380,7 @@ func (w *UniversalWorker) Stop() error {
 func (w *UniversalWorker) UpdateStatus(status WorkerStatus, load float32) error {
 	w.mu.Lock()
 	w.status = status
+	jobCount := len(w.activeJobs)
 	w.mu.Unlock()
 
 	if w.wsState != WebSocketStateConnected {
@@ -385,9 +389,15 @@ func (w *UniversalWorker) UpdateStatus(status WorkerStatus, load float32) error 
 
 	statusProto := workerStatusToProto(status)
 	msg := &livekit.UpdateWorkerStatus{
-		Status: &statusProto,
-		Load:   load,
+		Status:   &statusProto,
+		Load:     load,
+		JobCount: uint32(jobCount),
 	}
+
+	w.logger.Info("[DEBUG] Sending worker status update",
+		"status", status,
+		"load", load,
+		"jobCount", jobCount)
 
 	return w.sendMessage(&livekit.WorkerMessage{
 		Message: &livekit.WorkerMessage_UpdateWorker{
