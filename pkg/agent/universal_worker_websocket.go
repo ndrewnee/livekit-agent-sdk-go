@@ -73,8 +73,18 @@ func (w *UniversalWorker) sendRegister() error {
 		Type:      workerTypeToProto(w.opts.JobType),
 		AgentName: w.opts.AgentName,
 		Version:   w.opts.Version,
-		Namespace: &w.opts.Namespace,
 	}
+
+	// Only set namespace if it's not empty
+	if w.opts.Namespace != "" {
+		msg.Namespace = &w.opts.Namespace
+	}
+
+	w.logger.Info("[DEBUG] Sending registration",
+		"jobType", w.opts.JobType,
+		"agentName", w.opts.AgentName,
+		"version", w.opts.Version,
+		"namespace", w.opts.Namespace)
 
 	return w.sendMessage(&livekit.WorkerMessage{
 		Message: &livekit.WorkerMessage_Register{
@@ -121,10 +131,10 @@ func (w *UniversalWorker) waitForRegistration(ctx context.Context) error {
 
 // sendMessage sends a message to the server
 func (w *UniversalWorker) sendMessage(msg *livekit.WorkerMessage) error {
-	w.mu.RLock()
+	w.mu.Lock()
 	conn := w.conn
 	state := w.wsState
-	w.mu.RUnlock()
+	w.mu.Unlock()
 
 	// Allow sending messages when connecting (for registration) or connected
 	if conn == nil || (state != WebSocketStateConnecting && state != WebSocketStateConnected) {
@@ -136,7 +146,12 @@ func (w *UniversalWorker) sendMessage(msg *livekit.WorkerMessage) error {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
 
-	if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+	// Protect WebSocket write with mutex to prevent concurrent writes
+	w.mu.Lock()
+	err = conn.WriteMessage(websocket.BinaryMessage, data)
+	w.mu.Unlock()
+
+	if err != nil {
 		return fmt.Errorf("failed to write message: %w", err)
 	}
 
@@ -153,10 +168,14 @@ func (w *UniversalWorker) readMessage(msg *livekit.ServerMessage) error {
 		return ErrNotConnected
 	}
 
-	_, data, err := conn.ReadMessage()
+	msgType, data, err := conn.ReadMessage()
 	if err != nil {
 		return err
 	}
+
+	w.logger.Info("[DEBUG] Read raw message from WebSocket",
+		"messageType", msgType,
+		"dataLength", len(data))
 
 	if err := proto.Unmarshal(data, msg); err != nil {
 		// Try JSON unmarshaling as fallback
@@ -170,11 +189,16 @@ func (w *UniversalWorker) readMessage(msg *livekit.ServerMessage) error {
 
 // handleMessages processes incoming messages from the server
 func (w *UniversalWorker) handleMessages(ctx context.Context) {
+	w.logger.Info("[DEBUG] Starting message handler loop")
+	messageCount := 0
+
 	for {
 		select {
 		case <-ctx.Done():
+			w.logger.Info("[DEBUG] Message handler loop ending - context done")
 			return
 		case <-w.stopCh:
+			w.logger.Info("[DEBUG] Message handler loop ending - stop signal")
 			return
 		default:
 			var msg livekit.ServerMessage
@@ -187,6 +211,11 @@ func (w *UniversalWorker) handleMessages(ctx context.Context) {
 				w.handleConnectionError(err)
 				return
 			}
+
+			messageCount++
+			w.logger.Info("[DEBUG] Received message from server",
+				"messageNumber", messageCount,
+				"messageType", fmt.Sprintf("%T", msg.Message))
 
 			if err := w.handleServerMessage(&msg); err != nil {
 				w.logger.Error("Failed to handle message", "error", err)
@@ -235,17 +264,26 @@ func (w *UniversalWorker) handleServerMessage(msg *livekit.ServerMessage) error 
 
 // handleAvailabilityRequest handles an availability check from the server
 func (w *UniversalWorker) handleAvailabilityRequest(req *livekit.AvailabilityRequest) error {
+	// Log the availability request
+	if w.logger != nil {
+		w.logger.Info("[DEBUG] Received availability request", "jobId", req.Job.Id)
+	}
+
 	// Ask handler if it wants to accept the job
 	accept, metadata := w.handler.OnJobRequest(context.Background(), req.Job)
 
-	// Send response
+	// Build response
 	resp := &livekit.AvailabilityResponse{
-		JobId:               req.Job.Id,
-		Available:           accept,
-		SupportsResume:      metadata != nil && metadata.SupportsResume,
-		ParticipantIdentity: metadata.ParticipantIdentity,
-		ParticipantName:     metadata.ParticipantName,
-		ParticipantMetadata: metadata.ParticipantMetadata,
+		JobId:     req.Job.Id,
+		Available: accept,
+	}
+
+	// Add metadata fields if metadata is provided
+	if metadata != nil {
+		resp.SupportsResume = metadata.SupportsResume
+		resp.ParticipantIdentity = metadata.ParticipantIdentity
+		resp.ParticipantName = metadata.ParticipantName
+		resp.ParticipantMetadata = metadata.ParticipantMetadata
 	}
 
 	return w.sendMessage(&livekit.WorkerMessage{
