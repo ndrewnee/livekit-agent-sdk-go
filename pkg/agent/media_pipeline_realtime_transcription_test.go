@@ -212,8 +212,10 @@ func TestRealtimeTranscriptionProcess(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.Equal(t, input.TrackID, output.TrackID)
-	assert.True(t, output.Metadata["realtime_transcribed"].(bool))
 	assert.NotNil(t, output.Metadata["transcribed_at"])
+	if assert.NotNil(t, output.Metadata["realtime_transcribed"]) {
+		assert.True(t, output.Metadata["realtime_transcribed"].(bool))
+	}
 }
 
 // TestRealtimeTranscriptionCallbacks tests transcription callbacks

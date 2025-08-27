@@ -232,7 +232,7 @@ func NewRealtimeTranscriptionStage(name string, priority int, apiKey string, mod
 			PreffixPadding:    0,
 			InterruptResponse: false,
 			Eagerness:         "",
-			CreateResponse:    true,
+			CreateResponse:    false,
 		},
 	}
 }
@@ -288,7 +288,7 @@ func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaD
 			rts.stats.mu.Lock()
 			rts.stats.AudioPacketsSent++
 			rts.stats.BytesTranscribed += uint64(len(input.Data))
-			//packetsSent := rts.stats.AudioPacketsSent
+			// packetsSent := rts.stats.AudioPacketsSent
 			rts.stats.mu.Unlock()
 
 			// Periodically commit audio buffer to trigger transcription
@@ -468,26 +468,20 @@ func (rts *RealtimeTranscriptionStage) Connect(ctx context.Context) error {
 }
 
 type CreateSessionRequest struct {
-	Model                    string          `json:"model"`
-	InputAudioNoiseReduction *NoiseReduction `json:"input_audio_noise_reduction,omitempty"`
-	Instructions             string          `json:"instructions,omitempty"`
-	Modalities               []string        `json:"modalities,omitempty"`
-	Temperature              float64         `json:"temperature,omitempty"`
-	TurnDetection            *TurnDetection  `json:"turn_detection,omitempty"`
-	Voice                    string          `json:"voice,omitempty"`
+	InputAudioTranscription *AudioTranscriptionConfig `json:"input_audio_transcription,omitempty"`
+	TurnDetection           *TurnDetection            `json:"turn_detection,omitempty"`
 }
 
 // getEphemeralKey gets an ephemeral key for WebRTC connection from OpenAI API.
 func (rts *RealtimeTranscriptionStage) getEphemeralKey(ctx context.Context) (string, error) {
 	// The ephemeral key endpoint for WebRTC is different
-	url := "https://api.openai.com/v1/realtime/sessions"
+	url := "https://api.openai.com/v1/realtime/transcription_sessions"
 
 	// Only send the model for session creation
 	// For ephemeral key, we use gpt-4o-transcribe
 	reqBody := CreateSessionRequest{
-		Model:         "gpt-4o-transcribe",
-		Modalities:    []string{"text"},
-		TurnDetection: rts.turnDetection,
+		InputAudioTranscription: rts.audioTranscriptionConfig,
+		TurnDetection:           rts.turnDetection,
 	}
 
 	jsonData, err := json.Marshal(reqBody)
@@ -550,10 +544,10 @@ func (rts *RealtimeTranscriptionStage) exchangeSDPWithOpenAI(ctx context.Context
 	// According to OpenAI docs, we need to use the ephemeral key endpoint
 	// and send the SDP offer in the body
 	// For transcription, we always use gpt-4o-transcribe in the URL
-	url := fmt.Sprintf("https://api.openai.com/v1/realtime?model=%s", "gpt-4o-transcribe")
+	url := "https://api.openai.com/v1/realtime"
 
 	// The SDP should be sent as plain text with proper headers
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer([]byte(offer.SDP)))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(offer.SDP))
 	if err != nil {
 		return nil, err
 	}
