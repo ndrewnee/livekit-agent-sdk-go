@@ -240,7 +240,12 @@ func (suite *TranslationLoadTestSuite) TestMemoryUsageUnderLoad() {
 	runtime.GC()
 	runtime.ReadMemStats(&m2)
 
-	memoryGrowth := m2.Alloc - m1.Alloc
+	var memoryGrowth uint64
+	if m2.Alloc > m1.Alloc {
+		memoryGrowth = m2.Alloc - m1.Alloc
+	} else {
+		memoryGrowth = 0 // Memory was freed by GC
+	}
 	suite.T().Logf("Memory growth after %d iterations: %d bytes", iterations, memoryGrowth)
 
 	// Memory growth should be reasonable (less than 10MB for this test)
