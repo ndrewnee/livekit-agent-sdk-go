@@ -262,17 +262,6 @@ func (ts *TranslationStage) Process(ctx context.Context, input MediaData) (outpu
 		return input, nil
 	}
 
-	// Check if translation is allowed for this participant using ParticipantMetadata
-	if participantMeta, exists := input.Metadata["participant_metadata"]; exists {
-		if meta, ok := participantMeta.(ParticipantMetadata); ok && !meta.AllowTranslation {
-			// Translation is disabled for this participant
-			ts.stats.mu.Lock()
-			ts.stats.SkippedSameLanguage++ // Reuse existing counter for simplicity
-			ts.stats.mu.Unlock()
-			return input, nil
-		}
-	}
-
 	// Get source language from transcription
 	sourceLang := transcriptionEvent.Language
 	if sourceLang == "" {

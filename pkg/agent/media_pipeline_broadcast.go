@@ -10,7 +10,7 @@ import (
 
 // BroadcastCallback defines the function signature for handling broadcasts.
 // It receives the TranscriptionEvent, ParticipantMetadata, and trackID for broadcasting logic.
-type BroadcastCallback func(ctx context.Context, event TranscriptionEvent, metadata ParticipantMetadata, trackID string) error
+type BroadcastCallback func(ctx context.Context, event TranscriptionEvent, participantMetadata, trackID string) error
 
 // BroadcastStage broadcasts transcription data using a configurable callback.
 //
@@ -40,15 +40,6 @@ type BroadcastStage struct {
 
 	// Statistics
 	stats *BroadcastStats
-}
-
-// ParticipantMetadata contains metadata about the participant.
-// Used in TranscriptionEvent for database operations.
-type ParticipantMetadata struct {
-	ClassID          string `json:"class_id"`          // Class ID (room name)
-	ClassroomID      string `json:"classroom_id"`      // Classroom ID
-	UserID           string `json:"user_id"`           // User ID (participant identity)
-	AllowTranslation bool   `json:"allow_translation"` // Whether translation is allowed for this participant
 }
 
 // BroadcastStats tracks broadcasting metrics.
@@ -129,9 +120,9 @@ func (bs *BroadcastStage) Process(ctx context.Context, input MediaData) (MediaDa
 	bs.mu.RUnlock()
 
 	// Extract participant metadata from input metadata (injected by transcription stage)
-	var participantMetadata ParticipantMetadata
+	var participantMetadata string
 	if participantMeta, exists := input.Metadata["participant_metadata"]; exists {
-		if meta, ok := participantMeta.(ParticipantMetadata); ok {
+		if meta, ok := participantMeta.(string); ok {
 			participantMetadata = meta
 		}
 	}
