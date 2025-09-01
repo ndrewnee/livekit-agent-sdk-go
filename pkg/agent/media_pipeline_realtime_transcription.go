@@ -42,12 +42,8 @@ type RealtimeTranscriptionStage struct {
 	apiKey                   string
 	model                    string //
 	voiceMode                string // e.g., "text" for transcription only
-	inputAudioNoiseReduction *NoiseReduction
 	audioTranscriptionConfig *AudioTranscriptionConfig
-	instruction              string  // Custom instruction for transcription
-	temperature              float64 // Custom temperature for transcription
 	turnDetection            *TurnDetection
-	voice                    string
 
 	// Connection state
 	mu             sync.RWMutex
@@ -452,7 +448,8 @@ func (rts *RealtimeTranscriptionStage) connectWithoutLock(ctx context.Context) e
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		getLogger.Infow("WebRTC connection state changed", "state", state.String())
 
-		if state == webrtc.PeerConnectionStateConnected {
+		switch state {
+		case webrtc.PeerConnectionStateConnected:
 			rts.mu.Lock()
 			rts.connected = true
 			rts.lastConnected = time.Now()
@@ -464,7 +461,7 @@ func (rts *RealtimeTranscriptionStage) connectWithoutLock(ctx context.Context) e
 			rts.stats.mu.Unlock()
 
 			fmt.Println("✅ WebRTC connected to OpenAI Realtime API")
-		} else if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 			rts.handleDisconnection()
 		}
 	})
@@ -546,7 +543,12 @@ func (rts *RealtimeTranscriptionStage) getEphemeralKey(ctx context.Context) (str
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			getLogger := logger.GetLogger()
+			getLogger.Debugw("failed to close response body", "error", err)
+		}
+	}()
 
 	body, _ := io.ReadAll(resp.Body)
 
@@ -608,7 +610,12 @@ func (rts *RealtimeTranscriptionStage) exchangeSDPWithOpenAI(ctx context.Context
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			getLogger := logger.GetLogger()
+			getLogger.Debugw("failed to close response body", "error", err)
+		}
+	}()
 
 	body, _ := io.ReadAll(resp.Body)
 
@@ -644,6 +651,8 @@ func (rts *RealtimeTranscriptionStage) exchangeSDPWithOpenAI(ctx context.Context
 // Removed connectWebSocketWithKey - using WebRTC only
 
 // sendDataChannelConfig sends session configuration via data channel.
+//
+//nolint:unused // Reserved for future functionality
 func (rts *RealtimeTranscriptionStage) sendDataChannelConfig() error {
 	if rts.dataChannel == nil || rts.dataChannel.ReadyState() != webrtc.DataChannelStateOpen {
 		return fmt.Errorf("data channel not open")
@@ -850,7 +859,7 @@ func (rts *RealtimeTranscriptionStage) handleError(msg map[string]interface{}) {
 	rts.notifyTranscription(TranscriptionEvent{
 		Type:      "error",
 		Timestamp: time.Now(),
-		Error:     fmt.Errorf("Realtime API error: %s", errorMsg),
+		Error:     fmt.Errorf("realtime API error: %s", errorMsg),
 	})
 
 	rts.stats.mu.Lock()
@@ -876,7 +885,10 @@ func (rts *RealtimeTranscriptionStage) handleDisconnection() {
 	// Clean up WebSocket
 	// Clean up WebRTC connection
 	if rts.peerConnection != nil {
-		rts.peerConnection.Close()
+		if err := rts.peerConnection.Close(); err != nil {
+			getLogger := logger.GetLogger()
+			getLogger.Debugw("failed to close peer connection", "error", err)
+		}
 		rts.peerConnection = nil
 	}
 
@@ -1044,6 +1056,8 @@ func (rts *RealtimeTranscriptionStage) Disconnect() {
 }
 
 // commitAudioBufferViaDataChannel sends commit message via data channel
+//
+//nolint:unused // Reserved for future functionality
 func (rts *RealtimeTranscriptionStage) commitAudioBufferViaDataChannel() {
 	if rts.dataChannel == nil || rts.dataChannel.ReadyState() != webrtc.DataChannelStateOpen {
 		return

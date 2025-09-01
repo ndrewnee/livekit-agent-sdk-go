@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha1"
@@ -22,10 +23,15 @@ const (
 	// HTTP Client Configuration
 	DefaultHTTPTimeout = 30 * time.Second
 
-	// OpenAI API Configuration
-	OpenAIAPIEndpoint  = "https://api.openai.com/v1/chat/completions"
-	DefaultModel       = "gpt-4o-mini"
-	DefaultTemperature = 0.3
+	// OpenAI Streaming API Configuration
+	OpenAIStreamingEndpoint = "https://api.openai.com/v1/chat/completions"
+	DefaultModel            = "gpt-4o-mini"
+	DefaultTemperature      = 0.3
+
+	// Streaming Configuration
+	StreamReadTimeout = 30 * time.Second
+	StreamBufferSize  = 8192
+	MaxStreamChunks   = 1000
 
 	// Input Validation
 	MaxInputTextSize   = 4000 // characters
@@ -45,19 +51,24 @@ const (
 
 	// Metrics
 	LatencyBuckets = 10 // For moving average calculation
+
+	// Streaming Metrics
+	TimeToFirstTokenBuckets = 10
 )
 
-// TranslationStage translates transcriptions to multiple participant languages using OpenAI REST API.
+// TranslationStage translates transcriptions to multiple participant languages using OpenAI Streaming API.
 //
 // This stage runs AFTER BroadcastStage and translates already-broadcast transcriptions
-// to all unique participant translation languages. It uses OpenAI's REST API
-// with gpt-4o-mini model for cost-effective multi-language translation in a single API call.
+// to all unique participant translation languages. It uses OpenAI's Streaming API
+// with gpt-4o-mini model for real-time translation responses via Server-Sent Events.
 //
 // Key features:
 //   - Dynamic participant language tracking
-//   - Multi-language single-call translation
+//   - Multi-language single-call streaming translation
 //   - Smart filtering to avoid unnecessary translations
-//   - REST API integration with gpt-4o-mini
+//   - Streaming API integration with gpt-4o-mini for faster responses
+//   - Real-time single-attempt translation for immediate responses
+//   - No retry logic to maintain real-time performance
 //   - Automatic translation broadcasting
 //
 // Pipeline position:
@@ -68,11 +79,13 @@ type TranslationStage struct {
 	name     string
 	priority int
 
-	// OpenAI configuration
-	apiKey      string
-	model       string // "gpt-4o-mini"
-	client      *http.Client
-	temperature float64
+	// OpenAI streaming configuration
+	apiKey        string
+	model         string // "gpt-4o-mini"
+	endpoint      string // OpenAI API endpoint
+	client        *http.Client
+	temperature   float64
+	streamTimeout time.Duration
 
 	// Connection state
 	mu sync.RWMutex
@@ -140,7 +153,7 @@ type circuitBreaker struct {
 	nextRetryTime   time.Time
 }
 
-// API call metrics
+// API call metrics with streaming support
 type apiMetrics struct {
 	mu                  sync.RWMutex
 	totalCalls          uint64
@@ -151,14 +164,20 @@ type apiMetrics struct {
 	bucketIndex         int
 	circuitBreakerTrips uint64
 	rateLimitExceeded   uint64
+	// Streaming-specific metrics
+	timeToFirstTokenBuckets []float64
+	ttftBucketIndex         int
+	streamingErrors         uint64
+	connectionErrors        uint64
 }
 
-// OpenAI REST API structures
+// OpenAI Streaming API structures
 type OpenAIChatRequest struct {
 	Model       string        `json:"model"`
 	Messages    []ChatMessage `json:"messages"`
 	Temperature float64       `json:"temperature"`
 	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Stream      bool          `json:"stream"`
 }
 
 type ChatMessage struct {
@@ -166,6 +185,7 @@ type ChatMessage struct {
 	Content string `json:"content"`
 }
 
+// OpenAI streaming response structures
 type OpenAIChatResponse struct {
 	Choices []struct {
 		Message ChatMessage `json:"message"`
@@ -176,7 +196,21 @@ type OpenAIChatResponse struct {
 	} `json:"error,omitempty"`
 }
 
-// TranslationStats tracks translation performance metrics.
+// Streaming response chunk
+type OpenAIStreamChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+		FinishReason *string `json:"finish_reason"`
+	} `json:"choices"`
+	Error *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+	} `json:"error,omitempty"`
+}
+
+// TranslationStats tracks translation performance metrics with streaming support.
 type TranslationStats struct {
 	mu sync.RWMutex
 
@@ -187,24 +221,42 @@ type TranslationStats struct {
 	SkippedSameLanguage    uint64
 
 	// Performance metrics
-	AverageLatencyMs  float64
-	LastTranslationAt time.Time
-	BytesTranslated   uint64
+	AverageLatencyMs        float64
+	AverageTimeToFirstToken float64
+	LastTranslationAt       time.Time
+	BytesTranslated         uint64
+	// Streaming metrics
+	StreamingErrors  uint64
+	ConnectionErrors uint64
+	ChunksReceived   uint64
 }
 
-// NewTranslationStage creates a new translation stage.
+// NewTranslationStage creates a new translation stage with default OpenAI endpoint.
 //
 // Parameters:
 //   - name: Unique identifier for this stage
 //   - priority: Execution order (should be 30, after BroadcastStage)
 //   - apiKey: OpenAI API key for authentication
 func NewTranslationStage(name string, priority int, apiKey string) *TranslationStage {
+	return NewTranslationStageWithEndpoint(name, priority, apiKey, OpenAIStreamingEndpoint)
+}
+
+// NewTranslationStageWithEndpoint creates a new translation stage with custom endpoint.
+//
+// Parameters:
+//   - name: Unique identifier for this stage
+//   - priority: Execution order (should be 30, after BroadcastStage)
+//   - apiKey: OpenAI API key for authentication
+//   - endpoint: Custom API endpoint (useful for testing or alternative providers)
+func NewTranslationStageWithEndpoint(name string, priority int, apiKey string, endpoint string) *TranslationStage {
 	return &TranslationStage{
-		name:        name,
-		priority:    priority,
-		apiKey:      apiKey,
-		model:       DefaultModel,
-		temperature: DefaultTemperature,
+		name:          name,
+		priority:      priority,
+		apiKey:        apiKey,
+		model:         DefaultModel,
+		endpoint:      endpoint,
+		temperature:   DefaultTemperature,
+		streamTimeout: StreamReadTimeout,
 		client: &http.Client{
 			Timeout: DefaultHTTPTimeout,
 		},
@@ -216,7 +268,8 @@ func NewTranslationStage(name string, priority int, apiKey string) *TranslationS
 			state: circuitClosed,
 		},
 		metrics: &apiMetrics{
-			latencyBuckets: make([]float64, LatencyBuckets),
+			latencyBuckets:          make([]float64, LatencyBuckets),
+			timeToFirstTokenBuckets: make([]float64, TimeToFirstTokenBuckets),
 		},
 		stats: &TranslationStats{},
 	}
@@ -289,9 +342,9 @@ func (ts *TranslationStage) Process(ctx context.Context, input MediaData) (outpu
 		return input, nil
 	}
 
-	// Translate to all target languages using REST API
+	// Translate to all target languages using Streaming API
 	startTime := time.Now()
-	translations, err := ts.translateViaREST(ctx, transcriptionEvent.Text, sourceLang, targetLangs)
+	translations, err := ts.translateViaStreaming(ctx, transcriptionEvent.Text, sourceLang, targetLangs)
 	translationDuration := time.Since(startTime)
 
 	// Update statistics
@@ -325,8 +378,8 @@ func (ts *TranslationStage) Process(ctx context.Context, input MediaData) (outpu
 	return input, nil
 }
 
-// translateViaREST translates text to multiple languages using OpenAI REST API.
-func (ts *TranslationStage) translateViaREST(ctx context.Context, text, sourceLang string, targetLangs []string) (map[string]string, error) {
+// translateViaStreaming translates text to multiple languages using OpenAI Streaming API.
+func (ts *TranslationStage) translateViaStreaming(ctx context.Context, text, sourceLang string, targetLangs []string) (map[string]string, error) {
 	if len(targetLangs) == 0 {
 		return make(map[string]string), nil
 	}
@@ -380,11 +433,15 @@ JSON RESPONSE:`, sourceLang, targetLangList, text)
 		return nil, fmt.Errorf("rate limit exceeded, please try again later")
 	}
 
-	// Call OpenAI API with metrics and circuit breaker
+	// Call OpenAI Streaming API - single attempt for real-time performance
 	responseText, err := ts.callOpenAIWithMetrics(ctx, prompt)
 	if err != nil {
 		ts.recordAPIFailure()
-		return nil, fmt.Errorf("OpenAI API call failed: %w", err)
+		// Record specific streaming errors
+		if strings.Contains(err.Error(), "stream") || strings.Contains(err.Error(), "connection") {
+			ts.recordStreamingError(err)
+		}
+		return nil, fmt.Errorf("OpenAI streaming API call failed: %w", err)
 	}
 	ts.recordAPISuccess()
 
@@ -475,45 +532,60 @@ func (ts *TranslationStage) updateStats(translationCount int, failed bool, durat
 	}
 }
 
-// GetStats returns current translation statistics.
+// GetStats returns current translation statistics including streaming metrics.
 func (ts *TranslationStage) GetStats() TranslationStats {
 	ts.stats.mu.RLock()
 	defer ts.stats.mu.RUnlock()
 
 	return TranslationStats{
-		TotalTranslations:      ts.stats.TotalTranslations,
-		SuccessfulTranslations: ts.stats.SuccessfulTranslations,
-		FailedTranslations:     ts.stats.FailedTranslations,
-		SkippedSameLanguage:    ts.stats.SkippedSameLanguage,
-		AverageLatencyMs:       ts.stats.AverageLatencyMs,
-		LastTranslationAt:      ts.stats.LastTranslationAt,
-		BytesTranslated:        ts.stats.BytesTranslated,
+		TotalTranslations:       ts.stats.TotalTranslations,
+		SuccessfulTranslations:  ts.stats.SuccessfulTranslations,
+		FailedTranslations:      ts.stats.FailedTranslations,
+		SkippedSameLanguage:     ts.stats.SkippedSameLanguage,
+		AverageLatencyMs:        ts.stats.AverageLatencyMs,
+		AverageTimeToFirstToken: ts.stats.AverageTimeToFirstToken,
+		LastTranslationAt:       ts.stats.LastTranslationAt,
+		BytesTranslated:         ts.stats.BytesTranslated,
+		StreamingErrors:         ts.stats.StreamingErrors,
+		ConnectionErrors:        ts.stats.ConnectionErrors,
+		ChunksReceived:          ts.stats.ChunksReceived,
 	}
 }
 
-// Disconnect is a no-op for REST API implementation (no persistent connections).
+// Disconnect is a no-op for streaming API implementation (no persistent connections).
 func (ts *TranslationStage) Disconnect() {
-	// No persistent connections to clean up with REST API
+	// No persistent connections to clean up with streaming API - each request creates its own connection
 }
 
-// callOpenAIWithMetrics makes a call to the OpenAI REST API with metrics tracking.
+// callOpenAIWithMetrics makes a streaming call to the OpenAI API with metrics tracking.
 func (ts *TranslationStage) callOpenAIWithMetrics(ctx context.Context, prompt string) (string, error) {
 	start := time.Now()
+	var firstTokenTime time.Time
 
-	result, err := ts.callOpenAI(ctx, prompt)
+	result, err := ts.callOpenAIStreaming(ctx, prompt, func(isFirstToken bool) {
+		if isFirstToken {
+			firstTokenTime = time.Now()
+		}
+	})
 
 	// Record metrics
-	latency := time.Since(start)
-	ts.recordAPILatency(latency)
+	totalLatency := time.Since(start)
+	ts.recordAPILatency(totalLatency)
+
+	if !firstTokenTime.IsZero() {
+		timeToFirstToken := firstTokenTime.Sub(start)
+		ts.recordTimeToFirstToken(timeToFirstToken)
+	}
 
 	return result, err
 }
 
-// callOpenAI makes a call to the OpenAI REST API.
-func (ts *TranslationStage) callOpenAI(ctx context.Context, prompt string) (string, error) {
+// callOpenAIStreaming makes a streaming call to the OpenAI API using Server-Sent Events.
+func (ts *TranslationStage) callOpenAIStreaming(ctx context.Context, prompt string, onFirstToken func(bool)) (string, error) {
 	request := OpenAIChatRequest{
 		Model:       ts.model,
 		Temperature: ts.temperature,
+		Stream:      true, // Enable streaming
 		Messages: []ChatMessage{
 			{
 				Role:    "user",
@@ -527,13 +599,14 @@ func (ts *TranslationStage) callOpenAI(ctx context.Context, prompt string) (stri
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, OpenAIAPIEndpoint, bytes.NewReader(requestBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.endpoint, bytes.NewReader(requestBody))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+ts.apiKey)
+	req.Header.Set("Accept", "text/event-stream")
 
 	resp, err := ts.client.Do(req)
 	if err != nil {
@@ -541,25 +614,91 @@ func (ts *TranslationStage) callOpenAI(ctx context.Context, prompt string) (stri
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var response OpenAIChatResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
+	return ts.readStreamingResponse(ctx, resp, onFirstToken)
+}
+
+// readStreamingResponse reads and processes the streaming response from OpenAI.
+func (ts *TranslationStage) readStreamingResponse(ctx context.Context, resp *http.Response, onFirstToken func(bool)) (string, error) {
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, StreamBufferSize), StreamBufferSize)
+
+	var result strings.Builder
+	firstToken := true
+	chunksReceived := 0
+
+	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+
+		line := scanner.Text()
+
+		// Skip empty lines and non-data lines
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		// Extract the JSON data after "data: "
+		data := strings.TrimPrefix(line, "data: ")
+
+		// Check for stream termination
+		if data == "[DONE]" {
+			break
+		}
+
+		// Parse the streaming chunk
+		var chunk OpenAIStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			getLogger := logger.GetLogger()
+			getLogger.Debugw("Failed to parse stream chunk", "error", err, "data", data)
+			continue
+		}
+
+		// Handle API errors in stream
+		if chunk.Error != nil {
+			return "", fmt.Errorf("OpenAI streaming error: %s", chunk.Error.Message)
+		}
+
+		// Extract content from the first choice
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+			content := chunk.Choices[0].Delta.Content
+
+			// Notify about first token
+			if firstToken && onFirstToken != nil {
+				onFirstToken(true)
+				firstToken = false
+			}
+
+			result.WriteString(content)
+			chunksReceived++
+
+			// Safety check to prevent infinite streams
+			if chunksReceived > MaxStreamChunks {
+				return "", fmt.Errorf("stream exceeded maximum chunks limit (%d)", MaxStreamChunks)
+			}
+		}
+
+		// Check for completion
+		if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != nil {
+			break
+		}
 	}
 
-	if response.Error != nil {
-		return "", fmt.Errorf("OpenAI API error: %s", response.Error.Message)
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("error reading stream: %w", err)
 	}
 
-	if len(response.Choices) == 0 {
-		return "", fmt.Errorf("no choices in response")
-	}
+	// Update streaming metrics
+	ts.updateStreamingStats(chunksReceived, nil)
 
-	return response.Choices[0].Message.Content, nil
+	return result.String(), nil
 }
 
 // extractJSONFromResponse extracts JSON from response text, handling markdown code fences.
@@ -717,7 +856,7 @@ func (ts *TranslationStage) recordRateLimitExceeded() {
 	ts.metrics.rateLimitExceeded++
 }
 
-// GetAPIMetrics returns current API call metrics.
+// GetAPIMetrics returns current API call metrics including streaming metrics.
 func (ts *TranslationStage) GetAPIMetrics() map[string]any {
 	ts.metrics.mu.RLock()
 	defer ts.metrics.mu.RUnlock()
@@ -735,32 +874,74 @@ func (ts *TranslationStage) GetAPIMetrics() map[string]any {
 		avgLatency /= float64(validBuckets)
 	}
 
+	// Calculate average time-to-first-token from rolling buckets
+	var avgTTFT float64
+	validTTFTBuckets := 0
+	for _, ttft := range ts.metrics.timeToFirstTokenBuckets {
+		if ttft > 0 {
+			avgTTFT += ttft
+			validTTFTBuckets++
+		}
+	}
+	if validTTFTBuckets > 0 {
+		avgTTFT /= float64(validTTFTBuckets)
+	}
+
 	return map[string]any{
-		"total_calls":           ts.metrics.totalCalls,
-		"successful_calls":      ts.metrics.successfulCalls,
-		"failed_calls":          ts.metrics.failedCalls,
-		"average_latency_ms":    avgLatency,
-		"circuit_breaker_trips": ts.metrics.circuitBreakerTrips,
-		"rate_limit_exceeded":   ts.metrics.rateLimitExceeded,
-		"cache_entries":         len(ts.cache),
+		"total_calls":                    ts.metrics.totalCalls,
+		"successful_calls":               ts.metrics.successfulCalls,
+		"failed_calls":                   ts.metrics.failedCalls,
+		"average_latency_ms":             avgLatency,
+		"average_time_to_first_token_ms": avgTTFT,
+		"streaming_errors":               ts.metrics.streamingErrors,
+		"connection_errors":              ts.metrics.connectionErrors,
+		"circuit_breaker_trips":          ts.metrics.circuitBreakerTrips,
+		"rate_limit_exceeded":            ts.metrics.rateLimitExceeded,
+		"cache_entries":                  len(ts.cache),
 	}
 }
 
-// getAverageLatency returns the current average API latency in milliseconds
-func (ts *TranslationStage) getAverageLatency() float64 {
-	ts.metrics.mu.RLock()
-	defer ts.metrics.mu.RUnlock()
+// updateStreamingStats updates streaming-specific statistics.
+func (ts *TranslationStage) updateStreamingStats(chunksReceived int, streamErr error) {
+	ts.stats.mu.Lock()
+	defer ts.stats.mu.Unlock()
 
-	var avgLatency float64
-	validBuckets := 0
-	for _, latency := range ts.metrics.latencyBuckets {
-		if latency > 0 {
-			avgLatency += latency
-			validBuckets++
-		}
+	ts.stats.ChunksReceived += uint64(chunksReceived)
+
+	if streamErr != nil {
+		ts.stats.StreamingErrors++
 	}
-	if validBuckets > 0 {
-		avgLatency /= float64(validBuckets)
+}
+
+// recordTimeToFirstToken records the time-to-first-token metric.
+func (ts *TranslationStage) recordTimeToFirstToken(duration time.Duration) {
+	ts.metrics.mu.Lock()
+	defer ts.metrics.mu.Unlock()
+
+	ttftMs := float64(duration.Nanoseconds()) / 1e6
+
+	// Update rolling average using circular buffer
+	ts.metrics.timeToFirstTokenBuckets[ts.metrics.ttftBucketIndex] = ttftMs
+	ts.metrics.ttftBucketIndex = (ts.metrics.ttftBucketIndex + 1) % len(ts.metrics.timeToFirstTokenBuckets)
+
+	// Update stats average
+	ts.stats.mu.Lock()
+	if ts.stats.AverageTimeToFirstToken == 0 {
+		ts.stats.AverageTimeToFirstToken = ttftMs
+	} else {
+		ts.stats.AverageTimeToFirstToken = (ts.stats.AverageTimeToFirstToken * 0.9) + (ttftMs * 0.1)
 	}
-	return avgLatency
+	ts.stats.mu.Unlock()
+}
+
+// recordStreamingError records streaming-specific errors.
+func (ts *TranslationStage) recordStreamingError(err error) {
+	ts.metrics.mu.Lock()
+	defer ts.metrics.mu.Unlock()
+
+	ts.metrics.streamingErrors++
+
+	if strings.Contains(err.Error(), "connection") {
+		ts.metrics.connectionErrors++
+	}
 }

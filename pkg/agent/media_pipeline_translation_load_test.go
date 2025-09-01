@@ -293,7 +293,7 @@ func (suite *TranslationLoadTestSuite) TestInputValidationLimits() {
 	largeText := strings.Repeat("a", MaxInputTextSize+1)
 	targetLangs := []string{"es"}
 
-	_, err := suite.stage.translateViaREST(ctx, largeText, "en", targetLangs)
+	_, err := suite.stage.translateViaStreaming(ctx, largeText, "en", targetLangs)
 	suite.Error(err, "Should reject oversized input")
 	suite.Contains(err.Error(), "input text too large")
 
@@ -303,7 +303,7 @@ func (suite *TranslationLoadTestSuite) TestInputValidationLimits() {
 		tooManyLangs[i] = fmt.Sprintf("lang%d", i)
 	}
 
-	_, err = suite.stage.translateViaREST(ctx, "test", "en", tooManyLangs)
+	_, err = suite.stage.translateViaStreaming(ctx, "test", "en", tooManyLangs)
 	suite.Error(err, "Should reject too many target languages")
 	suite.Contains(err.Error(), "too many target languages")
 }

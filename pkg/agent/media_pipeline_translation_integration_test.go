@@ -5,8 +5,10 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +16,7 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
-// TranslationIntegrationTestSuite tests integration with OpenAI API using mocks.
+// TranslationIntegrationTestSuite tests integration with OpenAI API using both mock and real endpoints.
 type TranslationIntegrationTestSuite struct {
 	suite.Suite
 	stage      *TranslationStage
@@ -25,19 +27,16 @@ type TranslationIntegrationTestSuite struct {
 func (suite *TranslationIntegrationTestSuite) SetupTest() {
 	// Initialize mock responses
 	suite.responses = map[string]string{
-		"multi_lang":     `{"en": "Hello world", "es": "Hola mundo", "fr": "Bonjour le monde"}`,
+		"multi_lang":     `{"es": "Hola mundo", "fr": "Bonjour le monde", "de": "Hallo Welt"}`,
 		"single_lang":    `{"es": "Hola mundo"}`,
-		"error_response": `{"error": {"message": "Rate limit exceeded", "type": "insufficient_quota"}}`,
+		"empty_response": `{}`,
 	}
 
 	// Create mock OpenAI server
 	suite.mockServer = httptest.NewServer(http.HandlerFunc(suite.mockOpenAIHandler))
 
-	// Create translation stage with mock server
-	suite.stage = NewTranslationStage("integration-test", 30, "test-api-key")
-
-	// Override the API endpoint to use our mock server
-	// We'll need to modify the callOpenAI method to accept custom endpoint for testing
+	// Create translation stage with mock server endpoint
+	suite.stage = NewTranslationStageWithEndpoint("integration-test", 30, "test-api-key", suite.mockServer.URL)
 	suite.stage.client = &http.Client{Timeout: 5 * time.Second}
 }
 
@@ -50,7 +49,7 @@ func (suite *TranslationIntegrationTestSuite) TearDownTest() {
 	}
 }
 
-// mockOpenAIHandler simulates OpenAI API responses.
+// mockOpenAIHandler simulates OpenAI Streaming API responses with Server-Sent Events.
 func (suite *TranslationIntegrationTestSuite) mockOpenAIHandler(w http.ResponseWriter, r *http.Request) {
 	// Verify request format
 	if r.Method != http.MethodPost {
@@ -72,14 +71,25 @@ func (suite *TranslationIntegrationTestSuite) mockOpenAIHandler(w http.ResponseW
 		return
 	}
 
+	// Verify streaming is enabled
+	if !req.Stream {
+		http.Error(w, "Streaming not enabled", http.StatusBadRequest)
+		return
+	}
+
+	// Set up streaming response headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
 	// Determine response based on prompt content
-	var response OpenAIChatResponse
 	prompt := req.Messages[0].Content
 
 	switch {
 	case strings.Contains(prompt, "error_test"):
-		// Simulate API error
-		response = OpenAIChatResponse{
+		// Simulate streaming API error
+		errorChunk := OpenAIStreamChunk{
 			Error: &struct {
 				Message string `json:"message"`
 				Type    string `json:"type"`
@@ -88,56 +98,87 @@ func (suite *TranslationIntegrationTestSuite) mockOpenAIHandler(w http.ResponseW
 				Type:    "insufficient_quota",
 			},
 		}
+		data, _ := json.Marshal(errorChunk)
+		w.Write([]byte("data: " + string(data) + "\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
+		return
 	case strings.Contains(prompt, "timeout_test"):
 		// Simulate timeout by sleeping
 		time.Sleep(10 * time.Second)
 		return
-	case strings.Contains(prompt, "Target languages: es, fr"):
-		// Multi-language translation
-		response = OpenAIChatResponse{
-			Choices: []struct {
-				Message ChatMessage `json:"message"`
-			}{
-				{
-					Message: ChatMessage{
-						Role:    "assistant",
-						Content: suite.responses["multi_lang"],
-					},
-				},
-			},
-		}
+	case strings.Contains(prompt, "Target languages: es, fr, de"):
+		// Multi-language translation - stream the response
+		suite.streamResponse(w, suite.responses["multi_lang"])
 	case strings.Contains(prompt, "Target languages: es"):
-		// Single language translation
-		response = OpenAIChatResponse{
-			Choices: []struct {
-				Message ChatMessage `json:"message"`
-			}{
-				{
-					Message: ChatMessage{
-						Role:    "assistant",
-						Content: suite.responses["single_lang"],
-					},
-				},
-			},
-		}
+		// Single language translation - stream the response
+		suite.streamResponse(w, suite.responses["single_lang"])
+	case strings.Contains(prompt, "empty_response"):
+		// Empty response test
+		suite.streamResponse(w, suite.responses["empty_response"])
 	default:
-		// Default successful response
-		response = OpenAIChatResponse{
+		// Default successful response - stream it
+		suite.streamResponse(w, `{"en": "Default translation"}`)
+	}
+}
+
+// streamResponse simulates streaming a response in chunks
+func (suite *TranslationIntegrationTestSuite) streamResponse(w http.ResponseWriter, content string) {
+	// Split content into chunks to simulate streaming
+	chunkSize := 10
+	for i := 0; i < len(content); i += chunkSize {
+		end := i + chunkSize
+		if end > len(content) {
+			end = len(content)
+		}
+
+		chunk := content[i:end]
+		streamChunk := OpenAIStreamChunk{
 			Choices: []struct {
-				Message ChatMessage `json:"message"`
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+				FinishReason *string `json:"finish_reason"`
 			}{
 				{
-					Message: ChatMessage{
-						Role:    "assistant",
-						Content: `{"en": "Default translation"}`,
+					Delta: struct {
+						Content string `json:"content"`
+					}{
+						Content: chunk,
 					},
 				},
 			},
 		}
+
+		data, _ := json.Marshal(streamChunk)
+		w.Write([]byte("data: " + string(data) + "\n\n"))
+
+		// Small delay to simulate streaming
+		time.Sleep(1 * time.Millisecond)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	// Send completion chunk
+	finishReason := "stop"
+	completionChunk := OpenAIStreamChunk{
+		Choices: []struct {
+			Delta struct {
+				Content string `json:"content"`
+			} `json:"delta"`
+			FinishReason *string `json:"finish_reason"`
+		}{
+			{
+				Delta: struct {
+					Content string `json:"content"`
+				}{
+					Content: "",
+				},
+				FinishReason: &finishReason,
+			},
+		},
+	}
+
+	data, _ := json.Marshal(completionChunk)
+	w.Write([]byte("data: " + string(data) + "\n\n"))
+	w.Write([]byte("data: [DONE]\n\n"))
 }
 
 // TestSuccessfulMultiLanguageTranslation tests successful API integration.
@@ -147,7 +188,7 @@ func (suite *TranslationIntegrationTestSuite) TestSuccessfulMultiLanguageTransla
 		if data.Metadata == nil {
 			data.Metadata = make(map[string]interface{})
 		}
-		data.Metadata["target_languages"] = []string{"es", "fr"}
+		data.Metadata["target_languages"] = []string{"es", "fr", "de"}
 	})
 
 	ctx := context.Background()
@@ -165,15 +206,63 @@ func (suite *TranslationIntegrationTestSuite) TestSuccessfulMultiLanguageTransla
 		},
 	}
 
-	// Process should inject target languages via callback
+	// Process should inject target languages via callback and get translations
 	output, err := suite.stage.Process(ctx, input)
 	suite.NoError(err)
 	suite.Equal(input.Type, output.Type)
 	suite.Equal(input.TrackID, output.TrackID)
 
-	// Test that the mock server is responding
-	suite.NotNil(suite.mockServer, "Mock server should be available")
-	suite.NotEmpty(suite.responses, "Mock responses should be configured")
+	// Check that translation was added to transcription event
+	transcriptionEvent, ok := output.Metadata["transcription_event"].(TranscriptionEvent)
+	suite.True(ok)
+	suite.NotEmpty(transcriptionEvent.Translations)
+
+	// Verify specific translations
+	suite.Contains(transcriptionEvent.Translations, "es")
+	suite.Contains(transcriptionEvent.Translations, "fr")
+	suite.Contains(transcriptionEvent.Translations, "de")
+	suite.Equal("Hola mundo", transcriptionEvent.Translations["es"])
+	suite.Equal("Bonjour le monde", transcriptionEvent.Translations["fr"])
+	suite.Equal("Hallo Welt", transcriptionEvent.Translations["de"])
+
+	// Check metrics
+	metrics := suite.stage.GetAPIMetrics()
+	suite.Greater(metrics["successful_calls"].(uint64), uint64(0))
+	suite.Equal(metrics["failed_calls"].(uint64), uint64(0))
+}
+
+// TestSingleLanguageTranslation tests translation to a single language.
+func (suite *TranslationIntegrationTestSuite) TestSingleLanguageTranslation() {
+	// Add callback to inject single target language
+	suite.stage.AddBeforeTranslationCallback(func(data *MediaData) {
+		if data.Metadata == nil {
+			data.Metadata = make(map[string]interface{})
+		}
+		data.Metadata["target_languages"] = []string{"es"}
+	})
+
+	ctx := context.Background()
+	input := MediaData{
+		Type:    MediaTypeAudio,
+		TrackID: "track1",
+		Metadata: map[string]interface{}{
+			"transcription_event": TranscriptionEvent{
+				Type:     "final",
+				Text:     "Hello world",
+				Language: "en",
+				IsFinal:  true,
+			},
+		},
+	}
+
+	output, err := suite.stage.Process(ctx, input)
+	suite.NoError(err)
+
+	// Check translation
+	transcriptionEvent, ok := output.Metadata["transcription_event"].(TranscriptionEvent)
+	suite.True(ok)
+	suite.Len(transcriptionEvent.Translations, 1)
+	suite.Equal("Hola mundo", transcriptionEvent.Translations["es"])
 }
 
 // TestAPIErrorHandling tests error scenarios.
@@ -207,6 +296,10 @@ func (suite *TranslationIntegrationTestSuite) TestAPIErrorHandling() {
 	suite.NoError(err, "Pipeline should not fail on translation errors")
 	suite.Equal(input.Type, output.Type)
 	suite.Equal(input.TrackID, output.TrackID)
+
+	// Check metrics show the failure
+	metrics := suite.stage.GetAPIMetrics()
+	suite.Greater(metrics["failed_calls"].(uint64), uint64(0))
 }
 
 // TestContextCancellation tests proper context handling.
@@ -306,6 +399,113 @@ func (suite *TranslationIntegrationTestSuite) TestCircuitBreakerIntegration() {
 	metrics := suite.stage.GetAPIMetrics()
 	suite.Greater(metrics["circuit_breaker_trips"].(uint64), uint64(0))
 	suite.Greater(metrics["failed_calls"].(uint64), uint64(0))
+}
+
+// TestCachingIntegration tests cache functionality.
+func (suite *TranslationIntegrationTestSuite) TestCachingIntegration() {
+	// Add callback to inject target languages
+	suite.stage.AddBeforeTranslationCallback(func(data *MediaData) {
+		if data.Metadata == nil {
+			data.Metadata = make(map[string]interface{})
+		}
+		data.Metadata["target_languages"] = []string{"es"}
+	})
+
+	ctx := context.Background()
+	input := MediaData{
+		Type:    MediaTypeAudio,
+		TrackID: "track1",
+		Metadata: map[string]interface{}{
+			"transcription_event": TranscriptionEvent{
+				Type:     "final",
+				Text:     "Hello world",
+				Language: "en",
+				IsFinal:  true,
+			},
+		},
+	}
+
+	// First call - should hit API
+	output1, err1 := suite.stage.Process(ctx, input)
+	suite.NoError(err1)
+
+	metrics1 := suite.stage.GetAPIMetrics()
+	initialCalls := metrics1["successful_calls"].(uint64)
+
+	// Second call with same input - should hit cache
+	output2, err2 := suite.stage.Process(ctx, input)
+	suite.NoError(err2)
+
+	metrics2 := suite.stage.GetAPIMetrics()
+	finalCalls := metrics2["successful_calls"].(uint64)
+
+	// Should have same result but no additional API call
+	suite.Equal(output1, output2)
+	suite.Equal(initialCalls, finalCalls, "Second call should use cache")
+
+	// Cache should have entries
+	suite.Greater(metrics2["cache_entries"].(int), 0)
+}
+
+// TestRealOpenAIIntegration tests against real OpenAI API if API key is provided.
+func (suite *TranslationIntegrationTestSuite) TestRealOpenAIIntegration() {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
+	}
+
+	// Create stage with real OpenAI endpoint
+	realStage := NewTranslationStage("real-integration-test", 30, apiKey)
+	defer realStage.Disconnect()
+
+	// Add callback to inject target languages
+	realStage.AddBeforeTranslationCallback(func(data *MediaData) {
+		if data.Metadata == nil {
+			data.Metadata = make(map[string]interface{})
+		}
+		data.Metadata["target_languages"] = []string{"es", "fr"}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	input := MediaData{
+		Type:    MediaTypeAudio,
+		TrackID: "track1",
+		Metadata: map[string]interface{}{
+			"transcription_event": TranscriptionEvent{
+				Type:     "final",
+				Text:     "Hello, how are you today?",
+				Language: "en",
+				IsFinal:  true,
+			},
+		},
+	}
+
+	// Process with real API
+	output, err := realStage.Process(ctx, input)
+	suite.NoError(err)
+
+	// Check that translations were received
+	transcriptionEvent, ok := output.Metadata["transcription_event"].(TranscriptionEvent)
+	suite.True(ok)
+	suite.NotEmpty(transcriptionEvent.Translations)
+
+	// Should have Spanish and French translations
+	suite.Contains(transcriptionEvent.Translations, "es")
+	suite.Contains(transcriptionEvent.Translations, "fr")
+
+	// Translations should not be empty
+	suite.NotEmpty(transcriptionEvent.Translations["es"])
+	suite.NotEmpty(transcriptionEvent.Translations["fr"])
+
+	// Check metrics
+	stats := realStage.GetStats()
+	suite.Greater(stats.SuccessfulTranslations, uint64(0))
+	suite.Greater(stats.AverageTimeToFirstToken, float64(0))
+
+	fmt.Printf("Real API translations: %+v\n", transcriptionEvent.Translations)
+	fmt.Printf("Time to first token: %.2fms\n", stats.AverageTimeToFirstToken)
 }
 
 func TestTranslationIntegration(t *testing.T) {

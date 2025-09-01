@@ -59,10 +59,11 @@ func NewE2ETranslationTest() (*E2ETranslationTest, error) {
 }
 
 func (rt *E2ETranslationTest) Setup() error {
-	fmt.Println("🧪 === TranslationStage E2E Audio Integration Test ===")
+	fmt.Println("🧪 === TranslationStage E2E Streaming Audio Integration Test ===")
 	fmt.Printf("LiveKit URL: %s\n", rt.url)
 	fmt.Printf("Room Name: %s\n", rt.roomName)
 	fmt.Printf("OpenAI API Key: %s...%s\n", rt.openaiKey[:8], rt.openaiKey[len(rt.openaiKey)-4:])
+	fmt.Println("🌊 Using OpenAI Streaming API for real-time translations")
 	fmt.Println()
 
 	// Create test room
@@ -83,7 +84,7 @@ func (rt *E2ETranslationTest) Setup() error {
 		data.Metadata["target_languages"] = []string{"es", "fr", "de"}
 	})
 
-	fmt.Printf("🌐 Configured translation for languages: [es, fr, de]\n")
+	fmt.Printf("🌐 Configured streaming translation for languages: [es, fr, de]\n")
 
 	// Connect agent to room
 	if err := rt.connectAgent(); err != nil {
@@ -91,7 +92,7 @@ func (rt *E2ETranslationTest) Setup() error {
 	}
 	fmt.Printf("🤖 Agent connected to room\n")
 
-	fmt.Printf("📻 E2E test ready (simulates audio streaming)\n")
+	fmt.Printf("📻 E2E streaming translation test ready (simulates audio streaming)\n")
 
 	return nil
 }
@@ -147,77 +148,13 @@ func (rt *E2ETranslationTest) handleTrackSubscribed(track *webrtc.TrackRemote, p
 	}
 
 	fmt.Printf("🎵 Subscribed to audio track: %s (from %s)\n", track.ID(), rp.Identity())
-
-	// Process audio track through TranslationStage in background
-	go rt.processAudioTrack(track)
-}
-
-func (rt *E2ETranslationTest) processAudioTrack(track *webrtc.TrackRemote) {
-	transcriptionCount := 0
-	translationCount := 0
-
-	for {
-		select {
-		case <-rt.ctx.Done():
-			return
-		default:
-			// Read RTP packet
-			packet, _, err := track.ReadRTP()
-			if err != nil {
-				fmt.Printf("❌ Error reading RTP packet: %v\n", err)
-				return
-			}
-
-			// Create MediaData
-			mediaData := MediaData{
-				Type:    MediaTypeAudio,
-				TrackID: track.ID(),
-				Data:    packet.Payload,
-				Metadata: map[string]interface{}{
-					"rtp_header": &packet.Header,
-					"timestamp":  time.Now(),
-				},
-			}
-
-			// Simulate transcription events periodically
-			transcriptionCount++
-			if transcriptionCount%100 == 0 { // Every 100 packets (~2 seconds)
-				// Create a simulated transcription event
-				transcriptionText := fmt.Sprintf("This is transcription number %d from the audiobook sample", transcriptionCount/100)
-
-				mediaData.Metadata["transcription_event"] = TranscriptionEvent{
-					Type:     "final",
-					Text:     transcriptionText,
-					Language: "en",
-					IsFinal:  true,
-				}
-
-				fmt.Printf("\n[%s] 📝 TRANSCRIPTION: %s\n",
-					time.Now().Format("15:04:05.000"), transcriptionText)
-
-				// Process through TranslationStage
-				output, err := rt.stage.Process(rt.ctx, mediaData)
-				if err != nil {
-					fmt.Printf("❌ Translation error: %v\n", err)
-					continue
-				}
-
-				// Check for translations in output metadata
-				if translationData, ok := output.Metadata["translations"].(map[string]string); ok {
-					translationCount++
-					for lang, translation := range translationData {
-						fmt.Printf("[%s] 🌐 TRANSLATION (%s): %s\n",
-							time.Now().Format("15:04:05.000"), lang, translation)
-					}
-				}
-			}
-		}
-	}
+	fmt.Println("📝 Real audio track detected - transcriptions would be processed through streaming translation")
 }
 
 func (rt *E2ETranslationTest) Run(duration time.Duration) error {
-	fmt.Printf("\n🚀 Starting e2e translation test (duration: %v)\n", duration)
-	fmt.Println("You should see simulated transcriptions and translations appearing below:")
+	fmt.Printf("\n🚀 Starting e2e streaming translation test (duration: %v)\n", duration)
+	fmt.Println("You should see simulated transcriptions and real-time streaming translations below:")
+	fmt.Println("🌊 Each translation uses OpenAI's streaming API for faster response times")
 	fmt.Println(strings.Repeat("=", 60))
 
 	// Set up signal handling
@@ -230,6 +167,9 @@ func (rt *E2ETranslationTest) Run(duration time.Duration) error {
 
 	fmt.Printf("⏱️  Test running for %v (or press Ctrl+C to stop)\n\n", duration)
 
+	// Start simulated transcription generation since we don't have real audio
+	go rt.simulateTranscriptionEvents(testCtx)
+
 	select {
 	case <-testCtx.Done():
 		fmt.Println("\n⏱️  Test duration completed")
@@ -241,29 +181,131 @@ func (rt *E2ETranslationTest) Run(duration time.Duration) error {
 	return nil
 }
 
+// simulateTranscriptionEvents generates simulated transcription events and processes them through TranslationStage
+func (rt *E2ETranslationTest) simulateTranscriptionEvents(ctx context.Context) {
+	transcriptionCount := 0
+	translationCount := 0
+
+	// Sample transcriptions to test translation
+	sampleTranscriptions := []string{
+		"Hello, welcome to our virtual meeting today",
+		"Can everyone hear me clearly?",
+		"Let's start with the quarterly business review",
+		"The sales numbers look promising this quarter",
+		"We need to discuss the upcoming product launch",
+		"Thank you all for joining today's session",
+	}
+
+	ticker := time.NewTicker(3 * time.Second) // Generate transcription every 3 seconds
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Create simulated transcription event
+			transcriptionText := sampleTranscriptions[transcriptionCount%len(sampleTranscriptions)]
+
+			mediaData := MediaData{
+				Type:    MediaTypeAudio,
+				TrackID: "simulated-track",
+				Data:    []byte("simulated audio data"),
+				Metadata: map[string]interface{}{
+					"timestamp": time.Now(),
+					"transcription_event": TranscriptionEvent{
+						Type:     "final",
+						Text:     transcriptionText,
+						Language: "en",
+						IsFinal:  true,
+					},
+				},
+			}
+
+			transcriptionCount++
+			fmt.Printf("\n[%s] 📝 TRANSCRIPTION #%d: %s\n",
+				time.Now().Format("15:04:05.000"), transcriptionCount, transcriptionText)
+
+			// Process through TranslationStage (streaming implementation)
+			output, err := rt.stage.Process(ctx, mediaData)
+			if err != nil {
+				fmt.Printf("❌ Streaming translation error: %v\n", err)
+				// Display streaming-specific error details
+				metrics := rt.stage.GetAPIMetrics()
+				if metrics["streaming_errors"].(uint64) > 0 {
+					fmt.Printf("   📊 Streaming errors: %d\n", metrics["streaming_errors"].(uint64))
+				}
+				if metrics["connection_errors"].(uint64) > 0 {
+					fmt.Printf("   🔌 Connection errors: %d\n", metrics["connection_errors"].(uint64))
+				}
+				continue
+			}
+
+			// Check for translations in transcription event (streaming implementation)
+			if transcriptionEvent, ok := output.Metadata["transcription_event"].(TranscriptionEvent); ok {
+				if len(transcriptionEvent.Translations) > 0 {
+					translationCount++
+					fmt.Printf("[%s] 🌐 STREAMING TRANSLATIONS:\n", time.Now().Format("15:04:05.000"))
+					for lang, translation := range transcriptionEvent.Translations {
+						fmt.Printf("    %s: %s\n", strings.ToUpper(lang), translation)
+					}
+
+					// Show real-time streaming performance every 3 translations
+					if translationCount%3 == 0 {
+						metrics := rt.stage.GetAPIMetrics()
+						if ttft := metrics["average_time_to_first_token_ms"].(float64); ttft > 0 {
+							fmt.Printf("   ⚡ Avg Time-to-First-Token: %.1fms\n", ttft)
+						}
+					}
+				} else {
+					fmt.Printf("[%s] ⚠️  No translations received (API may have failed)\n", time.Now().Format("15:04:05.000"))
+				}
+			}
+		}
+	}
+}
+
 func (rt *E2ETranslationTest) PrintStats() {
 	fmt.Println("\n" + strings.Repeat("=", 60))
-	fmt.Println("📊 === Final Statistics ===")
+	fmt.Println("📊 === Final Streaming Translation Statistics ===")
 
 	// Get TranslationStage metrics
 	if rt.stage != nil {
 		metrics := rt.stage.GetAPIMetrics()
+		stats := rt.stage.GetStats()
 
+		// Core API metrics
 		fmt.Printf("API Calls: %d\n", metrics["successful_calls"].(uint64))
 		fmt.Printf("Failed Calls: %d\n", metrics["failed_calls"].(uint64))
 		fmt.Printf("Cache Entries: %d\n", metrics["cache_entries"].(int))
 		fmt.Printf("Rate Limited: %d\n", metrics["rate_limit_exceeded"].(uint64))
 		fmt.Printf("Circuit Breaker Trips: %d\n", metrics["circuit_breaker_trips"].(uint64))
 
+		// Streaming-specific metrics
+		fmt.Printf("Streaming Errors: %d\n", metrics["streaming_errors"].(uint64))
+		fmt.Printf("Connection Errors: %d\n", metrics["connection_errors"].(uint64))
+		fmt.Printf("Total Chunks Received: %d\n", stats.ChunksReceived)
+
+		// Performance metrics
 		if totalCalls := metrics["successful_calls"].(uint64) + metrics["failed_calls"].(uint64); totalCalls > 0 {
 			successRate := float64(metrics["successful_calls"].(uint64)) / float64(totalCalls) * 100
 			fmt.Printf("Success Rate: %.1f%%\n", successRate)
 		}
 
-		fmt.Printf("Average Latency: %.2fms\n", metrics["average_latency_ms"].(float64))
+		fmt.Printf("Average Total Latency: %.2fms\n", metrics["average_latency_ms"].(float64))
+		fmt.Printf("Average Time-to-First-Token: %.2fms\n", metrics["average_time_to_first_token_ms"].(float64))
+
+		// Streaming performance indicator
+		if ttft := metrics["average_time_to_first_token_ms"].(float64); ttft > 0 {
+			totalLatency := metrics["average_latency_ms"].(float64)
+			if totalLatency > 0 {
+				streamingEfficiency := (1.0 - ttft/totalLatency) * 100
+				fmt.Printf("Streaming Efficiency: %.1f%% (faster response start)\n", streamingEfficiency)
+			}
+		}
 	}
 
-	fmt.Println("\n🎉 Real audio integration test completed successfully!")
+	fmt.Println("\n🎉 Real-time streaming translation test completed successfully!")
 }
 
 func (rt *E2ETranslationTest) Cleanup() {
