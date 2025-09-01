@@ -59,10 +59,11 @@ type RealtimeTranscriptionStage struct {
 	ephemeralKey string
 
 	// Transcription handling
-	transcriptionCallbacks []TranscriptionCallback
-	eventChan              chan RealtimeEvent
-	closeChan              chan struct{}
-	wg                     sync.WaitGroup
+	transcriptionCallbacks       []TranscriptionCallback
+	beforeTranscriptionCallbacks []BeforeTranscriptionCallback
+	eventChan                    chan RealtimeEvent
+	closeChan                    chan struct{}
+	wg                           sync.WaitGroup
 
 	// Connection state
 	connected     bool
@@ -71,6 +72,9 @@ type RealtimeTranscriptionStage struct {
 
 	// Statistics
 	stats *RealtimeTranscriptionStats
+
+	// Latest transcription for pipeline output
+	latestTranscription *TranscriptionEvent
 }
 
 type NoiseReduction struct {
@@ -96,7 +100,12 @@ type TurnDetection struct {
 // TranscriptionCallback is called when transcription events occur.
 type TranscriptionCallback func(event TranscriptionEvent)
 
+// BeforeTranscriptionCallback is called before transcription processing starts.
+// It can modify the MediaData, particularly metadata, to inject participant data or other information.
+type BeforeTranscriptionCallback func(data *MediaData)
+
 // TranscriptionEvent represents a transcription event from the Realtime API.
+// This unified event structure is used by both transcription and translation stages.
 type TranscriptionEvent struct {
 	Type      string    // "partial", "final", "error"
 	Text      string    // Transcribed text
@@ -104,6 +113,9 @@ type TranscriptionEvent struct {
 	Language  string    // Detected language (if available)
 	IsFinal   bool      // Whether this is a final transcription
 	Error     error     // Error if Type is "error"
+
+	// Translation data (populated by TranslationStage if enabled)
+	Translations map[string]string // targetLang -> translatedText
 }
 
 // RealtimeEvent represents an event from OpenAI Realtime API.
@@ -202,11 +214,12 @@ type RealtimeTranscriptionStats struct {
 //   - name: Unique identifier for this stage
 //   - priority: Execution order (lower runs first)
 //   - apiKey: OpenAI API key for authentication
-//   - model: Model to use
+//   - model: Model to use (empty for default)
+//   - language: Language code for transcription (e.g., "en", "es", "fr")
 //
 // The stage will establish a WebRTC connection to OpenAI's Realtime API
 // and stream audio for transcription.
-func NewRealtimeTranscriptionStage(name string, priority int, apiKey string, model string) *RealtimeTranscriptionStage {
+func NewRealtimeTranscriptionStage(name string, priority int, apiKey, model, language string) *RealtimeTranscriptionStage {
 	if model == "" {
 		// Use the transcription model for WebRTC connection
 		model = "gpt-4o-transcribe"
@@ -219,12 +232,14 @@ func NewRealtimeTranscriptionStage(name string, priority int, apiKey string, mod
 		model:     model,
 		voiceMode: "alloy", // Default voice (required even for transcription)
 		audioTranscriptionConfig: &AudioTranscriptionConfig{
-			Model: model,
+			Model:    model,
+			Language: language,
 		},
-		transcriptionCallbacks: make([]TranscriptionCallback, 0),
-		eventChan:              make(chan RealtimeEvent, 100),
-		closeChan:              make(chan struct{}),
-		stats:                  &RealtimeTranscriptionStats{},
+		transcriptionCallbacks:       make([]TranscriptionCallback, 0),
+		beforeTranscriptionCallbacks: make([]BeforeTranscriptionCallback, 0),
+		eventChan:                    make(chan RealtimeEvent, 100),
+		closeChan:                    make(chan struct{}),
+		stats:                        &RealtimeTranscriptionStats{},
 		turnDetection: &TurnDetection{
 			Type:              "server_vad",
 			Threshold:         0,
@@ -251,11 +266,26 @@ func (rts *RealtimeTranscriptionStage) CanProcess(mediaType MediaType) bool {
 // Process implements MediaPipelineStage.
 //
 // Routes incoming audio data to OpenAI Realtime API for transcription.
-// The transcribed text is delivered asynchronously via callbacks.
+// The transcribed text is delivered asynchronously via callbacks and included in output metadata.
 func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaData) (MediaData, error) {
-	// Ensure we're connected
-	if !rts.IsConnected() {
-		if err := rts.Connect(ctx); err != nil {
+	// Call before transcription callbacks to allow modification of input data
+	rts.callBeforeTranscriptionCallbacks(&input)
+
+	// Ensure we're connected (atomic check-and-connect to prevent race conditions)
+	rts.mu.Lock()
+	shouldConnect := !rts.connected && !rts.connecting
+	if shouldConnect {
+		rts.connecting = true
+	}
+	rts.mu.Unlock()
+
+	if shouldConnect {
+		if err := rts.connectWithoutLock(ctx); err != nil {
+			// Reset connecting flag on failure
+			rts.mu.Lock()
+			rts.connecting = false
+			rts.mu.Unlock()
+
 			getLogger := logger.GetLogger()
 			getLogger.Errorw("failed to connect to Realtime API", err)
 			// Don't fail the pipeline, just skip transcription
@@ -306,6 +336,16 @@ func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaD
 	input.Metadata["realtime_transcribed"] = true
 	input.Metadata["transcribed_at"] = time.Now()
 
+	// Include latest transcription in metadata if available (both final and interim)
+	rts.mu.Lock()
+	if rts.latestTranscription != nil {
+		input.Metadata["transcription_event"] = *rts.latestTranscription
+
+		// Clear after including in output to avoid duplicate sends
+		rts.latestTranscription = nil
+	}
+	rts.mu.Unlock()
+
 	return input, nil
 }
 
@@ -325,6 +365,11 @@ func (rts *RealtimeTranscriptionStage) Connect(ctx context.Context) error {
 		rts.mu.Unlock()
 	}()
 
+	return rts.connectWithoutLock(ctx)
+}
+
+// connectWithoutLock performs the actual connection work without acquiring the mutex.
+func (rts *RealtimeTranscriptionStage) connectWithoutLock(ctx context.Context) error {
 	// Update stats
 	rts.stats.mu.Lock()
 	rts.stats.ConnectionAttempts++
@@ -401,8 +446,6 @@ func (rts *RealtimeTranscriptionStage) Connect(ctx context.Context) error {
 
 	dataChannel.OnOpen(func() {
 		getLogger.Infow("OpenAI Realtime data channel opened")
-		// Send session configuration when data channel opens
-		rts.sendDataChannelConfig()
 	})
 
 	// Handle connection state changes
@@ -689,6 +732,7 @@ func (rts *RealtimeTranscriptionStage) handleDataChannelMessage(data []byte) {
 				Type:      "partial",
 				Text:      delta,
 				Timestamp: time.Now(),
+				Language:  rts.audioTranscriptionConfig.Language,
 				IsFinal:   false,
 			})
 			rts.stats.mu.Lock()
@@ -703,6 +747,7 @@ func (rts *RealtimeTranscriptionStage) handleDataChannelMessage(data []byte) {
 				Type:      "final",
 				Text:      transcript,
 				Timestamp: time.Now(),
+				Language:  rts.audioTranscriptionConfig.Language,
 				IsFinal:   true,
 			})
 			rts.stats.mu.Lock()
@@ -733,6 +778,7 @@ func (rts *RealtimeTranscriptionStage) handleTranscriptionDelta(msg map[string]i
 				Type:      "partial",
 				Text:      transcript,
 				Timestamp: time.Now(),
+				Language:  rts.audioTranscriptionConfig.Language,
 				IsFinal:   false,
 			})
 
@@ -752,6 +798,7 @@ func (rts *RealtimeTranscriptionStage) handleTranscriptionComplete(msg map[strin
 			Type:      "final",
 			Text:      transcript,
 			Timestamp: time.Now(),
+			Language:  rts.audioTranscriptionConfig.Language,
 			IsFinal:   true,
 		})
 
@@ -775,6 +822,7 @@ func (rts *RealtimeTranscriptionStage) handleConversationItem(msg map[string]int
 							Type:      "final",
 							Text:      transcript,
 							Timestamp: time.Now(),
+							Language:  rts.audioTranscriptionConfig.Language,
 							IsFinal:   true,
 						})
 
@@ -873,6 +921,7 @@ func (rts *RealtimeTranscriptionStage) processRealtimeEvent(event RealtimeEvent)
 				Type:      "final",
 				Text:      transcript,
 				Timestamp: time.Now(),
+				Language:  rts.audioTranscriptionConfig.Language,
 				IsFinal:   true,
 			})
 			rts.stats.FinalTranscriptions++
@@ -884,6 +933,7 @@ func (rts *RealtimeTranscriptionStage) processRealtimeEvent(event RealtimeEvent)
 				Type:      "partial",
 				Text:      event.Delta.Transcript,
 				Timestamp: time.Now(),
+				Language:  rts.audioTranscriptionConfig.Language,
 				IsFinal:   false,
 			})
 		}
@@ -896,6 +946,7 @@ func (rts *RealtimeTranscriptionStage) processRealtimeEvent(event RealtimeEvent)
 						Type:      "final",
 						Text:      content.Transcript,
 						Timestamp: time.Now(),
+						Language:  rts.audioTranscriptionConfig.Language,
 						IsFinal:   true,
 					})
 				}
@@ -915,10 +966,12 @@ func (rts *RealtimeTranscriptionStage) processRealtimeEvent(event RealtimeEvent)
 
 // notifyTranscription notifies all registered callbacks of a transcription event.
 func (rts *RealtimeTranscriptionStage) notifyTranscription(event TranscriptionEvent) {
-	rts.mu.RLock()
+	// Store latest transcription for pipeline output
+	rts.mu.Lock()
+	rts.latestTranscription = &event
 	callbacks := make([]TranscriptionCallback, len(rts.transcriptionCallbacks))
 	copy(callbacks, rts.transcriptionCallbacks)
-	rts.mu.RUnlock()
+	rts.mu.Unlock()
 
 	for _, callback := range callbacks {
 		// Call in goroutine to prevent blocking
@@ -933,11 +986,32 @@ func (rts *RealtimeTranscriptionStage) AddTranscriptionCallback(callback Transcr
 	rts.transcriptionCallbacks = append(rts.transcriptionCallbacks, callback)
 }
 
+// AddBeforeTranscriptionCallback adds a callback that runs before transcription processing.
+func (rts *RealtimeTranscriptionStage) AddBeforeTranscriptionCallback(callback BeforeTranscriptionCallback) {
+	rts.mu.Lock()
+	defer rts.mu.Unlock()
+	rts.beforeTranscriptionCallbacks = append(rts.beforeTranscriptionCallbacks, callback)
+}
+
+// callBeforeTranscriptionCallbacks calls all registered before transcription callbacks.
+func (rts *RealtimeTranscriptionStage) callBeforeTranscriptionCallbacks(data *MediaData) {
+	rts.mu.RLock()
+	callbacks := make([]BeforeTranscriptionCallback, len(rts.beforeTranscriptionCallbacks))
+	copy(callbacks, rts.beforeTranscriptionCallbacks)
+	rts.mu.RUnlock()
+
+	for _, callback := range callbacks {
+		// Call callback synchronously since it needs to modify data before processing
+		callback(data)
+	}
+}
+
 // RemoveAllCallbacks removes all transcription callbacks.
 func (rts *RealtimeTranscriptionStage) RemoveAllCallbacks() {
 	rts.mu.Lock()
 	defer rts.mu.Unlock()
 	rts.transcriptionCallbacks = make([]TranscriptionCallback, 0)
+	rts.beforeTranscriptionCallbacks = make([]BeforeTranscriptionCallback, 0)
 }
 
 // IsConnected returns whether the stage is connected to the Realtime API.
@@ -1019,4 +1093,13 @@ func (rts *RealtimeTranscriptionStage) SetModel(model string) {
 	rts.mu.Lock()
 	defer rts.mu.Unlock()
 	rts.model = model
+}
+
+// SetLanguage sets the language for transcription.
+func (rts *RealtimeTranscriptionStage) SetLanguage(language string) {
+	rts.mu.Lock()
+	defer rts.mu.Unlock()
+	if rts.audioTranscriptionConfig != nil {
+		rts.audioTranscriptionConfig.Language = language
+	}
 }

@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -437,7 +439,7 @@ func (mp *MediaPipeline) StartProcessingTrack(track *webrtc.TrackRemote) error {
 	go trackPipeline.processLoop(ctx)
 
 	// Start media receiver
-	if err := mp.startMediaReceiver(track, trackPipeline); err != nil {
+	if err := mp.startMediaReceiver(ctx, track, trackPipeline); err != nil {
 		cancel()
 		delete(mp.tracks, track.ID())
 		return err
@@ -480,24 +482,105 @@ func (mp *MediaPipeline) StopProcessingTrack(trackID string) {
 	getLogger.Infow("stopped processing track", "trackID", trackID)
 }
 
+// Stop stops all track processing in the pipeline.
+//
+// This method gracefully shuts down all active track pipelines by:
+//   - Stopping all track receivers
+//   - Cancelling all processing goroutines
+//   - Waiting for cleanup to complete
+//
+// The method is idempotent and can be called multiple times safely.
+func (mp *MediaPipeline) Stop() {
+	mp.mu.Lock()
+	trackIDs := make([]string, 0, len(mp.tracks))
+	for trackID := range mp.tracks {
+		trackIDs = append(trackIDs, trackID)
+	}
+	mp.mu.Unlock()
+
+	// Stop each track
+	for _, trackID := range trackIDs {
+		mp.StopProcessingTrack(trackID)
+	}
+
+	getLogger := logger.GetLogger()
+	getLogger.Infow("stopped media pipeline", "trackCount", len(trackIDs))
+}
+
 // startMediaReceiver starts receiving media data from a track
-func (mp *MediaPipeline) startMediaReceiver(track *webrtc.TrackRemote, pipeline *MediaTrackPipeline) error {
+func (mp *MediaPipeline) startMediaReceiver(ctx context.Context, track *webrtc.TrackRemote, pipeline *MediaTrackPipeline) error {
 	// Set up media handler based on track type
 	switch track.Kind() {
 	case webrtc.RTPCodecTypeAudio:
-		// Audio handling would be implemented here
-		// This would involve setting up audio receivers
+		// Start audio receiver goroutine
+		pipeline.wg.Add(1)
+		go mp.receiveAudioPackets(ctx, track, pipeline)
+
+		getLogger := logger.GetLogger()
+		getLogger.Infow("started audio receiver", "trackID", track.ID(), "codec", track.Codec().MimeType)
 	case webrtc.RTPCodecTypeVideo:
-		// Video handling would be implemented here
-		// This would involve setting up video receivers
+		// Video handling left empty as requested
+		// This would involve setting up video receivers in the future
+		getLogger := logger.GetLogger()
+		getLogger.Debugw("video track processing not implemented", "trackID", track.ID())
+
 	default:
-		panic("unhandled default case")
+		return fmt.Errorf("unsupported track type: %v", track.Kind())
 	}
 
-	// Note: Actual media reception would require lower-level WebRTC access
-	// This is a simplified implementation showing the structure
-
 	return nil
+}
+
+// receiveAudioPackets reads RTP packets from an audio track and queues them for processing
+func (mp *MediaPipeline) receiveAudioPackets(ctx context.Context, track *webrtc.TrackRemote, pipeline *MediaTrackPipeline) {
+	defer pipeline.wg.Done()
+
+	getLogger := logger.GetLogger()
+	getLogger.Infow("audio receiver started", "trackID", track.ID())
+	defer getLogger.Infow("audio receiver stopped", "trackID", track.ID())
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			// Read RTP packet from the track
+			rtpPacket, _, readErr := track.ReadRTP()
+			if readErr != nil {
+				// Check if this is a normal shutdown
+				if errors.Is(readErr, io.EOF) {
+					getLogger.Infow("audio track ended", "trackID", track.ID())
+				} else {
+					getLogger.Errorw("error reading RTP packet", readErr, "trackID", track.ID())
+				}
+
+				return
+			}
+
+			// Create MediaData from the RTP packet
+			mediaData := MediaData{
+				Type:      MediaTypeAudio,
+				TrackID:   track.ID(),
+				Timestamp: time.Now(),
+				Data:      rtpPacket.Payload,
+				Format: MediaFormat{
+					SampleRate: uint32(track.Codec().ClockRate),
+					Channels:   uint8(track.Codec().Channels),
+					// Additional format info can be extracted from codec parameters
+				},
+				Metadata: map[string]interface{}{
+					"rtp_header":      &rtpPacket.Header,
+					"codec":           track.Codec(),
+					"sequence_number": rtpPacket.SequenceNumber,
+					"timestamp":       rtpPacket.Timestamp,
+					"ssrc":            rtpPacket.SSRC,
+				},
+			}
+
+			// Queue the media data for processing
+			pipeline.InputBuffer.Enqueue(mediaData)
+		}
+	}
 }
 
 // processLoop processes media data for a track
@@ -952,10 +1035,12 @@ type WebRTCRouterConnection struct {
 	PeerConnection *webrtc.PeerConnection
 	DataChannel    *webrtc.DataChannel
 
-	// Tracks being sent to this receiver
+	// Tracks being sent to this receiver (protected by tracksMu)
+	tracksMu    sync.RWMutex
 	localTracks map[string]*webrtc.TrackLocalStaticRTP
 
-	// Connection state
+	// Connection state (protected by stateMu)
+	stateMu  sync.RWMutex
 	state    webrtc.PeerConnectionState
 	iceState webrtc.ICEConnectionState
 
@@ -1130,16 +1215,20 @@ func (wrs *WebRTCRoutingStage) CreateReceiver(ctx context.Context, receiverID st
 
 	// Handle connection state changes
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		conn.stateMu.Lock()
 		conn.state = state
+		conn.stateMu.Unlock()
 		wrs.handleConnectionStateChange(receiverID, state)
 	})
 
 	// Handle ICE connection state changes
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		conn.stateMu.Lock()
 		conn.iceState = state
 		if state == webrtc.ICEConnectionStateConnected {
 			conn.connectedAt = time.Now()
 		}
+		conn.stateMu.Unlock()
 	})
 
 	// Handle data channel messages
@@ -1176,8 +1265,10 @@ func (wrs *WebRTCRoutingStage) CreateReceiver(ctx context.Context, receiverID st
 
 	// Store connection
 	wrs.connections[receiverID] = conn
+	wrs.stats.mu.Lock()
 	wrs.stats.TotalConnections++
 	wrs.stats.ActiveConnections++
+	wrs.stats.mu.Unlock()
 
 	getLogger := logger.GetLogger()
 	getLogger.Infow("created WebRTC receiver connection",
@@ -1237,7 +1328,9 @@ func (wrs *WebRTCRoutingStage) AddTrackToReceiver(receiverID string, sourceTrack
 	}
 
 	// Store track reference
+	conn.tracksMu.Lock()
 	conn.localTracks[sourceTrackID] = localTrack
+	conn.tracksMu.Unlock()
 
 	// Update routing table
 	if wrs.routingTable[sourceTrackID] == nil {
@@ -1290,7 +1383,9 @@ func (wrs *WebRTCRoutingStage) RemoveReceiver(receiverID string) error {
 
 	// Remove connection
 	delete(wrs.connections, receiverID)
+	wrs.stats.mu.Lock()
 	wrs.stats.ActiveConnections--
+	wrs.stats.mu.Unlock()
 
 	getLogger := logger.GetLogger()
 	getLogger.Infow("removed receiver connection",
@@ -1340,7 +1435,10 @@ func (wrs *WebRTCRoutingStage) forwardPackets(conn *WebRTCRouterConnection) {
 		select {
 		case packet := <-conn.packetChan:
 			// Forward packet to the appropriate local track
-			if localTrack, exists := conn.localTracks[packet.TrackID]; exists {
+			conn.tracksMu.RLock()
+			localTrack, exists := conn.localTracks[packet.TrackID]
+			conn.tracksMu.RUnlock()
+			if exists {
 				// Write RTP packet
 				if packet.RTPHeader != nil {
 					rtpPacket := &rtp.Packet{

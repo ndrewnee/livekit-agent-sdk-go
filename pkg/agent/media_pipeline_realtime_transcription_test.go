@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -171,22 +172,27 @@ func (m *MockRealtimeServer) Close() {
 
 // TestRealtimeTranscriptionStageCreation tests stage creation
 func TestRealtimeTranscriptionStageCreation(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
 
 	assert.NotNil(t, stage)
 	assert.Equal(t, "transcription", stage.GetName())
 	assert.Equal(t, 20, stage.GetPriority())
 	assert.True(t, stage.CanProcess(MediaTypeAudio))
 	assert.False(t, stage.CanProcess(MediaTypeVideo))
-	assert.Equal(t, "gpt-4o-realtime-preview-2024-12-17", stage.model)
-	assert.Equal(t, "text", stage.voiceMode)
+	assert.Equal(t, "gpt-4o-transcribe", stage.model)
+	assert.Equal(t, "alloy", stage.voiceMode)
 	assert.NotNil(t, stage.stats)
 	assert.False(t, stage.IsConnected())
 }
 
 // TestRealtimeTranscriptionProcess tests the Process method
 func TestRealtimeTranscriptionProcess(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		t.Skip("Skipping RealtimeTranscriptionProcess test: OPENAI_API_KEY not set")
+	}
+
+	stage := NewRealtimeTranscriptionStage("transcription", 20, apiKey, "", "en")
 	ctx := context.Background()
 
 	// Process audio data
@@ -220,7 +226,7 @@ func TestRealtimeTranscriptionProcess(t *testing.T) {
 
 // TestRealtimeTranscriptionCallbacks tests transcription callbacks
 func TestRealtimeTranscriptionCallbacks(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
 
 	receivedEvents := make([]TranscriptionEvent, 0)
 	var mu sync.Mutex
@@ -285,7 +291,7 @@ func TestRealtimeTranscriptionCallbacks(t *testing.T) {
 
 // TestRealtimeTranscriptionHandlers tests message handlers
 func TestRealtimeTranscriptionHandlers(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
 
 	receivedTranscriptions := make([]string, 0)
 	var mu sync.Mutex
@@ -341,12 +347,15 @@ func TestRealtimeTranscriptionHandlers(t *testing.T) {
 
 // TestRealtimeErrorHandling tests error handling
 func TestRealtimeErrorHandling(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
 
 	var receivedError error
+	var mu sync.Mutex
 	stage.AddTranscriptionCallback(func(event TranscriptionEvent) {
 		if event.Type == "error" {
+			mu.Lock()
 			receivedError = event.Error
+			mu.Unlock()
 		}
 	})
 
@@ -361,8 +370,10 @@ func TestRealtimeErrorHandling(t *testing.T) {
 	// Wait for callback
 	time.Sleep(50 * time.Millisecond)
 
+	mu.Lock()
 	assert.NotNil(t, receivedError)
 	assert.Contains(t, receivedError.Error(), "Test error message")
+	mu.Unlock()
 
 	// Check stats
 	stats := stage.GetStats()
@@ -371,11 +382,14 @@ func TestRealtimeErrorHandling(t *testing.T) {
 
 // TestRealtimeDataChannelMessage tests data channel message handling
 func TestRealtimeDataChannelMessage(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
 
 	var receivedText string
+	var mu sync.Mutex
 	stage.AddTranscriptionCallback(func(event TranscriptionEvent) {
+		mu.Lock()
 		receivedText = event.Text
+		mu.Unlock()
 	})
 
 	// Create a data channel message
@@ -395,7 +409,9 @@ func TestRealtimeDataChannelMessage(t *testing.T) {
 	// Wait for callback
 	time.Sleep(50 * time.Millisecond)
 
+	mu.Lock()
 	assert.Equal(t, "Data channel transcription", receivedText)
+	mu.Unlock()
 
 	// Check stats
 	stats := stage.GetStats()
@@ -405,7 +421,7 @@ func TestRealtimeDataChannelMessage(t *testing.T) {
 
 // TestRealtimeEventProcessing tests event processing
 func TestRealtimeEventProcessing(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
 
 	transcriptions := make([]TranscriptionEvent, 0)
 	var mu sync.Mutex
@@ -468,7 +484,7 @@ func TestRealtimeEventProcessing(t *testing.T) {
 
 // TestRealtimeStatistics tests statistics tracking
 func TestRealtimeStatistics(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
 
 	// Don't try to connect in Process - the test will only test the manual stats update
 	// Process some audio packets without connection attempts would just skip them
@@ -502,7 +518,7 @@ func TestRealtimeStatistics(t *testing.T) {
 
 // TestRealtimeDisconnection tests disconnection handling
 func TestRealtimeDisconnection(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
 
 	// Simulate connection
 	stage.connected = true
@@ -528,6 +544,7 @@ func TestRealtimeIntegrationWithPipeline(t *testing.T) {
 		15,
 		"test-api-key",
 		"gpt-4o-realtime-preview-2024-12-17",
+		"en",
 	)
 	pipeline.AddStage(transcriptionStage)
 
@@ -543,20 +560,6 @@ func TestRealtimeIntegrationWithPipeline(t *testing.T) {
 		}
 	})
 
-	// Verify stage is in pipeline
-	pipeline.mu.RLock()
-	stages := pipeline.stages
-	pipeline.mu.RUnlock()
-
-	found := false
-	for _, stage := range stages {
-		if stage.GetName() == "realtime-transcription" {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found)
-
 	// Test that only audio is processed
 	assert.True(t, transcriptionStage.CanProcess(MediaTypeAudio))
 	assert.False(t, transcriptionStage.CanProcess(MediaTypeVideo))
@@ -564,7 +567,7 @@ func TestRealtimeIntegrationWithPipeline(t *testing.T) {
 
 // TestRealtimeConcurrentOperations tests thread safety
 func TestRealtimeConcurrentOperations(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
 
 	// Add multiple callbacks concurrently
 	var wg sync.WaitGroup

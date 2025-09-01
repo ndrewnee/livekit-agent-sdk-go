@@ -141,6 +141,7 @@ func TestConcurrentBufferOperations(t *testing.T) {
 
 	// Consumers
 	consumedCount := make([]int, numConsumers)
+	var consumedMutex sync.RWMutex
 	for i := 0; i < numConsumers; i++ {
 		wg.Add(1)
 		go func(id int) {
@@ -148,15 +149,19 @@ func TestConcurrentBufferOperations(t *testing.T) {
 			for {
 				data := buffer.Dequeue()
 				if data != nil {
+					consumedMutex.Lock()
 					consumedCount[id]++
+					consumedMutex.Unlock()
 				}
 				time.Sleep(time.Microsecond * 2)
 
 				// Check if we've consumed enough
+				consumedMutex.RLock()
 				totalConsumed := 0
 				for _, count := range consumedCount {
 					totalConsumed += count
 				}
+				consumedMutex.RUnlock()
 				if totalConsumed >= numProducers*itemsPerProducer/2 {
 					break
 				}

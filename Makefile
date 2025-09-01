@@ -1,4 +1,4 @@
-.PHONY: all test test-unit test-integration test-coverage lint fmt clean build example
+.PHONY: all test test-unit test-integration test-e2e test-coverage lint fmt clean build example
 
 # Default target
 all: test build
@@ -13,6 +13,25 @@ test-unit:
 # Run integration tests (requires LiveKit server)
 test-integration:
 	go test -v -tags=integration ./pkg/agent/...
+
+# Run load tests
+test-load:
+	@echo "Running load tests..."
+	go test -tags=load -v ./pkg/agent/... -timeout=30s
+
+# Run benchmark tests
+test-bench:
+	@echo "Running benchmark tests..."
+	go test -tags=load -bench=. -benchmem ./pkg/agent/...
+
+# Run e2e tests (requires OPENAI_API_KEY)
+test-e2e:
+	@echo "Running e2e tests..."
+	@if [ -z "$$OPENAI_API_KEY" ]; then \
+		echo "Error: OPENAI_API_KEY environment variable is required for e2e tests"; \
+		exit 1; \
+	fi
+	go test -tags=e2e -v ./pkg/agent/...
 
 # Run tests with coverage
 test-coverage:
