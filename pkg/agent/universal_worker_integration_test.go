@@ -190,7 +190,6 @@ func TestUniversalWorker_Integration_RoomJob(t *testing.T) {
 }
 
 func TestUniversalWorker_Integration_ParticipantJob(t *testing.T) {
-	t.Skip("Skipping participant job test - requires proper participant tracking setup")
 	url, apiKey, apiSecret := getTestConfig()
 
 	participantJoined := make(chan *lksdk.RemoteParticipant, 1)
@@ -198,12 +197,12 @@ func TestUniversalWorker_Integration_ParticipantJob(t *testing.T) {
 	handler := &SimpleUniversalHandler{
 		JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *JobMetadata) {
 			return true, &JobMetadata{
-				ParticipantIdentity: "test-agent-participant",
+				ParticipantIdentity: "test-participant",
 			}
 		},
 		JobAssignedFunc: func(ctx context.Context, jobCtx *JobContext) error {
-			// For participant jobs, TargetParticipant might be nil initially
-			// It will be set when the participant actually joins
+			// Job context should have target participant info
+			assert.NotNil(t, jobCtx.TargetParticipant)
 			return nil
 		},
 		ParticipantJoinedFunc: func(ctx context.Context, participant *lksdk.RemoteParticipant) {
@@ -230,7 +229,7 @@ func TestUniversalWorker_Integration_ParticipantJob(t *testing.T) {
 
 	// Create room and connect participant
 	roomName := fmt.Sprintf("test-participant-room-%d", time.Now().Unix())
-	_, err := createTestRoomWithAgent(apiKey, apiSecret, url, roomName, "test-participant-worker")
+	_, err := createTestRoom(apiKey, apiSecret, url, roomName)
 	require.NoError(t, err)
 
 	// Generate token for test participant
@@ -256,7 +255,6 @@ func TestUniversalWorker_Integration_ParticipantJob(t *testing.T) {
 // ==================== Participant Management Tests ====================
 
 func TestUniversalWorker_Integration_ParticipantTracking(t *testing.T) {
-	t.Skip("Skipping participant tracking test - inconsistent participant count")
 	url, apiKey, apiSecret := getTestConfig()
 
 	var mu sync.Mutex
@@ -342,7 +340,6 @@ func TestUniversalWorker_Integration_ParticipantTracking(t *testing.T) {
 }
 
 func TestUniversalWorker_Integration_MetadataUpdates(t *testing.T) {
-	t.Skip("Skipping metadata updates test - timing issues with metadata propagation")
 	url, apiKey, apiSecret := getTestConfig()
 
 	metadataUpdates := make(chan string, 10)
@@ -835,7 +832,6 @@ func createTestRoomWithAgent(apiKey, apiSecret, url, roomName, agentName string)
 		Metadata: "Test room with agent",
 		Agents:   agents,
 	})
-
 	if err != nil {
 		return "", err
 	}
