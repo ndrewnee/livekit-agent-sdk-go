@@ -37,7 +37,7 @@ func (suite *BroadcastStageTestSuite) TestNewBroadcastStage() {
 func (suite *BroadcastStageTestSuite) TestAddBroadcastCallback() {
 	// Test adding callbacks
 	called := false
-	callback := func(ctx context.Context, event TranscriptionEvent, participantMetadata, trackID string) error {
+	callback := func(ctx context.Context, data MediaData) error {
 		called = true
 		return nil
 	}
@@ -156,7 +156,7 @@ func (suite *BroadcastStageTestSuite) TestProcessWithPartialTranscription() {
 
 func (suite *BroadcastStageTestSuite) TestCallbackError() {
 	// Test callback that returns an error
-	callback := func(ctx context.Context, event TranscriptionEvent, participantMetadata, trackID string) error {
+	callback := func(ctx context.Context, data MediaData) error {
 		return fmt.Errorf("callback error")
 	}
 
@@ -249,7 +249,7 @@ func (suite *BroadcastStageTestSuite) TestProcessWithEmptyTranscriptionText() {
 
 func (suite *BroadcastStageTestSuite) TestProcessWithCompleteTranscriptionEvent() {
 	// Add a callback so broadcasts actually happen
-	suite.stage.AddBroadcastCallback(func(ctx context.Context, event TranscriptionEvent, participantMetadata, trackID string) error {
+	suite.stage.AddBroadcastCallback(func(ctx context.Context, data MediaData) error {
 		return nil
 	})
 

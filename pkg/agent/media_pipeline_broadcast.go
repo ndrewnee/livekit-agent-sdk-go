@@ -9,8 +9,8 @@ import (
 )
 
 // BroadcastCallback defines the function signature for handling broadcasts.
-// It receives the TranscriptionEvent, ParticipantMetadata, and trackID for broadcasting logic.
-type BroadcastCallback func(ctx context.Context, event TranscriptionEvent, participantMetadata, trackID string) error
+// It receives the complete MediaData which contains all metadata including transcriptions, translations, TTS audio, etc.
+type BroadcastCallback func(ctx context.Context, data MediaData) error
 
 // BroadcastStage broadcasts transcription data using a configurable callback.
 //
@@ -40,6 +40,15 @@ type BroadcastStage struct {
 
 	// Statistics
 	stats *BroadcastStats
+}
+
+// ParticipantMetadata contains metadata about the participant.
+// Used in TranscriptionEvent for database operations.
+type ParticipantMetadata struct {
+	ClassID          string `json:"class_id"`          // Class ID (room name)
+	ClassroomID      string `json:"classroom_id"`      // Classroom ID
+	UserID           string `json:"user_id"`           // User ID (participant identity)
+	AllowTranslation bool   `json:"allow_translation"` // Whether translation is allowed for this participant
 }
 
 // BroadcastStats tracks broadcasting metrics.
@@ -87,29 +96,28 @@ func (bs *BroadcastStage) CanProcess(mediaType MediaType) bool {
 
 // Process implements MediaPipelineStage.
 //
-// Extracts transcription or translation data from MediaData metadata and calls registered callbacks.
-// The data should be added by a previous stage (like RealtimeTranscriptionStage or TranslationStage).
+// Checks for data that needs broadcasting (transcriptions, translations, TTS audio) and calls registered callbacks.
+// The data should be added by a previous stage (like RealtimeTranscriptionStage, TranslationStage, or TextToSpeechStage).
 func (bs *BroadcastStage) Process(ctx context.Context, input MediaData) (MediaData, error) {
 	// Check if we have data in metadata
 	if input.Metadata == nil {
 		return input, nil
 	}
 
-	var events []TranscriptionEvent
-	var textSizes []int
-	var isFinals []bool
+	// Check if there's anything to broadcast
+	hasTranscription := false
+	hasTTS := false
 
-	// Check for transcription event
 	if transcriptionEvent, ok := input.Metadata["transcription_event"].(TranscriptionEvent); ok && transcriptionEvent.Text != "" {
-		// Always broadcast the transcription event (for transcription and translation)
-		events = append(events, transcriptionEvent)
-		textSizes = append(textSizes, len(transcriptionEvent.Text))
-		isFinals = append(isFinals, transcriptionEvent.IsFinal)
-
+		hasTranscription = true
 	}
 
-	// No broadcasts to send
-	if len(events) == 0 {
+	if ttsAudioMap, ok := input.Metadata["tts_audio_map"].(map[string][]byte); ok && len(ttsAudioMap) > 0 {
+		hasTTS = true
+	}
+
+	// Nothing to broadcast
+	if !hasTranscription && !hasTTS {
 		return input, nil
 	}
 
@@ -119,31 +127,40 @@ func (bs *BroadcastStage) Process(ctx context.Context, input MediaData) (MediaDa
 	copy(callbacks, bs.broadcastCallbacks)
 	bs.mu.RUnlock()
 
-	// Extract participant metadata from input metadata (injected by transcription stage)
-	var participantMetadata string
-	if participantMeta, exists := input.Metadata["participant_metadata"]; exists {
-		if meta, ok := participantMeta.(string); ok {
-			participantMetadata = meta
-		}
-	}
+	// Call each registered callback with the complete MediaData
+	for _, callback := range callbacks {
+		startTime := time.Now()
+		err := callback(ctx, input)
+		broadcastDuration := time.Since(startTime)
 
-	// Call each registered callback for each broadcast
-	for i, event := range events {
-		for _, callback := range callbacks {
-			startTime := time.Now()
-			err := callback(ctx, event, participantMetadata, input.TrackID)
-			broadcastDuration := time.Since(startTime)
+		// Update statistics
+		dataSize := 0
+		isFinal := true
 
-			// Update statistics
-			bs.updateStats(isFinals[i], err != nil, broadcastDuration, textSizes[i])
-
-			if err != nil {
-				getLogger := logger.GetLogger()
-				getLogger.Errorw("broadcast callback failed", err,
-					"trackID", input.TrackID,
-					"final", isFinals[i])
-				// Continue with other callbacks even if one fails
+		// Calculate data size for statistics
+		if hasTranscription {
+			if event, ok := input.Metadata["transcription_event"].(TranscriptionEvent); ok {
+				dataSize += len(event.Text)
+				isFinal = event.IsFinal
 			}
+		}
+		if hasTTS {
+			if ttsAudioMap, ok := input.Metadata["tts_audio_map"].(map[string][]byte); ok {
+				for _, audio := range ttsAudioMap {
+					dataSize += len(audio)
+				}
+			}
+		}
+
+		bs.updateStats(isFinal, err != nil, broadcastDuration, dataSize)
+
+		if err != nil {
+			getLogger := logger.GetLogger()
+			getLogger.Errorw("broadcast callback failed", err,
+				"trackID", input.TrackID,
+				"hasTranscription", hasTranscription,
+				"hasTTS", hasTTS)
+			// Continue with other callbacks even if one fails
 		}
 	}
 
@@ -160,7 +177,8 @@ func (bs *BroadcastStage) Process(ctx context.Context, input MediaData) (MediaDa
 
 // AddBroadcastCallback adds a callback for broadcast events.
 //
-// The callback will be called for each transcription that needs to be broadcast.
+// The callback will be called with the complete MediaData containing all metadata
+// (transcriptions, translations, TTS audio, etc.) that needs to be broadcast.
 // Multiple callbacks can be registered and will be called in the order they were added.
 func (bs *BroadcastStage) AddBroadcastCallback(callback BroadcastCallback) {
 	bs.mu.Lock()
