@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/rtp"
+	"github.com/pion/webrtc/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -520,9 +521,15 @@ func TestRealtimeStatistics(t *testing.T) {
 func TestRealtimeDisconnection(t *testing.T) {
 	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
 
-	// Simulate connection
+	// Simulate connection with a mock peer connection
 	stage.connected = true
+	stage.connecting = false
 	stage.stats.CurrentlyConnected = true
+
+	// Create a mock peer connection to simulate an active connection
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	require.NoError(t, err)
+	stage.peerConnection = pc
 
 	// Handle disconnection
 	stage.handleDisconnection()

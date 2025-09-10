@@ -875,23 +875,27 @@ func (rts *RealtimeTranscriptionStage) handleError(msg map[string]interface{}) {
 // handleDisconnection handles cleanup when disconnected.
 func (rts *RealtimeTranscriptionStage) handleDisconnection() {
 	rts.mu.Lock()
-	rts.connected = false
-	rts.mu.Unlock()
+	defer rts.mu.Unlock()
 
+	// Check if already disconnected
+	if rts.peerConnection == nil {
+		return
+	}
+
+	rts.connected = false
+	rts.connecting = false
+
+	// Update stats with separate lock
 	rts.stats.mu.Lock()
 	rts.stats.CurrentlyConnected = false
 	rts.stats.mu.Unlock()
 
-	// Clean up WebSocket
 	// Clean up WebRTC connection
-	if rts.peerConnection != nil {
-		if err := rts.peerConnection.Close(); err != nil {
-			getLogger := logger.GetLogger()
-			getLogger.Debugw("failed to close peer connection", "error", err)
-		}
-		rts.peerConnection = nil
+	if err := rts.peerConnection.Close(); err != nil {
+		getLogger := logger.GetLogger()
+		getLogger.Debugw("failed to close peer connection", "error", err)
 	}
-
+	rts.peerConnection = nil
 	rts.audioTrack = nil
 	rts.dataChannel = nil
 }
