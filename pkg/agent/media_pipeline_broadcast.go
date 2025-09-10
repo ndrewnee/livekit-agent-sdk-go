@@ -42,15 +42,6 @@ type BroadcastStage struct {
 	stats *BroadcastStats
 }
 
-// ParticipantMetadata contains metadata about the participant.
-// Used in TranscriptionEvent for database operations.
-type ParticipantMetadata struct {
-	ClassID          string `json:"class_id"`          // Class ID (room name)
-	ClassroomID      string `json:"classroom_id"`      // Classroom ID
-	UserID           string `json:"user_id"`           // User ID (participant identity)
-	AllowTranslation bool   `json:"allow_translation"` // Whether translation is allowed for this participant
-}
-
 // BroadcastStats tracks broadcasting metrics.
 type BroadcastStats struct {
 	mu sync.RWMutex
