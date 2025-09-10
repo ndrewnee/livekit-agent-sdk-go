@@ -112,22 +112,11 @@ type TranslationStage struct {
 }
 
 // TranslationCallback is called when translation events occur.
-type TranslationCallback func(event TranslationEvent)
+type TranslationCallback func(event TranscriptionEvent)
 
 // BeforeTranslationCallback is called before translation processing starts.
 // It can modify the MediaData, particularly metadata, to inject target languages or other data.
 type BeforeTranslationCallback func(data *MediaData)
-
-// TranslationEvent represents a translation event.
-type TranslationEvent struct {
-	Type         string            // "translation", "error"
-	Translations map[string]string // targetLang -> translatedText
-	SourceText   string            // Original transcription
-	SourceLang   string            // Speaking language
-	Timestamp    time.Time
-	IsFinal      bool // Matches transcription finality
-	Error        error
-}
 
 // Translation cache entry
 type translationCacheEntry struct {
@@ -366,14 +355,7 @@ func (ts *TranslationStage) Process(ctx context.Context, input MediaData) (outpu
 	input.Metadata["transcription_event"] = transcriptionEvent
 
 	// Notify callbacks with unified transcription event (now includes translations)
-	ts.notifyTranslation(TranslationEvent{
-		Type:         "translation",
-		Translations: translations,
-		SourceText:   transcriptionEvent.Text,
-		SourceLang:   sourceLang,
-		Timestamp:    time.Now(),
-		IsFinal:      transcriptionEvent.IsFinal,
-	})
+	ts.notifyTranslation(transcriptionEvent)
 
 	return input, nil
 }
@@ -469,7 +451,7 @@ JSON RESPONSE:`, sourceLang, targetLangList, text)
 }
 
 // notifyTranslation notifies all registered callbacks of a translation event.
-func (ts *TranslationStage) notifyTranslation(event TranslationEvent) {
+func (ts *TranslationStage) notifyTranslation(event TranscriptionEvent) {
 	ts.mu.RLock()
 	callbacks := make([]TranslationCallback, len(ts.translationCallbacks))
 	copy(callbacks, ts.translationCallbacks)

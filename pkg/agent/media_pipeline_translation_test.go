@@ -191,7 +191,7 @@ func (suite *TranslationStageTestSuite) TestStatisticsTracking() {
 func (suite *TranslationStageTestSuite) TestTranslationCallbacks() {
 	callbackInvoked := false
 
-	suite.stage.AddTranslationCallback(func(event TranslationEvent) {
+	suite.stage.AddTranslationCallback(func(event TranscriptionEvent) {
 		callbackInvoked = true
 	})
 

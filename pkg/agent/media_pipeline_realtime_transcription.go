@@ -103,15 +103,15 @@ type BeforeTranscriptionCallback func(data *MediaData)
 // TranscriptionEvent represents a transcription event from the Realtime API.
 // This unified event structure is used by both transcription and translation stages.
 type TranscriptionEvent struct {
-	Type      string    // "partial", "final", "error"
-	Text      string    // Transcribed text
-	Timestamp time.Time // When the transcription was received
-	Language  string    // Detected language (if available)
-	IsFinal   bool      // Whether this is a final transcription
-	Error     error     // Error if Type is "error"
+	Type      string    `json:"type,omitempty"`      // "partial", "final", "error"
+	Text      string    `json:"text,omitempty"`      // Transcribed text
+	Timestamp time.Time `json:"timestamp,omitempty"` // When the transcription was received
+	Language  string    `json:"language,omitempty"`  // Detected language (if available)
+	IsFinal   bool      `json:"isFinal"`             // Whether this is a final transcription
+	Error     error     `json:"error,omitempty"`     // Error if Type is "error"
 
 	// Translation data (populated by TranslationStage if enabled)
-	Translations map[string]string // targetLang -> translatedText
+	Translations map[string]string `json:"translations,omitempty"` // targetLang -> translatedText
 }
 
 // RealtimeEvent represents an event from OpenAI Realtime API.
