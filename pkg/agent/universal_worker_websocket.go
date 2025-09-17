@@ -21,7 +21,7 @@ func (w *UniversalWorker) connect(ctx context.Context) error {
 	grant := &auth.VideoGrant{
 		Agent: true,
 	}
-	at.AddGrant(grant)
+	at.SetVideoGrant(grant)
 	token, err := at.ToJWT()
 	if err != nil {
 		return fmt.Errorf("failed to generate token: %w", err)
@@ -440,6 +440,12 @@ func (w *UniversalWorker) reconnect(ctx context.Context) error {
 	if err := w.connect(ctx); err != nil {
 		return err
 	}
+
+	// Restart message handler goroutine (critical for receiving jobs)
+	go w.handleMessages(ctx)
+
+	// Send initial load update to announce availability
+	w.updateLoad()
 
 	// Recover jobs if enabled
 	// TODO: Recovery manager needs to be updated for UniversalWorker
