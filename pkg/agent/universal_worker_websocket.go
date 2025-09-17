@@ -16,20 +16,16 @@ import (
 
 // connect establishes a WebSocket connection to the LiveKit server
 func (w *UniversalWorker) connect(ctx context.Context) error {
-	// Generate authentication token with expiry
-	token, expiresAt, err := w.generateAuthToken()
+	// Generate authentication token
+	at := auth.NewAccessToken(w.apiKey, w.apiSecret)
+	grant := &auth.VideoGrant{
+		Agent: true,
+	}
+	at.AddGrant(grant)
+	token, err := at.ToJWT()
 	if err != nil {
 		return fmt.Errorf("failed to generate token: %w", err)
 	}
-
-	// Store token information
-	w.mu.Lock()
-	w.tokenManagement.currentToken = token
-	w.tokenManagement.expiresAt = expiresAt
-	w.mu.Unlock()
-
-	// Start token renewal timer
-	w.startTokenRenewalTimer()
 
 	// Connect to WebSocket
 	wsURL := buildWebSocketURL(w.serverURL)
@@ -268,36 +264,13 @@ func (w *UniversalWorker) handleServerMessage(msg *livekit.ServerMessage) error 
 
 // handleAvailabilityRequest handles an availability check from the server
 func (w *UniversalWorker) handleAvailabilityRequest(req *livekit.AvailabilityRequest) error {
-	// Log detailed availability request information
-	w.logger.Info("[DEBUG] Received availability request",
-		"jobId", req.Job.Id,
-		"jobType", req.Job.Type.String(),
-		"room", req.Job.Room.Name,
-		"currentLoad", w.GetCurrentLoad(),
-		"activeJobs", len(w.activeJobs),
-		"workerStatus", w.status,
-	)
-
-	// Check if we can accept the job based on current state
-	w.mu.RLock()
-	canAcceptBasedOnLoad := w.status == WorkerStatusAvailable
-	activeJobCount := len(w.activeJobs)
-	maxJobs := w.opts.MaxJobs
-	w.mu.RUnlock()
+	// Log the availability request
+	if w.logger != nil {
+		w.logger.Info("[DEBUG] Received availability request", "jobId", req.Job.Id)
+	}
 
 	// Ask handler if it wants to accept the job
 	accept, metadata := w.handler.OnJobRequest(context.Background(), req.Job)
-
-	// Override handler decision if we're at capacity
-	if accept && !canAcceptBasedOnLoad {
-		w.logger.Info("[DEBUG] Handler accepted job but worker is not available",
-			"jobId", req.Job.Id,
-			"workerStatus", w.status,
-			"activeJobs", activeJobCount,
-			"maxJobs", maxJobs,
-		)
-		accept = false
-	}
 
 	// Build response
 	resp := &livekit.AvailabilityResponse{
@@ -313,21 +286,6 @@ func (w *UniversalWorker) handleAvailabilityRequest(req *livekit.AvailabilityReq
 		resp.ParticipantMetadata = metadata.ParticipantMetadata
 	}
 
-	// Log response details
-	w.logger.Info("[DEBUG] Sending availability response",
-		"jobId", req.Job.Id,
-		"available", accept,
-		"reason", func() string {
-			if !accept {
-				if !canAcceptBasedOnLoad {
-					return "worker not available"
-				}
-				return "handler rejected"
-			}
-			return "accepted"
-		}(),
-	)
-
 	return w.sendMessage(&livekit.WorkerMessage{
 		Message: &livekit.WorkerMessage_Availability{
 			Availability: resp,
@@ -337,8 +295,21 @@ func (w *UniversalWorker) handleAvailabilityRequest(req *livekit.AvailabilityReq
 
 // handleJobTermination handles a job termination request
 func (w *UniversalWorker) handleJobTermination(term *livekit.JobTermination) error {
-	// Use robust cleanup method
-	w.cleanupJob(term.JobId)
+	w.mu.Lock()
+	jobCtx, exists := w.activeJobs[term.JobId]
+	if exists {
+		delete(w.activeJobs, term.JobId)
+		delete(w.jobStartTimes, term.JobId)
+		if jobCtx.Room != nil {
+			delete(w.rooms, jobCtx.Room.Name())
+			delete(w.participantTrackers, jobCtx.Room.Name())
+		}
+	}
+	w.mu.Unlock()
+
+	if exists && jobCtx.Cancel != nil {
+		jobCtx.Cancel()
+	}
 
 	// Notify handler
 	w.handler.OnJobTerminated(context.Background(), term.JobId)
@@ -378,12 +349,6 @@ func (w *UniversalWorker) maintainConnection(ctx context.Context) {
 	pingTicker := time.NewTicker(w.opts.PingInterval)
 	defer pingTicker.Stop()
 
-	var statusRefreshTicker *time.Ticker
-	if w.opts.StatusRefreshInterval > 0 {
-		statusRefreshTicker = time.NewTicker(w.opts.StatusRefreshInterval)
-		defer statusRefreshTicker.Stop()
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -406,22 +371,6 @@ func (w *UniversalWorker) maintainConnection(ctx context.Context) {
 				case w.reconnectChan <- struct{}{}:
 				default:
 				}
-			}
-		}
-
-		// Handle status refresh ticker separately to avoid blocking
-		if statusRefreshTicker != nil {
-			select {
-			case <-statusRefreshTicker.C:
-				// Check overall connection health before refreshing status
-				if !w.isConnectionHealthy() {
-					w.logger.Error("Connection unhealthy, triggering reconnection")
-					w.handleConnectionError(fmt.Errorf("connection health check failed"))
-					return
-				}
-				// Refresh worker status to prevent server timeout
-				w.refreshWorkerStatus()
-			default:
 			}
 		}
 	}
@@ -563,139 +512,4 @@ func (w *UniversalWorker) processStatusQueue() {
 			w.queueStatusUpdate(update)
 		}
 	}
-}
-
-// refreshWorkerStatus periodically refreshes the worker status to prevent server timeout
-func (w *UniversalWorker) refreshWorkerStatus() {
-	if w.wsState != WebSocketStateConnected {
-		return
-	}
-
-	// Verify worker state consistency
-	w.verifyWorkerState()
-
-	// Force updateLoad to recalculate and send status
-	w.updateLoad()
-
-	w.logger.Info("[DEBUG] Refreshed worker status",
-		"workerID", w.workerID,
-		"status", w.status,
-	)
-}
-
-// generateAuthToken creates a new JWT token with expiry
-func (w *UniversalWorker) generateAuthToken() (string, time.Time, error) {
-	at := auth.NewAccessToken(w.apiKey, w.apiSecret)
-	grant := &auth.VideoGrant{
-		Agent: true,
-	}
-	at.SetVideoGrant(grant)
-
-	// Set token to expire in 24 hours
-	expiresAt := time.Now().Add(24 * time.Hour)
-	at.SetValidFor(24 * time.Hour)
-
-	token, err := at.ToJWT()
-	if err != nil {
-		return "", time.Time{}, err
-	}
-
-	return token, expiresAt, nil
-}
-
-// startTokenRenewalTimer starts a timer to renew the token before it expires
-func (w *UniversalWorker) startTokenRenewalTimer() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	// Stop existing timer if any
-	if w.tokenManagement.renewalTimer != nil {
-		w.tokenManagement.renewalTimer.Stop()
-	}
-
-	// Calculate renewal time (renew 1 hour before expiry, minimum 30 minutes)
-	renewalDuration := time.Until(w.tokenManagement.expiresAt) - time.Hour
-	if renewalDuration < 30*time.Minute {
-		renewalDuration = 30 * time.Minute
-	}
-
-	w.tokenManagement.renewalTimer = time.AfterFunc(renewalDuration, func() {
-		if err := w.renewToken(); err != nil {
-			w.logger.Error("Failed to renew authentication token", "error", err)
-			// Trigger reconnection to get a fresh token
-			select {
-			case w.reconnectChan <- struct{}{}:
-			default:
-			}
-		}
-	})
-
-	w.logger.Info("[DEBUG] Token renewal timer started",
-		"expiresAt", w.tokenManagement.expiresAt,
-		"renewIn", renewalDuration,
-	)
-}
-
-// renewToken renews the authentication token
-func (w *UniversalWorker) renewToken() error {
-	w.logger.Info("[DEBUG] Renewing authentication token")
-
-	// Generate new token
-	token, expiresAt, err := w.generateAuthToken()
-	if err != nil {
-		return fmt.Errorf("failed to generate new token: %w", err)
-	}
-
-	// Store new token information
-	w.mu.Lock()
-	w.tokenManagement.currentToken = token
-	w.tokenManagement.expiresAt = expiresAt
-	w.mu.Unlock()
-
-	// Start new renewal timer
-	w.startTokenRenewalTimer()
-
-	w.logger.Info("[DEBUG] Authentication token renewed successfully", "expiresAt", expiresAt)
-
-	// Note: For a complete implementation, we would need to re-establish the WebSocket connection
-	// with the new token. For now, we rely on the reconnection mechanism.
-	return nil
-}
-
-// isConnectionHealthy checks if the connection is healthy based on various metrics
-func (w *UniversalWorker) isConnectionHealthy() bool {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-
-	// Check WebSocket state
-	if w.wsState != WebSocketStateConnected {
-		w.logger.Info("[DEBUG] Connection unhealthy: not connected", "wsState", w.wsState)
-		return false
-	}
-
-	// Check if we're missing too many pings
-	if w.healthCheck.missedPings > 5 {
-		w.logger.Info("[DEBUG] Connection unhealthy: too many missed pings", "missedPings", w.healthCheck.missedPings)
-		return false
-	}
-
-	// Check if last pong is too old
-	if !w.healthCheck.lastPong.IsZero() && time.Since(w.healthCheck.lastPong) > 2*w.opts.PingInterval {
-		w.logger.Info("[DEBUG] Connection unhealthy: stale pong",
-			"lastPong", w.healthCheck.lastPong,
-			"timeSince", time.Since(w.healthCheck.lastPong),
-		)
-		return false
-	}
-
-	// Check token expiry
-	if !w.tokenManagement.expiresAt.IsZero() && time.Until(w.tokenManagement.expiresAt) < 5*time.Minute {
-		w.logger.Info("[DEBUG] Connection unhealthy: token near expiry",
-			"expiresAt", w.tokenManagement.expiresAt,
-			"timeLeft", time.Until(w.tokenManagement.expiresAt),
-		)
-		return false
-	}
-
-	return w.healthCheck.isHealthy
 }

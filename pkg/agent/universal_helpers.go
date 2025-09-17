@@ -267,64 +267,6 @@ func (w *UniversalWorker) queueStatusUpdate(update statusUpdate) {
 	}
 }
 
-// cleanupJob robustly cleans up job resources with verification
-func (w *UniversalWorker) cleanupJob(jobID string) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	// Get job context before cleanup
-	jobCtx, exists := w.activeJobs[jobID]
-	if !exists {
-		// Job already cleaned up
-		return
-	}
-
-	// Cancel job context first
-	if jobCtx.Cancel != nil {
-		jobCtx.Cancel()
-	}
-
-	// Disconnect from room
-	if jobCtx.Room != nil {
-		jobCtx.Room.Disconnect()
-		delete(w.rooms, jobCtx.Room.Name())
-		delete(w.participantTrackers, jobCtx.Room.Name())
-	}
-
-	// Remove from active jobs and timers
-	delete(w.activeJobs, jobID)
-	delete(w.jobStartTimes, jobID)
-
-	w.logger.Info("[DEBUG] Job cleanup completed", "jobID", jobID)
-}
-
-// verifyWorkerState verifies the worker state is consistent
-func (w *UniversalWorker) verifyWorkerState() {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-
-	// Check for orphaned jobs
-	for jobID := range w.activeJobs {
-		if _, hasStartTime := w.jobStartTimes[jobID]; !hasStartTime {
-			w.logger.Error("Orphaned job found without start time", "jobID", jobID)
-		}
-	}
-
-	for jobID := range w.jobStartTimes {
-		if _, hasJob := w.activeJobs[jobID]; !hasJob {
-			w.logger.Error("Orphaned start time found without job", "jobID", jobID)
-		}
-	}
-
-	// Log current state
-	w.logger.Info("[DEBUG] Worker state verification",
-		"activeJobs", len(w.activeJobs),
-		"jobStartTimes", len(w.jobStartTimes),
-		"rooms", len(w.rooms),
-		"trackers", len(w.participantTrackers),
-	)
-}
-
 // WebSocketState represents the current state of the WebSocket connection
 type WebSocketState int
 

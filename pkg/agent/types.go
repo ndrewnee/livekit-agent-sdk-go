@@ -173,12 +173,6 @@ type WorkerOptions struct {
 	// Multiple status updates within this interval are combined into a single message.
 	// Set to 0 to disable batching (send updates immediately).
 	StatusUpdateBatchInterval time.Duration
-
-	// StatusRefreshInterval sets how often to refresh worker status with the server.
-	// This helps prevent the server from "forgetting" about the worker after extended periods.
-	// Set to 0 to disable periodic refresh (not recommended for production).
-	// Default: 5 minutes
-	StatusRefreshInterval time.Duration
 	// JobRecoveryHandler for custom job recovery logic.
 	// Called when reconnecting to determine which jobs should be resumed.
 	// If nil, all jobs are recovered by default when EnableJobRecovery is true.

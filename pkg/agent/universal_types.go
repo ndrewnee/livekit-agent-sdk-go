@@ -20,9 +20,6 @@ const (
 
 	// defaultPingTimeout is the default ping timeout
 	defaultPingTimeout = 10 * time.Second
-
-	// defaultStatusRefreshInterval is the default status refresh interval
-	defaultStatusRefreshInterval = 5 * time.Minute
 )
 
 // WorkerMessage represents a message sent from worker to server

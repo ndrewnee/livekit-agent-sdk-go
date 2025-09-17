@@ -101,13 +101,6 @@ type UniversalWorker struct {
 		isHealthy   bool
 	}
 
-	// Token management
-	tokenManagement struct {
-		currentToken string
-		expiresAt    time.Time
-		renewalTimer *time.Timer
-	}
-
 	// Publisher agent functionality
 	subscribedTracks    map[string]*PublisherTrackSubscription
 	qualityController   *QualityController
@@ -156,9 +149,6 @@ func NewUniversalWorker(serverURL, apiKey, apiSecret string, handler UniversalHa
 	}
 	if opts.PingTimeout == 0 {
 		opts.PingTimeout = defaultPingTimeout
-	}
-	if opts.StatusRefreshInterval == 0 {
-		opts.StatusRefreshInterval = defaultStatusRefreshInterval
 	}
 	if opts.Logger == nil {
 		// Use default logger wrapper
@@ -378,14 +368,6 @@ func (w *UniversalWorker) Stop() error {
 			w.metricsCollector.Stop()
 		}
 
-		// Stop token renewal timer
-		w.mu.Lock()
-		if w.tokenManagement.renewalTimer != nil {
-			w.tokenManagement.renewalTimer.Stop()
-			w.tokenManagement.renewalTimer = nil
-		}
-		w.mu.Unlock()
-
 		close(w.doneCh)
 	})
 
@@ -415,10 +397,7 @@ func (w *UniversalWorker) UpdateStatus(status WorkerStatus, load float32) error 
 	w.logger.Info("[DEBUG] Sending worker status update",
 		"status", status,
 		"load", load,
-		"jobCount", jobCount,
-		"workerID", w.workerID,
-		"timestamp", time.Now().Format(time.RFC3339),
-	)
+		"jobCount", jobCount)
 
 	return w.sendMessage(&livekit.WorkerMessage{
 		Message: &livekit.WorkerMessage_UpdateWorker{
@@ -1193,8 +1172,16 @@ func (w *UniversalWorker) runJobHandler(ctx context.Context, jobCtx *JobContext)
 			w.updateJobStatus(jobCtx.Job.Id, livekit.JobStatus_JS_FAILED, fmt.Sprintf("handler panic: %v", r))
 		}
 
-		// Use robust cleanup method
-		w.cleanupJob(jobCtx.Job.Id)
+		// Clean up
+		w.mu.Lock()
+		delete(w.activeJobs, jobCtx.Job.Id)
+		delete(w.jobStartTimes, jobCtx.Job.Id)
+		if jobCtx.Room != nil {
+			delete(w.rooms, jobCtx.Room.Name())
+			delete(w.participantTrackers, jobCtx.Room.Name())
+			jobCtx.Room.Disconnect()
+		}
+		w.mu.Unlock()
 
 		// Update job status
 		w.updateJobStatus(jobCtx.Job.Id, livekit.JobStatus_JS_SUCCESS, "")
