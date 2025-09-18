@@ -22,7 +22,7 @@ type TranslationLoadTestSuite struct {
 }
 
 func (suite *TranslationLoadTestSuite) SetupTest() {
-	suite.stage = NewTranslationStage("load-test", 30, "test-api-key")
+	suite.stage = NewTranslationStage("load-test", 30, "test-api-key", "")
 }
 
 func (suite *TranslationLoadTestSuite) TearDownTest() {
@@ -174,7 +174,7 @@ func (suite *TranslationLoadTestSuite) TestCachePerformanceUnderLoad() {
 // TestCacheEvictionUnderPressure tests cache cleanup behavior.
 func (suite *TranslationLoadTestSuite) TestCacheEvictionUnderPressure() {
 	// Fill cache to just under capacity first
-	for i := 0; i < MaxCacheSize-10; i++ {
+	for i := 0; i < maxCacheSize-10; i++ {
 		text := fmt.Sprintf("Cache test text %d", i)
 		targetLangs := []string{"es"}
 		cacheKey := suite.stage.generateCacheKey(text, "en", targetLangs)
@@ -189,7 +189,7 @@ func (suite *TranslationLoadTestSuite) TestCacheEvictionUnderPressure() {
 		cacheKey := suite.stage.generateCacheKey(text, "en", []string{"es"})
 		suite.stage.cache[cacheKey] = &translationCacheEntry{
 			translations: map[string]string{"es": "expired"},
-			timestamp:    time.Now().Add(-2 * CacheTTL), // Expired
+			timestamp:    time.Now().Add(-2 * cacheTTL), // Expired
 		}
 	}
 
@@ -208,7 +208,7 @@ func (suite *TranslationLoadTestSuite) TestCacheEvictionUnderPressure() {
 	cacheSize := len(suite.stage.cache)
 	suite.stage.cacheMu.RUnlock()
 
-	suite.LessOrEqual(cacheSize, MaxCacheSize+50, "Cache should have cleaned up expired entries")
+	suite.LessOrEqual(cacheSize, maxCacheSize+50, "Cache should have cleaned up expired entries")
 }
 
 // TestMemoryUsageUnderLoad tests memory consumption patterns.
@@ -295,7 +295,7 @@ func (suite *TranslationLoadTestSuite) TestInputValidationLimits() {
 	ctx := context.Background()
 
 	// Test maximum input text size
-	largeText := strings.Repeat("a", MaxInputTextSize+1)
+	largeText := strings.Repeat("a", maxInputTextSize+1)
 	targetLangs := []string{"es"}
 
 	_, err := suite.stage.translateViaStreaming(ctx, largeText, "en", targetLangs)
@@ -303,7 +303,7 @@ func (suite *TranslationLoadTestSuite) TestInputValidationLimits() {
 	suite.Contains(err.Error(), "input text too large")
 
 	// Test maximum target languages
-	tooManyLangs := make([]string, MaxTargetLanguages+1)
+	tooManyLangs := make([]string, maxTargetLanguages+1)
 	for i := range tooManyLangs {
 		tooManyLangs[i] = fmt.Sprintf("lang%d", i)
 	}
@@ -315,7 +315,7 @@ func (suite *TranslationLoadTestSuite) TestInputValidationLimits() {
 
 // BenchmarkTranslationCacheHit benchmarks cache hit performance.
 func BenchmarkTranslationCacheHit(b *testing.B) {
-	stage := NewTranslationStage("bench", 30, "test-key")
+	stage := NewTranslationStage("bench", 30, "test-key", "")
 	defer stage.Disconnect()
 
 	// Pre-populate cache
@@ -337,7 +337,7 @@ func BenchmarkTranslationCacheHit(b *testing.B) {
 
 // BenchmarkTranslationProcessing benchmarks translation processing performance.
 func BenchmarkTranslationProcessing(b *testing.B) {
-	stage := NewTranslationStage("bench", 30, "test-key")
+	stage := NewTranslationStage("bench", 30, "test-key", "")
 	defer stage.Disconnect()
 
 	ctx := context.Background()
@@ -366,7 +366,7 @@ func BenchmarkTranslationProcessing(b *testing.B) {
 
 // BenchmarkLanguageFiltering benchmarks language filtering logic.
 func BenchmarkLanguageFiltering(b *testing.B) {
-	stage := NewTranslationStage("bench", 30, "test-key")
+	stage := NewTranslationStage("bench", 30, "test-key", "")
 	defer stage.Disconnect()
 
 	b.ResetTimer()
@@ -392,7 +392,7 @@ func BenchmarkLanguageFiltering(b *testing.B) {
 
 // TestStressTestCircuitBreakerRecovery tests circuit breaker under stress.
 func (suite *TranslationLoadTestSuite) TestStressTestCircuitBreakerRecovery() {
-	const numFailures = MaxConsecutiveFailures * 2
+	const numFailures = 5 * 2 // maxConsecutiveFailures * 2
 
 	// Trigger failures to open circuit breaker
 	for i := 0; i < numFailures; i++ {
@@ -426,7 +426,7 @@ func (suite *TranslationLoadTestSuite) TestCacheCleanupEfficiency() {
 		cacheKey := suite.stage.generateCacheKey(text, "en", []string{"es"})
 		suite.stage.cache[cacheKey] = &translationCacheEntry{
 			translations: map[string]string{"es": "old translation"},
-			timestamp:    now.Add(-2 * CacheTTL), // Expired
+			timestamp:    now.Add(-2 * cacheTTL), // Expired
 		}
 	}
 
@@ -498,7 +498,7 @@ func (suite *TranslationLoadTestSuite) TestRateLimiterUnderSustainedLoad() {
 	suite.Greater(deniedRequests, int64(0))
 
 	// Rate should be approximately correct (allowing for burst)
-	expectedMaxRequests := int64(float64(testDuration.Seconds())*float64(DefaultRateLimit) + DefaultBurstSize)
+	expectedMaxRequests := int64(float64(testDuration.Seconds())*float64(defaultRateLimit) + defaultBurstSize)
 	suite.LessOrEqual(allowedRequests, expectedMaxRequests*2, "Rate limiting should be working")
 }
 

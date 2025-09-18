@@ -21,39 +21,39 @@ import (
 // Constants for configuration
 const (
 	// HTTP Client Configuration
-	DefaultHTTPTimeout = 30 * time.Second
+	defaultHTTPTimeout = 30 * time.Second
 
 	// OpenAI Streaming API Configuration
-	OpenAIStreamingEndpoint = "https://api.openai.com/v1/chat/completions"
-	DefaultModel            = "gpt-4o-mini"
-	DefaultTemperature      = 0.3
+	openAIStreamingEndpoint = "https://api.openai.com/v1/chat/completions"
+	defaultModel            = "gpt-4o-mini"
+	defaultTemperature      = 0.3
 
 	// Streaming Configuration
-	StreamReadTimeout = 30 * time.Second
-	StreamBufferSize  = 8192
-	MaxStreamChunks   = 1000
+	streamReadTimeout = 30 * time.Second
+	streamBufferSize  = 8192
+	maxStreamChunks   = 1000
 
 	// Input Validation
-	MaxInputTextSize   = 4000 // characters
-	MaxTargetLanguages = 20
+	maxInputTextSize   = 4000 // characters
+	maxTargetLanguages = 20
 
 	// Rate Limiting (requests per second)
-	DefaultRateLimit = rate.Limit(10) // 10 requests per second
-	DefaultBurstSize = 20
+	defaultRateLimit = rate.Limit(10) // 10 requests per second
+	defaultBurstSize = 20
 
 	// Caching Configuration
-	MaxCacheSize = 1000
-	CacheTTL     = 1 * time.Hour
+	maxCacheSize = 1000
+	cacheTTL     = 1 * time.Hour
 
 	// Circuit Breaker Configuration
-	MaxConsecutiveFailures = 5
-	CircuitBreakerTimeout  = 30 * time.Second
+	maxConsecutiveFailures = 5
+	circuitBreakerTimeout  = 30 * time.Second
 
 	// Metrics
-	LatencyBuckets = 10 // For moving average calculation
+	latencyBuckets = 10 // For moving average calculation
 
 	// Streaming Metrics
-	TimeToFirstTokenBuckets = 10
+	timeToFirstTokenBuckets = 10
 )
 
 // TranslationStage translates transcriptions to multiple participant languages using OpenAI Streaming API.
@@ -220,45 +220,39 @@ type TranslationStats struct {
 	ChunksReceived   uint64
 }
 
-// NewTranslationStage creates a new translation stage with default OpenAI endpoint.
+// NewTranslationStage creates a new translation stage with OpenAI configuration.
 //
 // Parameters:
 //   - name: Unique identifier for this stage
 //   - priority: Execution order (should be 30, after BroadcastStage)
 //   - apiKey: OpenAI API key for authentication
-func NewTranslationStage(name string, priority int, apiKey string) *TranslationStage {
-	return NewTranslationStageWithEndpoint(name, priority, apiKey, OpenAIStreamingEndpoint)
-}
+//   - model: OpenAI model to use (empty for default "gpt-4o-mini")
+func NewTranslationStage(name string, priority int, apiKey string, model string) *TranslationStage {
+	if model == "" {
+		model = defaultModel
+	}
 
-// NewTranslationStageWithEndpoint creates a new translation stage with custom endpoint.
-//
-// Parameters:
-//   - name: Unique identifier for this stage
-//   - priority: Execution order (should be 30, after BroadcastStage)
-//   - apiKey: OpenAI API key for authentication
-//   - endpoint: Custom API endpoint (useful for testing or alternative providers)
-func NewTranslationStageWithEndpoint(name string, priority int, apiKey string, endpoint string) *TranslationStage {
 	return &TranslationStage{
 		name:          name,
 		priority:      priority,
 		apiKey:        apiKey,
-		model:         DefaultModel,
-		endpoint:      endpoint,
-		temperature:   DefaultTemperature,
-		streamTimeout: StreamReadTimeout,
+		model:         model,
+		endpoint:      openAIStreamingEndpoint,
+		temperature:   defaultTemperature,
+		streamTimeout: streamReadTimeout,
 		client: &http.Client{
-			Timeout: DefaultHTTPTimeout,
+			Timeout: defaultHTTPTimeout,
 		},
 		translationCallbacks:       make([]TranslationCallback, 0),
 		beforeTranslationCallbacks: make([]BeforeTranslationCallback, 0),
-		rateLimiter:                rate.NewLimiter(DefaultRateLimit, DefaultBurstSize),
+		rateLimiter:                rate.NewLimiter(defaultRateLimit, defaultBurstSize),
 		cache:                      make(map[string]*translationCacheEntry),
 		breaker: &circuitBreaker{
 			state: circuitClosed,
 		},
 		metrics: &apiMetrics{
-			latencyBuckets:          make([]float64, LatencyBuckets),
-			timeToFirstTokenBuckets: make([]float64, TimeToFirstTokenBuckets),
+			latencyBuckets:          make([]float64, latencyBuckets),
+			timeToFirstTokenBuckets: make([]float64, timeToFirstTokenBuckets),
 		},
 		stats: &TranslationStats{},
 	}
@@ -367,11 +361,11 @@ func (ts *TranslationStage) translateViaStreaming(ctx context.Context, text, sou
 	}
 
 	// Input validation
-	if len(text) > MaxInputTextSize {
-		return nil, fmt.Errorf("input text too large: %d characters (max %d)", len(text), MaxInputTextSize)
+	if len(text) > maxInputTextSize {
+		return nil, fmt.Errorf("input text too large: %d characters (max %d)", len(text), maxInputTextSize)
 	}
-	if len(targetLangs) > MaxTargetLanguages {
-		return nil, fmt.Errorf("too many target languages: %d (max %d)", len(targetLangs), MaxTargetLanguages)
+	if len(targetLangs) > maxTargetLanguages {
+		return nil, fmt.Errorf("too many target languages: %d (max %d)", len(targetLangs), maxTargetLanguages)
 	}
 	if strings.TrimSpace(text) == "" {
 		return make(map[string]string), nil
@@ -607,7 +601,7 @@ func (ts *TranslationStage) callOpenAIStreaming(ctx context.Context, prompt stri
 // readStreamingResponse reads and processes the streaming response from OpenAI.
 func (ts *TranslationStage) readStreamingResponse(ctx context.Context, resp *http.Response, onFirstToken func(bool)) (string, error) {
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, StreamBufferSize), StreamBufferSize)
+	scanner.Buffer(make([]byte, streamBufferSize), streamBufferSize)
 
 	var result strings.Builder
 	firstToken := true
@@ -662,8 +656,8 @@ func (ts *TranslationStage) readStreamingResponse(ctx context.Context, resp *htt
 			chunksReceived++
 
 			// Safety check to prevent infinite streams
-			if chunksReceived > MaxStreamChunks {
-				return "", fmt.Errorf("stream exceeded maximum chunks limit (%d)", MaxStreamChunks)
+			if chunksReceived > maxStreamChunks {
+				return "", fmt.Errorf("stream exceeded maximum chunks limit (%d)", maxStreamChunks)
 			}
 		}
 
@@ -727,7 +721,7 @@ func (ts *TranslationStage) getCachedTranslation(cacheKey string) map[string]str
 	}
 
 	// Check if cache entry is still valid
-	if time.Since(entry.timestamp) > CacheTTL {
+	if time.Since(entry.timestamp) > cacheTTL {
 		// Entry is stale, will be cleaned up later
 		return nil
 	}
@@ -740,7 +734,7 @@ func (ts *TranslationStage) cacheTranslation(cacheKey string, translations map[s
 	defer ts.cacheMu.Unlock()
 
 	// Clean up stale entries if cache is getting full
-	if len(ts.cache) >= MaxCacheSize {
+	if len(ts.cache) >= maxCacheSize {
 		ts.cleanupStaleEntriesLocked()
 	}
 
@@ -754,7 +748,7 @@ func (ts *TranslationStage) cacheTranslation(cacheKey string, translations map[s
 func (ts *TranslationStage) cleanupStaleEntriesLocked() {
 	now := time.Now()
 	for key, entry := range ts.cache {
-		if now.Sub(entry.timestamp) > CacheTTL {
+		if now.Sub(entry.timestamp) > cacheTTL {
 			delete(ts.cache, key)
 		}
 	}
@@ -805,9 +799,9 @@ func (ts *TranslationStage) recordAPIFailure() {
 	ts.metrics.failedCalls++
 	ts.metrics.mu.Unlock()
 
-	if ts.breaker.failureCount >= MaxConsecutiveFailures {
+	if ts.breaker.failureCount >= maxConsecutiveFailures {
 		ts.breaker.state = circuitOpen
-		ts.breaker.nextRetryTime = time.Now().Add(CircuitBreakerTimeout)
+		ts.breaker.nextRetryTime = time.Now().Add(circuitBreakerTimeout)
 
 		// Record circuit breaker trip
 		ts.metrics.mu.Lock()

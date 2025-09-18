@@ -89,9 +89,9 @@ func (suite *TTSSuite) TestNewTextToSpeechStage() {
 	assert.Equal(suite.T(), "tts", stage.GetName())
 	assert.Equal(suite.T(), 50, stage.GetPriority())
 	assert.Equal(suite.T(), "api-key", stage.apiKey)
-	assert.Equal(suite.T(), DefaultTTSModel, stage.model)
-	assert.Equal(suite.T(), DefaultVoice, stage.voice)
-	assert.Equal(suite.T(), DefaultSpeed, stage.speed)
+	assert.Equal(suite.T(), defaultTTSModel, stage.model)
+	assert.Equal(suite.T(), defaultVoice, stage.voice)
+	assert.Equal(suite.T(), defaultSpeed, stage.speed)
 	assert.NotNil(suite.T(), stage.client)
 	assert.NotNil(suite.T(), stage.rateLimiter)
 	assert.NotNil(suite.T(), stage.breaker)
@@ -259,7 +259,7 @@ func (suite *TTSSuite) TestCircuitBreaker() {
 	assert.True(suite.T(), suite.stage.canMakeAPICall())
 
 	// Simulate failures to trip the circuit breaker
-	for i := 0; i < TTSMaxFailures; i++ {
+	for i := 0; i < ttsMaxFailures; i++ {
 		suite.stage.recordAPIFailure()
 	}
 
@@ -295,8 +295,8 @@ func (suite *TTSSuite) TestInputValidation() {
 		{"valid_input", "Hello world", false},
 		{"empty_input", "", true},
 		{"whitespace_only", "   ", true},
-		{"max_size_input", strings.Repeat("a", MaxTTSInputSize), false},
-		{"oversized_input", strings.Repeat("a", MaxTTSInputSize+1), true},
+		{"max_size_input", strings.Repeat("a", maxTTSInputSize), false},
+		{"oversized_input", strings.Repeat("a", maxTTSInputSize+1), true},
 	}
 
 	for _, tc := range testCases {
@@ -377,9 +377,9 @@ func TestTextToSpeechStage_NewStageDefaults(t *testing.T) {
 
 	assert.Equal(t, "test", stage.GetName())
 	assert.Equal(t, 40, stage.GetPriority())
-	assert.Equal(t, DefaultTTSModel, stage.model)
-	assert.Equal(t, DefaultVoice, stage.voice)
-	assert.Equal(t, DefaultSpeed, stage.speed)
+	assert.Equal(t, defaultTTSModel, stage.model)
+	assert.Equal(t, defaultVoice, stage.voice)
+	assert.Equal(t, defaultSpeed, stage.speed)
 }
 
 func TestTextToSpeechStage_NewStageCustom(t *testing.T) {

@@ -18,28 +18,28 @@ import (
 // Constants for TTS configuration
 const (
 	// OpenAI TTS API Configuration
-	OpenAITTSEndpoint = "https://api.openai.com/v1/audio/speech"
-	DefaultTTSModel   = "gpt-4o-mini-tts"
-	DefaultVoice      = "alloy"
-	DefaultSpeed      = 1.0
+	openAITTSEndpoint = "https://api.openai.com/v1/audio/speech"
+	defaultTTSModel   = "gpt-4o-mini-tts"
+	defaultVoice      = "alloy"
+	defaultSpeed      = 1.0
 
 	// Audio format configuration
-	TTSResponseFormat = "opus" // Opus format for direct streaming to LiveKit
+	ttsResponseFormat = "opus" // Opus format for direct streaming to LiveKit
 
 	// HTTP Client Configuration
-	TTSHTTPTimeout = 30 * time.Second
+	ttsHTTPTimeout = 30 * time.Second
 
 	// Input validation
-	MaxTTSInputSize = 4096 // characters
+	maxTTSInputSize = 4096 // characters
 
 	// Rate limiting (requests per second)
-	TTSRateLimit = rate.Limit(5) // 5 requests per second for TTS
-	TTSBurstSize = 10
+	ttsRateLimit = rate.Limit(5) // 5 requests per second for TTS
+	ttsBurstSize = 10
 
 	// Circuit breaker configuration
-	TTSMaxFailures    = 3
-	TTSCircuitTimeout = 60 * time.Second
-	TTSLatencyBuckets = 10
+	ttsMaxFailures    = 3
+	ttsCircuitTimeout = 60 * time.Second
+	ttsLatencyBuckets = 10
 )
 
 // TTSCallback is called when TTS audio is generated.
@@ -169,10 +169,10 @@ type TTSStats struct {
 //   - voice: Voice to use (empty for default)
 func NewTextToSpeechStage(name string, priority int, apiKey, model, voice string) *TextToSpeechStage {
 	if model == "" {
-		model = DefaultTTSModel
+		model = defaultTTSModel
 	}
 	if voice == "" {
-		voice = DefaultVoice
+		voice = defaultVoice
 	}
 
 	return &TextToSpeechStage{
@@ -181,18 +181,18 @@ func NewTextToSpeechStage(name string, priority int, apiKey, model, voice string
 		apiKey:       apiKey,
 		model:        model,
 		voice:        voice,
-		speed:        DefaultSpeed,
-		endpoint:     OpenAITTSEndpoint,
+		speed:        defaultSpeed,
+		endpoint:     openAITTSEndpoint,
 		ttsCallbacks: make([]TTSCallback, 0),
 		client: &http.Client{
-			Timeout: TTSHTTPTimeout,
+			Timeout: ttsHTTPTimeout,
 		},
-		rateLimiter: rate.NewLimiter(TTSRateLimit, TTSBurstSize),
+		rateLimiter: rate.NewLimiter(ttsRateLimit, ttsBurstSize),
 		breaker: &ttsCircuitBreaker{
 			state: ttsCircuitClosed,
 		},
 		metrics: &ttsMetrics{
-			latencyBuckets: make([]float64, TTSLatencyBuckets),
+			latencyBuckets: make([]float64, ttsLatencyBuckets),
 		},
 		stats: &TTSStats{},
 	}
@@ -315,8 +315,8 @@ func (tts *TextToSpeechStage) generateTTSParallel(ctx context.Context, translati
 // generateTTS generates speech for a single text using OpenAI TTS API.
 func (tts *TextToSpeechStage) generateTTS(ctx context.Context, text string) ([]byte, error) {
 	// Input validation
-	if len(text) > MaxTTSInputSize {
-		return nil, fmt.Errorf("input text too large: %d characters (max %d)", len(text), MaxTTSInputSize)
+	if len(text) > maxTTSInputSize {
+		return nil, fmt.Errorf("input text too large: %d characters (max %d)", len(text), maxTTSInputSize)
 	}
 	if strings.TrimSpace(text) == "" {
 		return nil, fmt.Errorf("empty text input")
@@ -351,7 +351,7 @@ func (tts *TextToSpeechStage) callOpenAITTS(ctx context.Context, text string) ([
 		Model:          tts.model,
 		Input:          text,
 		Voice:          tts.voice,
-		ResponseFormat: TTSResponseFormat,
+		ResponseFormat: ttsResponseFormat,
 		Speed:          tts.speed,
 	}
 
@@ -439,9 +439,9 @@ func (tts *TextToSpeechStage) recordAPIFailure() {
 	tts.metrics.failedCalls++
 	tts.metrics.mu.Unlock()
 
-	if tts.breaker.failureCount >= TTSMaxFailures {
+	if tts.breaker.failureCount >= ttsMaxFailures {
 		tts.breaker.state = ttsCircuitOpen
-		tts.breaker.nextRetryTime = time.Now().Add(TTSCircuitTimeout)
+		tts.breaker.nextRetryTime = time.Now().Add(ttsCircuitTimeout)
 
 		tts.metrics.mu.Lock()
 		tts.metrics.circuitBreakerTrips++

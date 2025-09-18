@@ -17,7 +17,7 @@ type TranslationStageTestSuite struct {
 
 func (suite *TranslationStageTestSuite) SetupTest() {
 	// Create a translation stage for testing
-	suite.stage = NewTranslationStage("test-translation", 30, "test-api-key")
+	suite.stage = NewTranslationStage("test-translation", 30, "test-api-key", "")
 }
 
 func (suite *TranslationStageTestSuite) TearDownTest() {
@@ -159,7 +159,7 @@ func (suite *TranslationStageTestSuite) TestInputValidation() {
 	ctx := context.Background()
 
 	// Test with very large input
-	largeText := strings.Repeat("a", MaxInputTextSize+1)
+	largeText := strings.Repeat("a", maxInputTextSize+1)
 	input := MediaData{
 		Type:    MediaTypeAudio,
 		TrackID: "track1",
