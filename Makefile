@@ -14,15 +14,10 @@ test-unit:
 test-integration:
 	go test -v -tags=integration ./pkg/agent/...
 
-# Run load tests
-test-load:
-	@echo "Running load tests..."
-	go test -tags=load -v ./pkg/agent/... -timeout=30s
-
 # Run benchmark tests
 test-bench:
 	@echo "Running benchmark tests..."
-	go test -tags=load -bench=. -benchmem ./pkg/agent/...
+	go test -bench=. -benchmem ./pkg/agent/...
 
 # Run e2e tests (requires OPENAI_API_KEY)
 test-e2e:

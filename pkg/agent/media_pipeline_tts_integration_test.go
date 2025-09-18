@@ -103,7 +103,7 @@ func (suite *TTSIntegrationSuite) TestRealParallelTTSGeneration() {
 
 func (suite *TTSIntegrationSuite) TestRealErrorHandling() {
 	// Test with oversized input
-	oversizedText := make([]byte, MaxTTSInputSize+100)
+	oversizedText := make([]byte, maxTTSInputSize+100)
 	for i := range oversizedText {
 		oversizedText[i] = 'a'
 	}
@@ -154,14 +154,14 @@ func (suite *TTSIntegrationSuite) TestRealCircuitBreaker() {
 
 	// Make requests to trip the circuit breaker
 	var errorCount int
-	for i := 0; i < TTSMaxFailures+2; i++ {
+	for i := 0; i < ttsMaxFailures+2; i++ {
 		_, err := invalidStage.generateTTS(suite.ctx, "Circuit breaker test")
 		if err != nil {
 			errorCount++
 		}
 	}
 
-	assert.Greater(suite.T(), errorCount, TTSMaxFailures, "Should have errors from invalid API key")
+	assert.Greater(suite.T(), errorCount, ttsMaxFailures, "Should have errors from invalid API key")
 
 	// Circuit should be open now
 	assert.False(suite.T(), invalidStage.canMakeAPICall(), "Circuit breaker should be open")

@@ -265,9 +265,10 @@ func TestRealtimeTranscriptionCallbacks(t *testing.T) {
 	// Sort events since goroutines can deliver them out of order
 	var partialEvent, finalEvent *TranscriptionEvent
 	for i := range receivedEvents {
-		if receivedEvents[i].Type == "partial" {
+		switch receivedEvents[i].Type {
+		case "partial":
 			partialEvent = &receivedEvents[i]
-		} else if receivedEvents[i].Type == "final" {
+		case "final":
 			finalEvent = &receivedEvents[i]
 		}
 	}

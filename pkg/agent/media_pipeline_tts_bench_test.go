@@ -9,7 +9,7 @@ import (
 )
 
 // Benchmarks for TTS parallel generation performance
-// Run with: go test -tags=load -bench=. ./internal/media
+// Run with: go test -bench=. ./internal/media
 
 func BenchmarkTTSParallelGeneration(b *testing.B) {
 	// Setup mock server
