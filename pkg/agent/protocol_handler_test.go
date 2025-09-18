@@ -12,7 +12,7 @@ import (
 
 // TestProtocolHandlerUnknownMessage tests handling of unknown message types
 func TestProtocolHandlerUnknownMessage(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	handler := NewProtocolHandler(logger)
 
 	// Test non-strict mode (default)
@@ -43,7 +43,7 @@ func TestProtocolHandlerUnknownMessage(t *testing.T) {
 
 // TestProtocolVersionHandling tests version compatibility checks
 func TestProtocolVersionHandling(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	handler := NewProtocolHandler(logger)
 
 	// Test compatible version
@@ -68,7 +68,7 @@ func TestProtocolVersionHandling(t *testing.T) {
 
 // TestProtocolValidation tests protocol message validation
 func TestProtocolValidation(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	handler := NewProtocolHandler(logger)
 
 	// Test nil message
@@ -102,7 +102,7 @@ func TestProtocolValidation(t *testing.T) {
 
 // TestMessageTypeRegistry tests custom message type handling
 func TestMessageTypeRegistry(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	registry := NewMessageTypeRegistry(logger)
 
 	// Test handler registration
@@ -156,7 +156,7 @@ func TestProtocolNegotiator(t *testing.T) {
 
 // TestProtocolMetrics tests protocol metrics collection
 func TestProtocolMetrics(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	handler := NewProtocolHandler(logger)
 
 	// Set server version

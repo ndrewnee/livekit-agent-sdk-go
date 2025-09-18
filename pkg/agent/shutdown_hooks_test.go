@@ -14,7 +14,7 @@ import (
 
 // TestShutdownHookManager tests basic hook management
 func TestShutdownHookManager(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	manager := NewShutdownHookManager(logger)
 
 	// Test adding hooks
@@ -48,7 +48,7 @@ func TestShutdownHookManager(t *testing.T) {
 
 // TestShutdownHookPriority tests hook execution order
 func TestShutdownHookPriority(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	manager := NewShutdownHookManager(logger)
 
 	var executionOrder []string
@@ -97,7 +97,7 @@ func TestShutdownHookPriority(t *testing.T) {
 
 // TestShutdownHookTimeout tests hook timeout handling
 func TestShutdownHookTimeout(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	manager := NewShutdownHookManager(logger)
 
 	hook := ShutdownHook{
@@ -122,7 +122,7 @@ func TestShutdownHookTimeout(t *testing.T) {
 
 // TestShutdownHookError tests error handling
 func TestShutdownHookError(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	manager := NewShutdownHookManager(logger)
 
 	testError := errors.New("hook error")
@@ -147,7 +147,7 @@ func TestShutdownHookError(t *testing.T) {
 
 // TestShutdownHookPanic tests panic recovery
 func TestShutdownHookPanic(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	manager := NewShutdownHookManager(logger)
 
 	hook := ShutdownHook{
@@ -170,7 +170,7 @@ func TestShutdownHookPanic(t *testing.T) {
 
 // TestShutdownHookConcurrency tests concurrent operations
 func TestShutdownHookConcurrency(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	manager := NewShutdownHookManager(logger)
 
 	// Add hooks concurrently
@@ -218,7 +218,7 @@ func TestDefaultShutdownHooks(t *testing.T) {
 	assert.True(t, flushed)
 
 	// Test log flush hook
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	logHook := defaults.NewLogFlushHook(logger)
 	assert.Equal(t, "log_flush", logHook.Name)
 	assert.Equal(t, 200, logHook.Priority)
@@ -329,7 +329,7 @@ func TestWorkerShutdownHooks(t *testing.T) {
 
 // TestMultipleHooksWithErrors tests multiple hooks where some fail
 func TestMultipleHooksWithErrors(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	manager := NewShutdownHookManager(logger)
 
 	var executedHooks []string
@@ -382,7 +382,7 @@ func TestMultipleHooksWithErrors(t *testing.T) {
 
 // TestInvalidPhase tests adding hook to invalid phase
 func TestInvalidPhase(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	manager := NewShutdownHookManager(logger)
 
 	hook := ShutdownHook{
@@ -401,7 +401,7 @@ func TestInvalidPhase(t *testing.T) {
 
 // TestClearHooks tests clearing hooks
 func TestClearHooks(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	manager := NewShutdownHookManager(logger)
 
 	// Add hooks to multiple phases

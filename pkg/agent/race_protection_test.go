@@ -15,7 +15,7 @@ import (
 
 // TestRaceProtectorBasics tests basic race protector functionality
 func TestRaceProtectorBasics(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	protector := NewRaceProtector(logger)
 	require.NotNil(t, protector)
 
@@ -40,7 +40,7 @@ func TestRaceProtectorBasics(t *testing.T) {
 
 // TestRaceProtectorCanAcceptJob tests job acceptance logic
 func TestRaceProtectorCanAcceptJob(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	protector := NewRaceProtector(logger)
 
 	// Should accept job when not disconnecting
@@ -85,7 +85,7 @@ func TestRaceProtectorCanAcceptJob(t *testing.T) {
 
 // TestRaceProtectorTerminationTracking tests termination request tracking
 func TestRaceProtectorTerminationTracking(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	protector := NewRaceProtector(logger)
 
 	// First termination request should be accepted
@@ -110,7 +110,7 @@ func TestRaceProtectorTerminationTracking(t *testing.T) {
 
 // TestRaceProtectorStatusUpdateQueuing tests status update queuing during reconnection
 func TestRaceProtectorStatusUpdateQueuing(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	protector := NewRaceProtector(logger)
 
 	// Should not queue when not reconnecting
@@ -161,7 +161,7 @@ func TestRaceProtectorStatusUpdateQueuing(t *testing.T) {
 
 // TestRaceProtectorCleanup tests cleanup of old termination records
 func TestRaceProtectorCleanup(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	protector := NewRaceProtector(logger)
 
 	// Record and complete some terminations
@@ -186,7 +186,7 @@ func TestRaceProtectorCleanup(t *testing.T) {
 
 // TestRaceProtectorMetrics tests metrics collection
 func TestRaceProtectorMetrics(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	protector := NewRaceProtector(logger)
 
 	// Set various states
@@ -212,7 +212,7 @@ func TestRaceProtectorMetrics(t *testing.T) {
 
 // TestRaceProtectorConcurrentOperations tests thread safety
 func TestRaceProtectorConcurrentOperations(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	protector := NewRaceProtector(logger)
 
 	var wg sync.WaitGroup
@@ -280,7 +280,7 @@ func TestRaceProtectorConcurrentOperations(t *testing.T) {
 
 // TestRaceProtectorGuard tests the guard pattern
 func TestRaceProtectorGuard(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	protector := NewRaceProtector(logger)
 
 	// Test job acceptance guard
@@ -354,7 +354,7 @@ func TestShouldReplaceStatus(t *testing.T) {
 
 // TestRaceProtectorRealWorldScenario tests a realistic concurrent scenario
 func TestRaceProtectorRealWorldScenario(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	protector := NewRaceProtector(logger)
 
 	// Track metrics
