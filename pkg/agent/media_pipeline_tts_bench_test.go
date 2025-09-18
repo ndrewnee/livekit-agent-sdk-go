@@ -84,6 +84,7 @@ func BenchmarkTTSSingleGeneration(b *testing.B) {
 
 	stage := NewTextToSpeechStage("bench", 50, "test-key", "", "")
 	stage.SetEndpoint(mockServer.URL)
+	stage.SetRateLimiter(nil) // Disable rate limiting for benchmarks
 	ctx := context.Background()
 
 	b.ResetTimer()
@@ -124,7 +125,18 @@ func BenchmarkTTSMetricsUpdate(b *testing.B) {
 
 // Memory allocation benchmarks
 func BenchmarkTTSMemoryAllocation(b *testing.B) {
+	// Setup mock server
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mockData := make([]byte, 256)
+		w.Header().Set("Content-Type", "audio/opus")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(mockData)
+	}))
+	defer mockServer.Close()
+
 	stage := NewTextToSpeechStage("bench", 50, "test-key", "", "")
+	stage.SetEndpoint(mockServer.URL)
+	stage.SetRateLimiter(nil) // Disable rate limiting for benchmarks
 	ctx := context.Background()
 
 	translations := map[string]string{
@@ -154,6 +166,7 @@ func BenchmarkTTSConcurrentLoad(b *testing.B) {
 
 	stage := NewTextToSpeechStage("bench", 50, "test-key", "", "")
 	stage.SetEndpoint(mockServer.URL)
+	stage.SetRateLimiter(nil) // Disable rate limiting for benchmarks
 	ctx := context.Background()
 
 	translations := map[string]string{

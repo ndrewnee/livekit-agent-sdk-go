@@ -209,6 +209,12 @@ func (tts *TextToSpeechStage) SetEndpoint(endpoint string) {
 	tts.endpoint = endpoint
 }
 
+// SetRateLimiter sets the rate limiter for testing purposes.
+// Pass nil to disable rate limiting entirely.
+func (tts *TextToSpeechStage) SetRateLimiter(limiter *rate.Limiter) {
+	tts.rateLimiter = limiter
+}
+
 // CanProcess implements MediaPipelineStage. Only processes audio with translations.
 func (tts *TextToSpeechStage) CanProcess(mediaType MediaType) bool {
 	return mediaType == MediaTypeAudio
@@ -327,8 +333,8 @@ func (tts *TextToSpeechStage) generateTTS(ctx context.Context, text string) ([]b
 		return nil, fmt.Errorf("circuit breaker is open, TTS API temporarily unavailable")
 	}
 
-	// Apply rate limiting
-	if !tts.rateLimiter.Allow() {
+	// Apply rate limiting (skip if rate limiter is disabled)
+	if tts.rateLimiter != nil && !tts.rateLimiter.Allow() {
 		tts.recordRateLimitExceeded()
 		return nil, fmt.Errorf("rate limit exceeded for TTS API")
 	}
