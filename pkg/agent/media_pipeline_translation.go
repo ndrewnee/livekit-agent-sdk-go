@@ -264,6 +264,11 @@ func (ts *TranslationStage) GetName() string { return ts.name }
 // GetPriority implements MediaPipelineStage.
 func (ts *TranslationStage) GetPriority() int { return ts.priority }
 
+// SetEndpoint sets the translation API endpoint for testing purposes.
+func (ts *TranslationStage) SetEndpoint(endpoint string) {
+	ts.endpoint = endpoint
+}
+
 // CanProcess implements MediaPipelineStage. Only processes audio with transcriptions.
 func (ts *TranslationStage) CanProcess(mediaType MediaType) bool {
 	return mediaType == MediaTypeAudio

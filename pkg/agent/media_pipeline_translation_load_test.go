@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"sync"
@@ -16,16 +18,38 @@ import (
 // TranslationLoadTestSuite tests high-volume and concurrent scenarios.
 type TranslationLoadTestSuite struct {
 	suite.Suite
-	stage *TranslationStage
+	stage      *TranslationStage
+	mockServer *httptest.Server
 }
 
 func (suite *TranslationLoadTestSuite) SetupTest() {
+	// Setup mock OpenAI streaming server
+	suite.mockServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Set headers for Server-Sent Events
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(http.StatusOK)
+
+		// Send mock streaming response with multiple languages
+		mockResponse := `data: {"choices":[{"delta":{"content":"{\"es\":\"Texto de prueba de carga\",\"fr\":\"Texte de test de charge\",\"de\":\"Lasttest-Text\",\"it\":\"Testo di carico\",\"pt\":\"Texto de teste de carga\"}"}}]}
+
+data: [DONE]
+
+`
+		_, _ = w.Write([]byte(mockResponse))
+	}))
+
 	suite.stage = NewTranslationStage("load-test", 30, "test-api-key", "")
+	suite.stage.SetEndpoint(suite.mockServer.URL)
 }
 
 func (suite *TranslationLoadTestSuite) TearDownTest() {
 	if suite.stage != nil {
 		suite.stage.Disconnect()
+	}
+	if suite.mockServer != nil {
+		suite.mockServer.Close()
 	}
 }
 

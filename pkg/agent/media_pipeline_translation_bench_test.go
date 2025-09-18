@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 )
@@ -31,7 +33,26 @@ func BenchmarkTranslationCacheHit(b *testing.B) {
 
 // BenchmarkTranslationProcessing benchmarks translation processing performance.
 func BenchmarkTranslationProcessing(b *testing.B) {
+	// Setup mock OpenAI streaming server
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Set headers for Server-Sent Events
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(http.StatusOK)
+
+		// Send mock streaming response
+		mockResponse := `data: {"choices":[{"delta":{"content":"{\"es\":\"Texto de prueba de benchmark\"}"}}]}
+
+data: [DONE]
+
+`
+		_, _ = w.Write([]byte(mockResponse))
+	}))
+	defer mockServer.Close()
+
 	stage := NewTranslationStage("bench", 30, "test-key", "")
+	stage.SetEndpoint(mockServer.URL)
 	defer stage.Disconnect()
 
 	ctx := context.Background()
