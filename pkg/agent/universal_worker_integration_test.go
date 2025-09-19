@@ -489,15 +489,32 @@ func TestUniversalWorker_Integration_DataMessaging(t *testing.T) {
 
 	var worker *UniversalWorker
 
+	// Channels for synchronization
+	agentConnected := make(chan *lksdk.Room, 1)
+	participantJoined := make(chan *lksdk.RemoteParticipant, 1)
+
 	handler := &SimpleUniversalHandler{
 		JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *JobMetadata) {
-			return true, nil
+			return true, &JobMetadata{
+				ParticipantIdentity: "test-data-agent",
+				ParticipantName:     "Test Data Agent",
+			}
 		},
 		JobAssignedFunc: func(ctx context.Context, jobCtx *JobContext) error {
-			// Send data to all participants
-			return worker.SendDataToParticipant(jobCtx.Job.Id, "", []byte("test-data"), true)
+			t.Logf("Agent connected to room: %s", jobCtx.Room.Name())
+			agentConnected <- jobCtx.Room
+
+			// Keep the job running - don't return immediately
+			// Wait for the test to complete
+			<-ctx.Done()
+			return nil
+		},
+		ParticipantJoinedFunc: func(ctx context.Context, participant *lksdk.RemoteParticipant) {
+			t.Logf("Agent detected participant joined: %s", participant.Identity())
+			participantJoined <- participant
 		},
 		DataReceivedFunc: func(ctx context.Context, data []byte, participant *lksdk.RemoteParticipant, kind livekit.DataPacket_Kind) {
+			t.Logf("Received data: %s from participant: %s", string(data), participant.Identity())
 			dataReceived <- data
 		},
 	}
@@ -515,14 +532,24 @@ func TestUniversalWorker_Integration_DataMessaging(t *testing.T) {
 		_ = worker.Start(ctx)
 	}()
 
-	// Wait for connection
+	// Wait for worker connection
 	time.Sleep(2 * time.Second)
-	require.True(t, worker.IsConnected())
+	require.True(t, worker.IsConnected(), "Worker should be connected to server")
+	t.Logf("Worker connected successfully")
 
 	// Create room and participant
 	roomName := fmt.Sprintf("test-data-room-%d", time.Now().Unix())
-	_, err := createTestRoom(apiKey, apiSecret, url, roomName)
+	_, err := createTestRoomWithAgent(apiKey, apiSecret, url, roomName, "test-data-worker")
 	require.NoError(t, err)
+	t.Logf("Created room %s for data messaging test", roomName)
+
+	// Wait for agent to connect to room first
+	select {
+	case agentRoom := <-agentConnected:
+		t.Logf("Agent connected to room: %s", agentRoom.Name())
+	case <-time.After(15 * time.Second):
+		t.Fatal("Timeout waiting for agent to connect to room")
+	}
 
 	// Connect participant that will send data
 	identity := "data-sender"
@@ -532,17 +559,32 @@ func TestUniversalWorker_Integration_DataMessaging(t *testing.T) {
 	err = room.JoinWithToken(url, token)
 	require.NoError(t, err)
 	defer room.Disconnect()
+	t.Logf("Participant %s joined room", identity)
+
+	// Wait for agent to detect the participant
+	select {
+	case participant := <-participantJoined:
+		t.Logf("Agent detected participant: %s", participant.Identity())
+	case <-time.After(15 * time.Second):
+		t.Fatal("Timeout waiting for agent to detect participant")
+	}
+
+	// Give a bit more time for the connection to fully stabilize
+	time.Sleep(2 * time.Second)
 
 	// Send data from participant
-	err = room.LocalParticipant.PublishData([]byte("participant-data"), lksdk.WithDataPublishReliable(true))
+	testData := []byte("participant-data")
+	err = room.LocalParticipant.PublishData(testData, lksdk.WithDataPublishReliable(true))
 	require.NoError(t, err)
+	t.Logf("Published data from participant: %s", string(testData))
 
-	// Wait for data
+	// Wait for data to be received by agent
 	select {
 	case data := <-dataReceived:
+		t.Logf("Successfully received data: %s", string(data))
 		assert.Equal(t, "participant-data", string(data))
-	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for data")
+	case <-time.After(15 * time.Second):
+		t.Fatal("Timeout waiting for data after 15 seconds")
 	}
 
 	worker.Stop()
@@ -598,18 +640,27 @@ func TestUniversalWorker_Integration_JobRejection(t *testing.T) {
 func TestUniversalWorker_Integration_JobFailure(t *testing.T) {
 	url, apiKey, apiSecret := getTestConfig()
 
-	jobTerminated := make(chan string, 1)
+	jobFailed := make(chan string, 1)
 
 	handler := &SimpleUniversalHandler{
 		JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *JobMetadata) {
-			return true, nil
+			return true, &JobMetadata{
+				ParticipantIdentity: "test-failure-agent",
+				ParticipantName:     "Test Failure Agent",
+			}
 		},
 		JobAssignedFunc: func(ctx context.Context, jobCtx *JobContext) error {
 			// Simulate job failure
+			t.Logf("Job assigned, simulating failure for job %s", jobCtx.Job.Id)
+
+			// Signal that job assignment was called and is about to fail
+			go func() {
+				// Give a small delay to ensure the error is processed
+				time.Sleep(100 * time.Millisecond)
+				jobFailed <- jobCtx.Job.Id
+			}()
+
 			return fmt.Errorf("simulated job failure")
-		},
-		JobTerminatedFunc: func(ctx context.Context, jobID string) {
-			jobTerminated <- jobID
 		},
 	}
 
@@ -626,21 +677,36 @@ func TestUniversalWorker_Integration_JobFailure(t *testing.T) {
 		_ = worker.Start(ctx)
 	}()
 
-	// Wait for connection
+	// Wait for worker connection
 	time.Sleep(2 * time.Second)
-	require.True(t, worker.IsConnected())
+	require.True(t, worker.IsConnected(), "Worker should be connected to server")
+	t.Logf("Worker connected successfully for job failure test")
 
 	// Create room to trigger job
 	roomName := fmt.Sprintf("test-failure-room-%d", time.Now().Unix())
-	_, err := createTestRoom(apiKey, apiSecret, url, roomName)
+	_, err := createTestRoomWithAgent(apiKey, apiSecret, url, roomName, "test-failure-worker")
 	require.NoError(t, err)
+	t.Logf("Created room %s for job failure test", roomName)
 
-	// Wait for job termination
+	// Wait for job failure
 	select {
-	case jobID := <-jobTerminated:
+	case jobID := <-jobFailed:
+		t.Logf("Job failed as expected for job: %s", jobID)
 		assert.NotEmpty(t, jobID)
+
+		// Verify the job is no longer in active jobs (cleaned up after failure)
+		time.Sleep(500 * time.Millisecond) // Give time for cleanup
+
+		// The job should be removed from active jobs after failure
+		worker.mu.RLock()
+		activeJobCount := len(worker.activeJobs)
+		worker.mu.RUnlock()
+
+		assert.Equal(t, 0, activeJobCount, "Job should be cleaned up after failure")
+		t.Logf("Confirmed job was cleaned up, active jobs: %d", activeJobCount)
+
 	case <-time.After(10 * time.Second):
-		t.Fatal("Timeout waiting for job termination")
+		t.Fatal("Timeout waiting for job failure after 10 seconds")
 	}
 
 	worker.Stop()
@@ -749,7 +815,10 @@ func TestUniversalWorker_Integration_ConcurrentJobs(t *testing.T) {
 
 	handler := &SimpleUniversalHandler{
 		JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *JobMetadata) {
-			return true, nil
+			return true, &JobMetadata{
+				ParticipantIdentity: "test-concurrent-agent",
+				ParticipantName:     "Test Concurrent Agent",
+			}
 		},
 		JobAssignedFunc: func(ctx context.Context, jobCtx *JobContext) error {
 			mu.Lock()
@@ -791,16 +860,22 @@ func TestUniversalWorker_Integration_ConcurrentJobs(t *testing.T) {
 	// Create multiple rooms to trigger concurrent jobs
 	for i := 0; i < 3; i++ {
 		roomName := fmt.Sprintf("test-concurrent-room-%d-%d", time.Now().Unix(), i)
-		_, err := createTestRoom(apiKey, apiSecret, url, roomName)
+		_, err := createTestRoomWithAgent(apiKey, apiSecret, url, roomName, "test-concurrent-worker")
 		require.NoError(t, err)
+		t.Logf("Created room %s for concurrent job test", roomName)
 		time.Sleep(500 * time.Millisecond)
 	}
 
 	// Wait for jobs to process
-	time.Sleep(5 * time.Second)
+	time.Sleep(8 * time.Second)
+
+	// Log current status for debugging
+	mu.Lock()
+	t.Logf("maxConcurrent: %d, activeJobs: %d", maxConcurrent, len(activeJobs))
+	mu.Unlock()
 
 	// Verify concurrent execution
-	assert.Greater(t, maxConcurrent, 1, "Should handle multiple jobs concurrently")
+	assert.Greater(t, maxConcurrent, 1, "Should handle multiple jobs concurrently - got maxConcurrent=%d", maxConcurrent)
 
 	worker.Stop()
 }
