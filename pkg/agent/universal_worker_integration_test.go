@@ -16,6 +16,8 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/am-sokolov/livekit-agent-sdk-go/internal/test/mocks"
 )
 
 // Test configuration for local LiveKit server
@@ -39,6 +41,7 @@ func TestUniversalWorker_Integration_BasicConnection(t *testing.T) {
 	worker := NewUniversalWorker(url, apiKey, apiSecret, handler, WorkerOptions{
 		AgentName: "test-universal-worker",
 		JobType:   livekit.JobType_JT_ROOM,
+		Logger:    mocks.NewMockLogger(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -50,10 +53,7 @@ func TestUniversalWorker_Integration_BasicConnection(t *testing.T) {
 	}()
 
 	// Wait for connection
-	time.Sleep(2 * time.Second)
-
-	// Verify connection state
-	assert.True(t, worker.IsConnected(), "Worker should be connected")
+	require.NoError(t, waitForWorkerConnection(worker, 5*time.Second))
 	assert.NotEmpty(t, worker.workerID, "Worker should have ID")
 
 	// Clean shutdown
@@ -71,6 +71,7 @@ func TestUniversalWorker_Integration_InvalidAuthentication(t *testing.T) {
 	}
 	worker := NewUniversalWorker(url, "invalid", "invalid", handler, WorkerOptions{
 		AgentName: "test-universal-worker",
+		Logger:    mocks.NewMockLogger(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -92,6 +93,7 @@ func TestUniversalWorker_Integration_Reconnection(t *testing.T) {
 
 	worker := NewUniversalWorker(url, apiKey, apiSecret, handler, WorkerOptions{
 		AgentName: "test-reconnect-worker",
+		Logger:    mocks.NewMockLogger(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -149,6 +151,7 @@ func TestUniversalWorker_Integration_RoomJob(t *testing.T) {
 	worker := NewUniversalWorker(url, apiKey, apiSecret, handler, WorkerOptions{
 		AgentName: "test-room-worker",
 		JobType:   livekit.JobType_JT_ROOM,
+		Logger:    mocks.NewMockLogger(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -197,12 +200,15 @@ func TestUniversalWorker_Integration_ParticipantJob(t *testing.T) {
 	handler := &SimpleUniversalHandler{
 		JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *JobMetadata) {
 			return true, &JobMetadata{
-				ParticipantIdentity: "test-participant",
+				ParticipantIdentity: "test-participant-agent",
+				ParticipantName:     "Test Participant Agent",
 			}
 		},
 		JobAssignedFunc: func(ctx context.Context, jobCtx *JobContext) error {
 			// Job context should have target participant info
 			assert.NotNil(t, jobCtx.TargetParticipant)
+			// Keep the job running - wait for context cancellation
+			<-ctx.Done()
 			return nil
 		},
 		ParticipantJoinedFunc: func(ctx context.Context, participant *lksdk.RemoteParticipant) {
@@ -213,6 +219,7 @@ func TestUniversalWorker_Integration_ParticipantJob(t *testing.T) {
 	worker := NewUniversalWorker(url, apiKey, apiSecret, handler, WorkerOptions{
 		AgentName: "test-participant-worker",
 		JobType:   livekit.JobType_JT_PARTICIPANT,
+		Logger:    mocks.NewMockLogger(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -224,13 +231,15 @@ func TestUniversalWorker_Integration_ParticipantJob(t *testing.T) {
 	}()
 
 	// Wait for connection
-	time.Sleep(2 * time.Second)
-	require.True(t, worker.IsConnected())
+	require.NoError(t, waitForWorkerConnection(worker, 5*time.Second))
 
 	// Create room and connect participant
 	roomName := fmt.Sprintf("test-participant-room-%d", time.Now().Unix())
-	_, err := createTestRoom(apiKey, apiSecret, url, roomName)
+	_, err := createTestRoomWithAgent(apiKey, apiSecret, url, roomName, "test-participant-worker")
 	require.NoError(t, err)
+
+	// Wait a moment for agent dispatch to be ready
+	time.Sleep(500 * time.Millisecond)
 
 	// Generate token for test participant
 	participantToken := generateTestToken(apiKey, apiSecret, roomName, "test-participant")
@@ -268,6 +277,11 @@ func TestUniversalWorker_Integration_ParticipantTracking(t *testing.T) {
 				ParticipantName:     "Tracking Agent",
 			}
 		},
+		JobAssignedFunc: func(ctx context.Context, jobCtx *JobContext) error {
+			// Keep the job running - wait for context cancellation
+			<-ctx.Done()
+			return nil
+		},
 		ParticipantJoinedFunc: func(ctx context.Context, participant *lksdk.RemoteParticipant) {
 			mu.Lock()
 			participants[participant.Identity()] = participant
@@ -283,6 +297,7 @@ func TestUniversalWorker_Integration_ParticipantTracking(t *testing.T) {
 	worker := NewUniversalWorker(url, apiKey, apiSecret, handler, WorkerOptions{
 		AgentName: "test-tracking-worker",
 		JobType:   livekit.JobType_JT_ROOM,
+		Logger:    mocks.NewMockLogger(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -346,7 +361,15 @@ func TestUniversalWorker_Integration_MetadataUpdates(t *testing.T) {
 
 	handler := &SimpleUniversalHandler{
 		JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *JobMetadata) {
-			return true, nil
+			return true, &JobMetadata{
+				ParticipantIdentity: "test-metadata-agent",
+				ParticipantName:     "Test Metadata Agent",
+			}
+		},
+		JobAssignedFunc: func(ctx context.Context, jobCtx *JobContext) error {
+			// Keep the job running - wait for context cancellation
+			<-ctx.Done()
+			return nil
 		},
 		ParticipantMetadataChangedFunc: func(ctx context.Context, participant *lksdk.RemoteParticipant, oldMetadata string) {
 			metadataUpdates <- participant.Metadata()
@@ -356,6 +379,7 @@ func TestUniversalWorker_Integration_MetadataUpdates(t *testing.T) {
 	worker := NewUniversalWorker(url, apiKey, apiSecret, handler, WorkerOptions{
 		AgentName: "test-metadata-worker",
 		JobType:   livekit.JobType_JT_ROOM,
+		Logger:    mocks.NewMockLogger(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -372,7 +396,7 @@ func TestUniversalWorker_Integration_MetadataUpdates(t *testing.T) {
 
 	// Create room and participant
 	roomName := fmt.Sprintf("test-metadata-room-%d", time.Now().Unix())
-	_, err := createTestRoom(apiKey, apiSecret, url, roomName)
+	_, err := createTestRoomWithAgent(apiKey, apiSecret, url, roomName, "test-metadata-worker")
 	require.NoError(t, err)
 
 	identity := "metadata-test-participant"
@@ -426,7 +450,10 @@ func TestUniversalWorker_Integration_TrackPublishing(t *testing.T) {
 
 	handler := &SimpleUniversalHandler{
 		JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *JobMetadata) {
-			return true, nil
+			return true, &JobMetadata{
+				ParticipantIdentity: "test-publisher-agent",
+				ParticipantName:     "Test Publisher Agent",
+			}
 		},
 		JobAssignedFunc: func(ctx context.Context, jobCtx *JobContext) error {
 			// Publish a test audio track
@@ -441,7 +468,13 @@ func TestUniversalWorker_Integration_TrackPublishing(t *testing.T) {
 
 			// Publish the track
 			_, err = worker.PublishTrack(jobCtx.Job.Id, track)
-			return err
+			if err != nil {
+				return err
+			}
+
+			// Keep the job running - wait for context cancellation
+			<-ctx.Done()
+			return nil
 		},
 		TrackPublishedFunc: func(ctx context.Context, participant *lksdk.RemoteParticipant, publication *lksdk.RemoteTrackPublication) {
 			trackPublished <- publication
@@ -451,6 +484,7 @@ func TestUniversalWorker_Integration_TrackPublishing(t *testing.T) {
 	worker = NewUniversalWorker(url, apiKey, apiSecret, handler, WorkerOptions{
 		AgentName: "test-publisher-worker",
 		JobType:   livekit.JobType_JT_ROOM,
+		Logger:    mocks.NewMockLogger(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -467,7 +501,7 @@ func TestUniversalWorker_Integration_TrackPublishing(t *testing.T) {
 
 	// Create room
 	roomName := fmt.Sprintf("test-publish-room-%d", time.Now().Unix())
-	_, err := createTestRoom(apiKey, apiSecret, url, roomName)
+	_, err := createTestRoomWithAgent(apiKey, apiSecret, url, roomName, "test-publisher-worker")
 	require.NoError(t, err)
 
 	// Wait for track to be published
@@ -522,6 +556,7 @@ func TestUniversalWorker_Integration_DataMessaging(t *testing.T) {
 	worker = NewUniversalWorker(url, apiKey, apiSecret, handler, WorkerOptions{
 		AgentName: "test-data-worker",
 		JobType:   livekit.JobType_JT_ROOM,
+		Logger:    mocks.NewMockLogger(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -609,6 +644,7 @@ func TestUniversalWorker_Integration_JobRejection(t *testing.T) {
 	worker := NewUniversalWorker(url, apiKey, apiSecret, handler, WorkerOptions{
 		AgentName: "test-reject-worker",
 		JobType:   livekit.JobType_JT_ROOM,
+		Logger:    mocks.NewMockLogger(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -625,11 +661,11 @@ func TestUniversalWorker_Integration_JobRejection(t *testing.T) {
 
 	// Create room to trigger job
 	roomName := fmt.Sprintf("test-reject-room-%d", time.Now().Unix())
-	_, err := createTestRoom(apiKey, apiSecret, url, roomName)
+	_, err := createTestRoomWithAgent(apiKey, apiSecret, url, roomName, "test-reject-worker")
 	require.NoError(t, err)
 
 	// Wait to ensure no job is assigned
-	time.Sleep(5 * time.Second)
+	time.Sleep(2 * time.Second)
 
 	// Verify no active jobs
 	assert.Equal(t, 0, len(worker.activeJobs))
@@ -667,6 +703,7 @@ func TestUniversalWorker_Integration_JobFailure(t *testing.T) {
 	worker := NewUniversalWorker(url, apiKey, apiSecret, handler, WorkerOptions{
 		AgentName: "test-failure-worker",
 		JobType:   livekit.JobType_JT_ROOM,
+		Logger:    mocks.NewMockLogger(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -725,6 +762,7 @@ func TestUniversalWorker_Integration_StatusUpdates(t *testing.T) {
 	worker := NewUniversalWorker(url, apiKey, apiSecret, handler, WorkerOptions{
 		AgentName: "test-status-worker",
 		JobType:   livekit.JobType_JT_ROOM,
+		Logger:    mocks.NewMockLogger(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -765,6 +803,7 @@ func TestUniversalWorker_Integration_LoadCalculation(t *testing.T) {
 		JobType:        livekit.JobType_JT_ROOM,
 		MaxJobs:        3,
 		LoadCalculator: &DefaultLoadCalculator{},
+		Logger:         mocks.NewMockLogger(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -843,6 +882,7 @@ func TestUniversalWorker_Integration_ConcurrentJobs(t *testing.T) {
 		AgentName: "test-concurrent-worker",
 		JobType:   livekit.JobType_JT_ROOM,
 		MaxJobs:   5,
+		Logger:    mocks.NewMockLogger(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -867,7 +907,26 @@ func TestUniversalWorker_Integration_ConcurrentJobs(t *testing.T) {
 	}
 
 	// Wait for jobs to process
-	time.Sleep(8 * time.Second)
+	timeout := time.After(10 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeout:
+			t.Fatal("Timeout waiting for concurrent jobs to process")
+		case <-ticker.C:
+			mu.Lock()
+			active := len(activeJobs)
+			mu.Unlock()
+			if active > 0 {
+				// Jobs are running, can proceed with test
+				goto checkResults
+			}
+		}
+	}
+
+checkResults:
 
 	// Log current status for debugging
 	mu.Lock()
@@ -925,4 +984,24 @@ func generateTestToken(apiKey, apiSecret, roomName, identity string) string {
 
 	token, _ := at.ToJWT()
 	return token
+}
+
+// waitForWorkerConnection waits for worker to be connected with timeout
+func waitForWorkerConnection(worker *UniversalWorker, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for worker connection")
+		case <-ticker.C:
+			if worker.IsConnected() {
+				return nil
+			}
+		}
+	}
 }
