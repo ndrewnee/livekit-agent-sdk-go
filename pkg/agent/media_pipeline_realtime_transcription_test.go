@@ -171,17 +171,29 @@ func (m *MockRealtimeServer) Close() {
 	m.server.Close()
 }
 
+// createTestStage creates a test stage with default config
+func createTestStage(name string, priority int, apiKey, model, language string) *RealtimeTranscriptionStage {
+	config := &RealtimeTranscriptionConfig{
+		Name:     name,
+		Priority: priority,
+		APIKey:   apiKey,
+		Model:    model,
+		Language: language,
+	}
+	return NewRealtimeTranscriptionStage(config)
+}
+
 // TestRealtimeTranscriptionStageCreation tests stage creation
 func TestRealtimeTranscriptionStageCreation(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	assert.NotNil(t, stage)
 	assert.Equal(t, "transcription", stage.GetName())
 	assert.Equal(t, 20, stage.GetPriority())
 	assert.True(t, stage.CanProcess(MediaTypeAudio))
 	assert.False(t, stage.CanProcess(MediaTypeVideo))
-	assert.Equal(t, "gpt-4o-transcribe", stage.model)
-	assert.Equal(t, "alloy", stage.voiceMode)
+	assert.Equal(t, "gpt-4o-transcribe", stage.config.Model)
+	assert.Equal(t, "alloy", stage.config.Voice)
 	assert.NotNil(t, stage.stats)
 	assert.False(t, stage.IsConnected())
 }
@@ -193,7 +205,7 @@ func TestRealtimeTranscriptionProcess(t *testing.T) {
 		t.Skip("Skipping RealtimeTranscriptionProcess test: OPENAI_API_KEY not set")
 	}
 
-	stage := NewRealtimeTranscriptionStage("transcription", 20, apiKey, "", "en")
+	stage := createTestStage("transcription", 20, apiKey, "", "en")
 	ctx := context.Background()
 
 	// Process audio data
@@ -227,7 +239,7 @@ func TestRealtimeTranscriptionProcess(t *testing.T) {
 
 // TestRealtimeTranscriptionCallbacks tests transcription callbacks
 func TestRealtimeTranscriptionCallbacks(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	receivedEvents := make([]TranscriptionEvent, 0)
 	var mu sync.Mutex
@@ -293,7 +305,7 @@ func TestRealtimeTranscriptionCallbacks(t *testing.T) {
 
 // TestRealtimeTranscriptionHandlers tests message handlers
 func TestRealtimeTranscriptionHandlers(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	receivedTranscriptions := make([]string, 0)
 	var mu sync.Mutex
@@ -349,7 +361,7 @@ func TestRealtimeTranscriptionHandlers(t *testing.T) {
 
 // TestRealtimeErrorHandling tests error handling
 func TestRealtimeErrorHandling(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	var receivedError error
 	var mu sync.Mutex
@@ -384,7 +396,7 @@ func TestRealtimeErrorHandling(t *testing.T) {
 
 // TestRealtimeDataChannelMessage tests data channel message handling
 func TestRealtimeDataChannelMessage(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	var receivedText string
 	var mu sync.Mutex
@@ -423,7 +435,7 @@ func TestRealtimeDataChannelMessage(t *testing.T) {
 
 // TestRealtimeEventProcessing tests event processing
 func TestRealtimeEventProcessing(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	transcriptions := make([]TranscriptionEvent, 0)
 	var mu sync.Mutex
@@ -486,7 +498,7 @@ func TestRealtimeEventProcessing(t *testing.T) {
 
 // TestRealtimeStatistics tests statistics tracking
 func TestRealtimeStatistics(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	// Don't try to connect in Process - the test will only test the manual stats update
 	// Process some audio packets without connection attempts would just skip them
@@ -520,7 +532,7 @@ func TestRealtimeStatistics(t *testing.T) {
 
 // TestRealtimeDisconnection tests disconnection handling
 func TestRealtimeDisconnection(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	// Simulate connection with a mock peer connection
 	stage.connected = true
@@ -547,7 +559,7 @@ func TestRealtimeIntegrationWithPipeline(t *testing.T) {
 	pipeline := NewMediaPipeline()
 
 	// Add Realtime transcription stage
-	transcriptionStage := NewRealtimeTranscriptionStage(
+	transcriptionStage := createTestStage(
 		"realtime-transcription",
 		15,
 		"test-api-key",
@@ -575,7 +587,7 @@ func TestRealtimeIntegrationWithPipeline(t *testing.T) {
 
 // TestRealtimeConcurrentOperations tests thread safety
 func TestRealtimeConcurrentOperations(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "", "en")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	// Add multiple callbacks concurrently
 	var wg sync.WaitGroup

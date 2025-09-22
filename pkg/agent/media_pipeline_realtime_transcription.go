@@ -38,10 +38,8 @@ type RealtimeTranscriptionStage struct {
 	name     string
 	priority int
 
-	// OpenAI configuration
-	apiKey                   string
-	model                    string //
-	voiceMode                string // e.g., "text" for transcription only
+	// Configuration
+	config                   *RealtimeTranscriptionConfig
 	audioTranscriptionConfig *AudioTranscriptionConfig
 	turnDetection            *TurnDetection
 
@@ -71,6 +69,11 @@ type RealtimeTranscriptionStage struct {
 
 	// Latest transcription for pipeline output
 	latestTranscription *TranscriptionEvent
+
+	// RTP packet tracking
+	sequenceNumber uint16
+	timestampBase  uint32
+	ssrc           uint32
 }
 
 type NoiseReduction struct {
@@ -86,11 +89,23 @@ type AudioTranscriptionConfig struct {
 type TurnDetection struct {
 	Type              string  `json:"type,omitempty"`
 	Threshold         float64 `json:"threshold,omitempty"`
-	SilenceDuration   float64 `json:"silence_duration_ms,omitempty"`
-	PreffixPadding    float64 `json:"prefix_padding_ms,omitempty"`
+	SilenceDurationMs float64 `json:"silence_duration_ms,omitempty"`
+	PrefixPaddingMs   float64 `json:"prefix_padding_ms,omitempty"`
 	InterruptResponse bool    `json:"interrupt_response,omitempty"`
 	Eagerness         string  `json:"eagerness,omitempty"`
 	CreateResponse    bool    `json:"create_response,omitempty"`
+}
+
+// RealtimeTranscriptionConfig contains configuration for creating a RealtimeTranscriptionStage.
+type RealtimeTranscriptionConfig struct {
+	Name      string         // Unique identifier for this stage
+	Priority  int            // Execution order (lower runs first)
+	APIKey    string         // OpenAI API key for authentication
+	Model     string         // Model to use (defaults to "gpt-4o-transcribe")
+	Language  string         // Language code (e.g., "en", "ru", "zh", "ar")
+	Prompt    string         // Context prompt for better transcription accuracy
+	Voice     string         // Voice to use (e.g., "alloy", "echo", "fable", "onyx", "nova", "shimmer")
+	VADConfig *TurnDetection // Optional VAD configuration (auto-configured if nil)
 }
 
 // TranscriptionCallback is called when transcription events occur.
@@ -206,46 +221,128 @@ type RealtimeTranscriptionStats struct {
 
 // NewRealtimeTranscriptionStage creates a new OpenAI Realtime transcription stage.
 //
-// Parameters:
-//   - name: Unique identifier for this stage
-//   - priority: Execution order (lower runs first)
-//   - apiKey: OpenAI API key for authentication
-//   - model: Model to use (empty for default)
-//   - language: Language code for transcription (e.g., "en", "es", "fr")
-//
 // The stage will establish a WebRTC connection to OpenAI's Realtime API
-// and stream audio for transcription.
-func NewRealtimeTranscriptionStage(name string, priority int, apiKey, model, language string) *RealtimeTranscriptionStage {
-	if model == "" {
-		// Use the transcription model for WebRTC connection
-		model = "gpt-4o-transcribe"
+// and stream audio for transcription with optimized settings based on language.
+func NewRealtimeTranscriptionStage(config *RealtimeTranscriptionConfig) *RealtimeTranscriptionStage {
+	if config == nil {
+		panic("config cannot be nil")
 	}
 
+	// Apply defaults to config
+	if config.Model == "" {
+		config.Model = "gpt-4o-transcribe"
+	}
+	if config.Voice == "" {
+		config.Voice = "alloy" // Default voice
+	}
+
+	// Create audio transcription config
+	audioConfig := &AudioTranscriptionConfig{
+		Model:    config.Model,
+		Language: config.Language,
+		Prompt:   config.Prompt,
+	}
+
+	// Use provided VAD config or create default optimized for the language
+	vadConfig := config.VADConfig
+	if vadConfig == nil {
+		vadConfig = getDefaultVADConfig(config.Language)
+	}
+
+	// Generate unique SSRC for this session
+	ssrc := uint32(time.Now().UnixNano() & 0xFFFFFFFF)
+
 	return &RealtimeTranscriptionStage{
-		name:      name,
-		priority:  priority,
-		apiKey:    apiKey,
-		model:     model,
-		voiceMode: "alloy", // Default voice (required even for transcription)
-		audioTranscriptionConfig: &AudioTranscriptionConfig{
-			Model:    model,
-			Language: language,
-		},
+		name:                         config.Name,
+		priority:                     config.Priority,
+		config:                       config,
+		audioTranscriptionConfig:     audioConfig,
+		turnDetection:                vadConfig,
 		transcriptionCallbacks:       make([]TranscriptionCallback, 0),
 		beforeTranscriptionCallbacks: make([]BeforeTranscriptionCallback, 0),
 		eventChan:                    make(chan RealtimeEvent, 100),
 		closeChan:                    make(chan struct{}),
 		stats:                        &RealtimeTranscriptionStats{},
-		turnDetection: &TurnDetection{
-			Type:              "server_vad",
-			Threshold:         0,
-			SilenceDuration:   0,
-			PreffixPadding:    0,
-			InterruptResponse: false,
-			Eagerness:         "",
-			CreateResponse:    false,
-		},
+		// RTP packet tracking
+		sequenceNumber: 0,
+		timestampBase:  uint32(time.Now().UnixNano() / 1000000), // Start with current time in ms
+		ssrc:           ssrc,
 	}
+}
+
+// getDefaultVADConfig returns language-optimized voice activity detection settings
+func getDefaultVADConfig(language string) *TurnDetection {
+	config := &TurnDetection{
+		Type:              "server_vad",
+		Threshold:         0.5,
+		SilenceDurationMs: 500, // Default 500ms
+		PrefixPaddingMs:   300, // Default 300ms padding
+		InterruptResponse: false,
+		Eagerness:         "",
+		CreateResponse:    false,
+	}
+
+	// Language-specific optimizations based on speech patterns
+	switch language {
+	case "ru": // Russian
+		// Russian speakers tend to have longer pauses between words
+		config.SilenceDurationMs = 800
+		config.PrefixPaddingMs = 400
+	case "ar": // Arabic
+		// Arabic has complex consonant clusters and longer utterances
+		config.SilenceDurationMs = 700
+		config.PrefixPaddingMs = 350
+	case "ja": // Japanese
+		// Japanese has different pause patterns and mora timing
+		config.SilenceDurationMs = 700
+		config.PrefixPaddingMs = 350
+	case "ko": // Korean
+		// Korean has syllable timing and longer processing pauses
+		config.SilenceDurationMs = 650
+		config.PrefixPaddingMs = 350
+	case "zh": // Chinese (Mandarin)
+		// Chinese tonal languages benefit from longer context
+		config.SilenceDurationMs = 600
+		config.PrefixPaddingMs = 350
+	case "hi": // Hindi
+		// Hindi has complex consonant clusters
+		config.SilenceDurationMs = 600
+		config.PrefixPaddingMs = 300
+	case "bn": // Bengali
+		// Bengali has similar patterns to Hindi
+		config.SilenceDurationMs = 600
+		config.PrefixPaddingMs = 300
+	case "ur": // Urdu
+		// Urdu similar to Hindi with Arabic influence
+		config.SilenceDurationMs = 650
+		config.PrefixPaddingMs = 320
+	case "tr": // Turkish
+		// Turkish has agglutinative structure with longer words
+		config.SilenceDurationMs = 550
+		config.PrefixPaddingMs = 280
+	case "de": // German
+		// German has compound words and different rhythm
+		config.SilenceDurationMs = 450
+		config.PrefixPaddingMs = 280
+	case "es", "pt", "fr", "it": // Romance languages
+		// Romance languages often have faster speech with shorter pauses
+		config.SilenceDurationMs = 400
+		config.PrefixPaddingMs = 250
+	case "id": // Indonesian
+		// Indonesian has syllable timing
+		config.SilenceDurationMs = 450
+		config.PrefixPaddingMs = 270
+	case "ha": // Hausa
+		// Hausa has tonal elements
+		config.SilenceDurationMs = 550
+		config.PrefixPaddingMs = 300
+	case "en": // English
+		// English baseline - stress-timed language
+		config.SilenceDurationMs = 500
+		config.PrefixPaddingMs = 300
+	}
+
+	return config
 }
 
 // GetName implements MediaPipelineStage.
@@ -294,14 +391,23 @@ func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaD
 		// The audio data from LiveKit is already in Opus format
 		// WebRTC accepts Opus directly
 
-		// Create RTP packet from Opus audio
+		// Create RTP packet from Opus audio with proper timestamps
+		rts.mu.Lock()
+		rts.sequenceNumber++
+		seqNum := rts.sequenceNumber
+		ssrc := rts.ssrc
+		// Calculate timestamp: Opus typically uses 48kHz sample rate
+		// For 20ms frames (typical), increment by 960 samples (48000 * 0.02)
+		timestamp := rts.timestampBase + uint32(seqNum)*960
+		rts.mu.Unlock()
+
 		rtpPacket := &rtp.Packet{
 			Header: rtp.Header{
 				Version:        2,
 				PayloadType:    111, // Opus payload type
-				SequenceNumber: uint16(time.Now().UnixNano() & 0xFFFF),
-				Timestamp:      uint32(time.Now().UnixNano() / 1000),
-				SSRC:           12345,
+				SequenceNumber: seqNum,
+				Timestamp:      timestamp,
+				SSRC:           ssrc,
 			},
 			Payload: input.Data,
 		}
@@ -314,14 +420,7 @@ func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaD
 			rts.stats.mu.Lock()
 			rts.stats.AudioPacketsSent++
 			rts.stats.BytesTranscribed += uint64(len(input.Data))
-			// packetsSent := rts.stats.AudioPacketsSent
 			rts.stats.mu.Unlock()
-
-			// Periodically commit audio buffer to trigger transcription
-			// With whisper-1 model, we need to explicitly commit
-			//if packetsSent%100 == 0 {
-			//	rts.commitAudioBufferViaDataChannel()
-			//}
 		}
 	}
 
@@ -501,8 +600,8 @@ func (rts *RealtimeTranscriptionStage) connectWithoutLock(ctx context.Context) e
 	go rts.processEvents()
 
 	getLogger.Infow("WebRTC connection established with OpenAI Realtime API",
-		"model", rts.model,
-		"voiceMode", rts.voiceMode)
+		"model", rts.config.Model,
+		"voice", rts.config.Voice)
 
 	return nil
 }
@@ -517,8 +616,7 @@ func (rts *RealtimeTranscriptionStage) getEphemeralKey(ctx context.Context) (str
 	// The ephemeral key endpoint for WebRTC is different
 	url := "https://api.openai.com/v1/realtime/transcription_sessions"
 
-	// Only send the model for session creation
-	// For ephemeral key, we use gpt-4o-transcribe
+	// Create session configuration with parameters accepted by OpenAI API
 	reqBody := CreateSessionRequest{
 		InputAudioTranscription: rts.audioTranscriptionConfig,
 		TurnDetection:           rts.turnDetection,
@@ -534,7 +632,7 @@ func (rts *RealtimeTranscriptionStage) getEphemeralKey(ctx context.Context) (str
 		return "", err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+rts.apiKey)
+	req.Header.Set("Authorization", "Bearer "+rts.config.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("OpenAI-Beta", "realtime=v1")
 
@@ -646,47 +744,6 @@ func (rts *RealtimeTranscriptionStage) exchangeSDPWithOpenAI(ctx context.Context
 	}
 
 	return &answer, nil
-}
-
-// Removed connectWebSocketWithKey - using WebRTC only
-
-// sendDataChannelConfig sends session configuration via data channel.
-//
-//nolint:unused // Reserved for future functionality
-func (rts *RealtimeTranscriptionStage) sendDataChannelConfig() error {
-	if rts.dataChannel == nil || rts.dataChannel.ReadyState() != webrtc.DataChannelStateOpen {
-		return fmt.Errorf("data channel not open")
-	}
-
-	// Send session configuration for transcription as per OpenAI guide
-	// https://platform.openai.com/docs/guides/realtime-transcription
-	sessionMsg := map[string]interface{}{
-		"type": "session.update",
-		"session": map[string]interface{}{
-			// Set modalities to text only to prevent audio generation
-			"modalities": []string{"text"},
-
-			// Configure transcription with whisper-1 model (currently supported)
-			"input_audio_transcription": rts.audioTranscriptionConfig,
-
-			// Disable turn detection for pure transcription
-			"turn_detection": rts.turnDetection,
-
-			// Set temperature for transcription (0.8 recommended)
-			"temperature": 0.8,
-		},
-	}
-
-	data, err := json.Marshal(sessionMsg)
-	if err != nil {
-		return err
-	}
-
-	getLogger := logger.GetLogger()
-	getLogger.Infow("Sending session configuration via data channel", "config", sessionMsg)
-	fmt.Printf("📤 Sending session config: %v\n", sessionMsg)
-
-	return rts.dataChannel.SendText(string(data))
 }
 
 // Removed WebSocket message handling - using WebRTC data channel only
@@ -1059,30 +1116,11 @@ func (rts *RealtimeTranscriptionStage) Disconnect() {
 	getLogger.Infow("disconnected from OpenAI Realtime API")
 }
 
-// commitAudioBufferViaDataChannel sends commit message via data channel
-//
-//nolint:unused // Reserved for future functionality
-func (rts *RealtimeTranscriptionStage) commitAudioBufferViaDataChannel() {
-	if rts.dataChannel == nil || rts.dataChannel.ReadyState() != webrtc.DataChannelStateOpen {
-		return
-	}
-
-	// Commit audio buffer to trigger transcription
-	commitMsg := map[string]interface{}{
-		"type": "input_audio_buffer.commit",
-	}
-
-	data, err := json.Marshal(commitMsg)
-	if err != nil {
-		return
-	}
-
-	if err := rts.dataChannel.SendText(string(data)); err != nil {
-		getLogger := logger.GetLogger()
-		getLogger.Debugw("failed to commit audio buffer", "error", err)
-	} else {
-		fmt.Println("📤 Committing audio buffer for transcription")
-	}
+// GetConfig returns the current configuration.
+func (rts *RealtimeTranscriptionStage) GetConfig() *RealtimeTranscriptionConfig {
+	rts.mu.RLock()
+	defer rts.mu.RUnlock()
+	return rts.config
 }
 
 // GetStats returns current transcription statistics.
@@ -1110,7 +1148,7 @@ func (rts *RealtimeTranscriptionStage) GetStats() RealtimeTranscriptionStats {
 func (rts *RealtimeTranscriptionStage) SetModel(model string) {
 	rts.mu.Lock()
 	defer rts.mu.Unlock()
-	rts.model = model
+	rts.config.Model = model
 }
 
 // SetLanguage sets the language for transcription.
@@ -1119,5 +1157,24 @@ func (rts *RealtimeTranscriptionStage) SetLanguage(language string) {
 	defer rts.mu.Unlock()
 	if rts.audioTranscriptionConfig != nil {
 		rts.audioTranscriptionConfig.Language = language
+	}
+}
+
+// SetVoice sets the voice for audio generation.
+// Available voices: "alloy", "echo", "fable", "onyx", "nova", "shimmer"
+func (rts *RealtimeTranscriptionStage) SetVoice(voice string) {
+	rts.mu.Lock()
+	defer rts.mu.Unlock()
+	if voice != "" {
+		rts.config.Voice = voice
+	}
+}
+
+// SetPrompt sets the context prompt for better transcription accuracy.
+func (rts *RealtimeTranscriptionStage) SetPrompt(prompt string) {
+	rts.mu.Lock()
+	defer rts.mu.Unlock()
+	if rts.audioTranscriptionConfig != nil {
+		rts.audioTranscriptionConfig.Prompt = prompt
 	}
 }
