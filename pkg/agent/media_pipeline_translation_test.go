@@ -17,7 +17,11 @@ type TranslationStageTestSuite struct {
 
 func (suite *TranslationStageTestSuite) SetupTest() {
 	// Create a translation stage for testing
-	suite.stage = NewTranslationStage("test-translation", 30, "test-api-key", "")
+	suite.stage = NewTranslationStage(&TranslationConfig{
+		Name:     "test-translation",
+		Priority: 30,
+		APIKey:   "test-api-key",
+	})
 }
 
 func (suite *TranslationStageTestSuite) TearDownTest() {

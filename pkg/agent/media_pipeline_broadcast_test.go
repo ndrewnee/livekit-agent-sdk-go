@@ -22,11 +22,17 @@ func (suite *BroadcastStageTestSuite) SetupTest() {
 	suite.ctx = context.Background()
 	suite.mockRoom = NewMockRoom()
 
-	suite.stage = NewBroadcastStage("test-broadcast", 20)
+	suite.stage = NewBroadcastStage(&BroadcastConfig{
+		Name:     "test-broadcast",
+		Priority: 20,
+	})
 }
 
 func (suite *BroadcastStageTestSuite) TestNewBroadcastStage() {
-	stage := NewBroadcastStage("broadcast", 20)
+	stage := NewBroadcastStage(&BroadcastConfig{
+		Name:     "broadcast",
+		Priority: 20,
+	})
 
 	assert.Equal(suite.T(), "broadcast", stage.GetName())
 	assert.Equal(suite.T(), 20, stage.GetPriority())

@@ -35,7 +35,13 @@ func (suite *TTSIntegrationSuite) SetupSuite() {
 
 func (suite *TTSIntegrationSuite) SetupTest() {
 	// Create real TTS stage with OpenAI API
-	suite.stage = NewTextToSpeechStage("integration-tts", 50, suite.apiKey, "tts-1", "alloy")
+	suite.stage = NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "integration-tts",
+		Priority: 50,
+		APIKey:   suite.apiKey,
+		Model:    "tts-1",
+		Voice:    "alloy",
+	})
 }
 
 func (suite *TTSIntegrationSuite) TestRealOpenAITTSGeneration() {
@@ -125,7 +131,13 @@ func (suite *TTSIntegrationSuite) TestRealErrorHandling() {
 
 func (suite *TTSIntegrationSuite) TestRealRateLimiting() {
 	// Create a stage with lower rate limit for testing
-	stage := NewTextToSpeechStage("rate-limit-test", 50, suite.apiKey, "tts-1", "alloy")
+	stage := NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "rate-limit-test",
+		Priority: 50,
+		APIKey:   suite.apiKey,
+		Model:    "tts-1",
+		Voice:    "alloy",
+	})
 
 	// Make several rapid requests to test rate limiting
 	var successCount, rateLimitCount int
@@ -150,7 +162,13 @@ func (suite *TTSIntegrationSuite) TestRealRateLimiting() {
 
 func (suite *TTSIntegrationSuite) TestRealCircuitBreaker() {
 	// Create stage with invalid API key to trigger failures
-	invalidStage := NewTextToSpeechStage("circuit-test", 50, "invalid-key", "tts-1", "alloy")
+	invalidStage := NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "circuit-test",
+		Priority: 50,
+		APIKey:   "invalid-key",
+		Model:    "tts-1",
+		Voice:    "alloy",
+	})
 
 	// Make requests to trip the circuit breaker
 	var errorCount int
@@ -172,7 +190,13 @@ func (suite *TTSIntegrationSuite) TestRealDifferentVoices() {
 
 	for _, voice := range voices {
 		suite.T().Run("voice_"+voice, func(t *testing.T) {
-			stage := NewTextToSpeechStage("voice-test", 50, suite.apiKey, "tts-1", voice)
+			stage := NewTextToSpeechStage(&TextToSpeechConfig{
+				Name:     "voice-test",
+				Priority: 50,
+				APIKey:   suite.apiKey,
+				Model:    "tts-1",
+				Voice:    voice,
+			})
 
 			audioData, err := stage.generateTTS(suite.ctx, "Testing different voices.")
 
@@ -188,7 +212,13 @@ func (suite *TTSIntegrationSuite) TestRealDifferentModels() {
 
 	for _, model := range models {
 		suite.T().Run("model_"+model, func(t *testing.T) {
-			stage := NewTextToSpeechStage("model-test", 50, suite.apiKey, model, "alloy")
+			stage := NewTextToSpeechStage(&TextToSpeechConfig{
+				Name:     "model-test",
+				Priority: 50,
+				APIKey:   suite.apiKey,
+				Model:    model,
+				Voice:    "alloy",
+			})
 
 			audioData, err := stage.generateTTS(suite.ctx, "Testing different TTS models.")
 
@@ -265,7 +295,13 @@ func TestTTSQuickIntegration(t *testing.T) {
 		t.Skip("OPENAI_API_KEY not set, skipping integration test")
 	}
 
-	stage := NewTextToSpeechStage("quick-test", 50, apiKey, "tts-1", "alloy")
+	stage := NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "quick-test",
+		Priority: 50,
+		APIKey:   apiKey,
+		Model:    "tts-1",
+		Voice:    "alloy",
+	})
 
 	audioData, err := stage.generateTTS(context.Background(), "Quick integration test.")
 

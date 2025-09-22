@@ -25,7 +25,11 @@ func (suite *TranslationIntegrationTestSuite) TestRealOpenAIIntegration() {
 	}
 
 	// Create stage with real OpenAI endpoint
-	realStage := NewTranslationStage("real-integration-test", 30, apiKey, "")
+	realStage := NewTranslationStage(&TranslationConfig{
+		Name:     "real-integration-test",
+		Priority: 30,
+		APIKey:   apiKey,
+	})
 	defer realStage.Disconnect()
 
 	// Add callback to inject target languages
@@ -86,11 +90,16 @@ func (suite *TranslationIntegrationTestSuite) TestRealOpenAIIntegrationWithCusto
 	}
 
 	// Create stage with custom model
-	realStage := NewTranslationStage("real-integration-test", 30, apiKey, "gpt-3.5-turbo")
+	realStage := NewTranslationStage(&TranslationConfig{
+		Name:     "real-integration-test",
+		Priority: 30,
+		APIKey:   apiKey,
+		Model:    "gpt-3.5-turbo",
+	})
 	defer realStage.Disconnect()
 
 	// Verify model is set correctly
-	suite.Equal("gpt-3.5-turbo", realStage.model)
+	suite.Equal("gpt-3.5-turbo", realStage.config.Model)
 
 	// Add callback to inject target languages
 	realStage.AddBeforeTranslationCallback(func(data *MediaData) {

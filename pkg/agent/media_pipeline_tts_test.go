@@ -33,7 +33,13 @@ func (suite *TTSSuite) SetupTest() {
 	suite.mockServer = httptest.NewServer(http.HandlerFunc(suite.mockOpenAIHandler))
 
 	// Create TTS stage with mock server URL
-	suite.stage = NewTextToSpeechStage("test-tts", 50, suite.mockAPIKey, "gpt-4o-mini-tts", "alloy")
+	suite.stage = NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "test-tts",
+		Priority: 50,
+		APIKey:   suite.mockAPIKey,
+		Model:    "gpt-4o-mini-tts",
+		Voice:    "alloy",
+	})
 
 	// Configure to use mock server endpoint
 	suite.stage.SetEndpoint(suite.mockServer.URL)
@@ -84,14 +90,18 @@ func (suite *TTSSuite) mockOpenAIHandler(w http.ResponseWriter, r *http.Request)
 }
 
 func (suite *TTSSuite) TestNewTextToSpeechStage() {
-	stage := NewTextToSpeechStage("tts", 50, "api-key", "", "")
+	stage := NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "tts",
+		Priority: 50,
+		APIKey:   "api-key",
+	})
 
 	assert.Equal(suite.T(), "tts", stage.GetName())
 	assert.Equal(suite.T(), 50, stage.GetPriority())
-	assert.Equal(suite.T(), "api-key", stage.apiKey)
-	assert.Equal(suite.T(), defaultTTSModel, stage.model)
-	assert.Equal(suite.T(), defaultVoice, stage.voice)
-	assert.Equal(suite.T(), defaultSpeed, stage.speed)
+	assert.Equal(suite.T(), "api-key", stage.config.APIKey)
+	assert.Equal(suite.T(), defaultTTSModel, stage.config.Model)
+	assert.Equal(suite.T(), defaultVoice, stage.config.Voice)
+	assert.Equal(suite.T(), defaultSpeed, stage.config.Speed)
 	assert.NotNil(suite.T(), stage.client)
 	assert.NotNil(suite.T(), stage.rateLimiter)
 	assert.NotNil(suite.T(), stage.breaker)
@@ -277,7 +287,11 @@ func (suite *TTSSuite) TestCircuitBreaker() {
 
 func (suite *TTSSuite) TestRateLimiting() {
 	// Create a stage with very low rate limit for testing
-	stage := NewTextToSpeechStage("test", 50, "key", "", "")
+	stage := NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "test",
+		Priority: 50,
+		APIKey:   "key",
+	})
 	stage.rateLimiter = nil // Disable rate limiter for specific testing
 
 	// Test that rate limiter allows initial requests
@@ -373,26 +387,40 @@ func TestTTSSuite(t *testing.T) {
 
 // Individual test functions for specific scenarios
 func TestTextToSpeechStage_NewStageDefaults(t *testing.T) {
-	stage := NewTextToSpeechStage("test", 40, "api-key", "", "")
+	stage := NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "test",
+		Priority: 40,
+		APIKey:   "api-key",
+	})
 
 	assert.Equal(t, "test", stage.GetName())
 	assert.Equal(t, 40, stage.GetPriority())
-	assert.Equal(t, defaultTTSModel, stage.model)
-	assert.Equal(t, defaultVoice, stage.voice)
-	assert.Equal(t, defaultSpeed, stage.speed)
+	assert.Equal(t, defaultTTSModel, stage.config.Model)
+	assert.Equal(t, defaultVoice, stage.config.Voice)
+	assert.Equal(t, defaultSpeed, stage.config.Speed)
 }
 
 func TestTextToSpeechStage_NewStageCustom(t *testing.T) {
-	stage := NewTextToSpeechStage("custom", 60, "key", "custom-model", "nova")
+	stage := NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "custom",
+		Priority: 60,
+		APIKey:   "key",
+		Model:    "custom-model",
+		Voice:    "nova",
+	})
 
 	assert.Equal(t, "custom", stage.GetName())
 	assert.Equal(t, 60, stage.GetPriority())
-	assert.Equal(t, "custom-model", stage.model)
-	assert.Equal(t, "nova", stage.voice)
+	assert.Equal(t, "custom-model", stage.config.Model)
+	assert.Equal(t, "nova", stage.config.Voice)
 }
 
 func TestTextToSpeechStage_ProcessNonAudio(t *testing.T) {
-	stage := NewTextToSpeechStage("test", 50, "key", "", "")
+	stage := NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "test",
+		Priority: 50,
+		APIKey:   "key",
+	})
 
 	input := MediaData{Type: MediaTypeVideo, TrackID: "track-1"}
 	output, err := stage.Process(context.Background(), input)

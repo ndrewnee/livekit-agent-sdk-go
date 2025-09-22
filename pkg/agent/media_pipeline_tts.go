@@ -45,6 +45,17 @@ const (
 // TTSCallback is called when TTS audio is generated.
 type TTSCallback func(roomID string, ttsAudioMap map[string][]byte)
 
+// TextToSpeechConfig configures the TextToSpeechStage.
+type TextToSpeechConfig struct {
+	Name     string  // Unique identifier for this stage
+	Priority int     // Execution order (should be 40, after TranslationStage)
+	APIKey   string  // OpenAI API key for authentication
+	Model    string  // TTS model to use (empty for default)
+	Voice    string  // Voice to use (empty for default)
+	Speed    float64 // Speaking speed (empty for default)
+	Endpoint string  // API endpoint (empty for default)
+}
+
 // TextToSpeechStage converts translated text chunks to speech using OpenAI TTS API.
 //
 // This stage processes MediaData containing TranscriptionEvent with translations,
@@ -66,15 +77,7 @@ type TTSCallback func(roomID string, ttsAudioMap map[string][]byte)
 //  4. TextToSpeechStage (priority 50) - Converts translations to opus audio
 //  5. BroadcastStage (priority 60) - Streams opus audio to LiveKit room
 type TextToSpeechStage struct {
-	name     string
-	priority int
-
-	// OpenAI TTS configuration
-	apiKey   string
-	model    string // "gpt-4o-mini-tts"
-	voice    string // configurable voice
-	speed    float64
-	endpoint string // configurable endpoint for testing
+	config *TextToSpeechConfig
 
 	// HTTP client
 	client *http.Client
@@ -160,29 +163,23 @@ type TTSStats struct {
 }
 
 // NewTextToSpeechStage creates a new TTS stage with OpenAI configuration.
-//
-// Parameters:
-//   - name: Unique identifier for this stage
-//   - priority: Execution order (should be 40, after TranslationStage)
-//   - apiKey: OpenAI API key for authentication
-//   - model: TTS model to use (empty for default)
-//   - voice: Voice to use (empty for default)
-func NewTextToSpeechStage(name string, priority int, apiKey, model, voice string) *TextToSpeechStage {
-	if model == "" {
-		model = defaultTTSModel
+func NewTextToSpeechStage(config *TextToSpeechConfig) *TextToSpeechStage {
+	// Apply defaults
+	if config.Model == "" {
+		config.Model = defaultTTSModel
 	}
-	if voice == "" {
-		voice = defaultVoice
+	if config.Voice == "" {
+		config.Voice = defaultVoice
+	}
+	if config.Speed == 0 {
+		config.Speed = defaultSpeed
+	}
+	if config.Endpoint == "" {
+		config.Endpoint = openAITTSEndpoint
 	}
 
 	return &TextToSpeechStage{
-		name:         name,
-		priority:     priority,
-		apiKey:       apiKey,
-		model:        model,
-		voice:        voice,
-		speed:        defaultSpeed,
-		endpoint:     openAITTSEndpoint,
+		config:       config,
 		ttsCallbacks: make([]TTSCallback, 0),
 		client: &http.Client{
 			Timeout: ttsHTTPTimeout,
@@ -199,14 +196,14 @@ func NewTextToSpeechStage(name string, priority int, apiKey, model, voice string
 }
 
 // GetName implements MediaPipelineStage.
-func (tts *TextToSpeechStage) GetName() string { return tts.name }
+func (tts *TextToSpeechStage) GetName() string { return tts.config.Name }
 
 // GetPriority implements MediaPipelineStage.
-func (tts *TextToSpeechStage) GetPriority() int { return tts.priority }
+func (tts *TextToSpeechStage) GetPriority() int { return tts.config.Priority }
 
 // SetEndpoint sets the TTS API endpoint for testing purposes.
 func (tts *TextToSpeechStage) SetEndpoint(endpoint string) {
-	tts.endpoint = endpoint
+	tts.config.Endpoint = endpoint
 }
 
 // SetRateLimiter sets the rate limiter for testing purposes.
@@ -354,11 +351,11 @@ func (tts *TextToSpeechStage) generateTTS(ctx context.Context, text string) ([]b
 // callOpenAITTS makes the actual API call to OpenAI TTS service.
 func (tts *TextToSpeechStage) callOpenAITTS(ctx context.Context, text string) ([]byte, error) {
 	request := OpenAITTSRequest{
-		Model:          tts.model,
+		Model:          tts.config.Model,
 		Input:          text,
-		Voice:          tts.voice,
+		Voice:          tts.config.Voice,
 		ResponseFormat: ttsResponseFormat,
-		Speed:          tts.speed,
+		Speed:          tts.config.Speed,
 	}
 
 	requestBody, err := json.Marshal(request)
@@ -366,12 +363,12 @@ func (tts *TextToSpeechStage) callOpenAITTS(ctx context.Context, text string) ([
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tts.endpoint, bytes.NewReader(requestBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tts.config.Endpoint, bytes.NewReader(requestBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+tts.apiKey)
+	req.Header.Set("Authorization", "Bearer "+tts.config.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	startTime := time.Now()
@@ -546,13 +543,13 @@ func (tts *TextToSpeechStage) GetAPIMetrics() map[string]interface{} {
 // SetVoice updates the TTS voice setting.
 func (tts *TextToSpeechStage) SetVoice(voice string) {
 	if voice != "" {
-		tts.voice = voice
+		tts.config.Voice = voice
 	}
 }
 
 // SetSpeed updates the TTS speed setting.
 func (tts *TextToSpeechStage) SetSpeed(speed float64) {
 	if speed > 0 && speed <= 4.0 {
-		tts.speed = speed
+		tts.config.Speed = speed
 	}
 }

@@ -40,7 +40,11 @@ data: [DONE]
 		_, _ = w.Write([]byte(mockResponse))
 	}))
 
-	suite.stage = NewTranslationStage("load-test", 30, "test-api-key", "")
+	suite.stage = NewTranslationStage(&TranslationConfig{
+		Name:     "load-test",
+		Priority: 30,
+		APIKey:   "test-api-key",
+	})
 	suite.stage.SetEndpoint(suite.mockServer.URL)
 }
 

@@ -73,7 +73,11 @@ func (rt *E2ETranslationTest) Setup() error {
 	fmt.Printf("✅ Created test room: %s\n", rt.roomName)
 
 	// Create TranslationStage
-	rt.stage = NewTranslationStage("e2e-translator", 10, rt.openaiKey, "")
+	rt.stage = NewTranslationStage(&TranslationConfig{
+		Name:     "e2e-translator",
+		Priority: 10,
+		APIKey:   rt.openaiKey,
+	})
 
 	// Add callback to inject target languages for e2e test
 	rt.stage.AddBeforeTranslationCallback(func(data *MediaData) {

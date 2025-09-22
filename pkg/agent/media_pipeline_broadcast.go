@@ -12,6 +12,12 @@ import (
 // It receives the complete MediaData which contains all metadata including transcriptions, translations, TTS audio, etc.
 type BroadcastCallback func(ctx context.Context, data MediaData) error
 
+// BroadcastConfig configures the BroadcastStage.
+type BroadcastConfig struct {
+	Name     string // Unique identifier for this stage
+	Priority int    // Execution order (should be higher than transcription stage)
+}
+
 // BroadcastStage broadcasts transcription data using a configurable callback.
 //
 // This stage receives transcription data from previous pipeline stages (like RealtimeTranscriptionStage)
@@ -31,8 +37,7 @@ type BroadcastCallback func(ctx context.Context, data MediaData) error
 //  1. Audio input → RealtimeTranscriptionStage (adds transcription to metadata)
 //  2. MediaData with transcription → BroadcastStage (calls callback for broadcasting)
 type BroadcastStage struct {
-	name     string
-	priority int
+	config *BroadcastConfig
 
 	// Broadcast callbacks for handling actual broadcasting
 	mu                 sync.RWMutex
@@ -60,24 +65,19 @@ type BroadcastStats struct {
 
 // NewBroadcastStage creates a new broadcast stage for transcriptions.
 //
-// Parameters:
-//   - name: Unique identifier for this stage
-//   - priority: Execution order (should be higher than transcription stage)
-//
 // Use AddBroadcastCallback() to register callbacks for handling broadcasts.
-func NewBroadcastStage(name string, priority int) *BroadcastStage {
+func NewBroadcastStage(config *BroadcastConfig) *BroadcastStage {
 	return &BroadcastStage{
-		name:     name,
-		priority: priority,
-		stats:    &BroadcastStats{},
+		config: config,
+		stats:  &BroadcastStats{},
 	}
 }
 
 // GetName implements MediaPipelineStage.
-func (bs *BroadcastStage) GetName() string { return bs.name }
+func (bs *BroadcastStage) GetName() string { return bs.config.Name }
 
 // GetPriority implements MediaPipelineStage.
-func (bs *BroadcastStage) GetPriority() int { return bs.priority }
+func (bs *BroadcastStage) GetPriority() int { return bs.config.Priority }
 
 // CanProcess implements MediaPipelineStage. Processes audio data with transcriptions.
 func (bs *BroadcastStage) CanProcess(mediaType MediaType) bool {

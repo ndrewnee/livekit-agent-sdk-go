@@ -56,6 +56,17 @@ const (
 	timeToFirstTokenBuckets = 10
 )
 
+// TranslationConfig configures the TranslationStage.
+type TranslationConfig struct {
+	Name        string        // Unique identifier for this stage
+	Priority    int           // Execution order (should be 30, after BroadcastStage)
+	APIKey      string        // OpenAI API key for authentication
+	Model       string        // Model to use (empty for default)
+	Temperature float64       // Temperature setting (empty for default)
+	Endpoint    string        // API endpoint (empty for default)
+	Timeout     time.Duration // Stream timeout (empty for default)
+}
+
 // TranslationStage translates transcriptions to multiple participant languages using OpenAI Streaming API.
 //
 // This stage runs AFTER BroadcastStage and translates already-broadcast transcriptions
@@ -76,16 +87,10 @@ const (
 //  2. BroadcastStage (priority 20) - Broadcasts original transcriptions
 //  3. TranslationStage (priority 30) - Translates and broadcasts translations
 type TranslationStage struct {
-	name     string
-	priority int
+	config *TranslationConfig
 
-	// OpenAI streaming configuration
-	apiKey        string
-	model         string // "gpt-4o-mini"
-	endpoint      string // OpenAI API endpoint
-	client        *http.Client
-	temperature   float64
-	streamTimeout time.Duration
+	// HTTP client
+	client *http.Client
 
 	// Connection state
 	mu sync.RWMutex
@@ -227,19 +232,23 @@ type TranslationStats struct {
 //   - priority: Execution order (should be 30, after BroadcastStage)
 //   - apiKey: OpenAI API key for authentication
 //   - model: OpenAI model to use (empty for default "gpt-4o-mini")
-func NewTranslationStage(name string, priority int, apiKey string, model string) *TranslationStage {
-	if model == "" {
-		model = defaultModel
+func NewTranslationStage(config *TranslationConfig) *TranslationStage {
+	// Apply defaults
+	if config.Model == "" {
+		config.Model = defaultModel
+	}
+	if config.Temperature == 0 {
+		config.Temperature = defaultTemperature
+	}
+	if config.Endpoint == "" {
+		config.Endpoint = openAIStreamingEndpoint
+	}
+	if config.Timeout == 0 {
+		config.Timeout = streamReadTimeout
 	}
 
 	return &TranslationStage{
-		name:          name,
-		priority:      priority,
-		apiKey:        apiKey,
-		model:         model,
-		endpoint:      openAIStreamingEndpoint,
-		temperature:   defaultTemperature,
-		streamTimeout: streamReadTimeout,
+		config: config,
 		client: &http.Client{
 			Timeout: defaultHTTPTimeout,
 		},
@@ -259,14 +268,14 @@ func NewTranslationStage(name string, priority int, apiKey string, model string)
 }
 
 // GetName implements MediaPipelineStage.
-func (ts *TranslationStage) GetName() string { return ts.name }
+func (ts *TranslationStage) GetName() string { return ts.config.Name }
 
 // GetPriority implements MediaPipelineStage.
-func (ts *TranslationStage) GetPriority() int { return ts.priority }
+func (ts *TranslationStage) GetPriority() int { return ts.config.Priority }
 
 // SetEndpoint sets the translation API endpoint for testing purposes.
 func (ts *TranslationStage) SetEndpoint(endpoint string) {
-	ts.endpoint = endpoint
+	ts.config.Endpoint = endpoint
 }
 
 // CanProcess implements MediaPipelineStage. Only processes audio with transcriptions.
@@ -564,8 +573,8 @@ func (ts *TranslationStage) callOpenAIWithMetrics(ctx context.Context, prompt st
 // callOpenAIStreaming makes a streaming call to the OpenAI API using Server-Sent Events.
 func (ts *TranslationStage) callOpenAIStreaming(ctx context.Context, prompt string, onFirstToken func(bool)) (string, error) {
 	request := OpenAIChatRequest{
-		Model:       ts.model,
-		Temperature: ts.temperature,
+		Model:       ts.config.Model,
+		Temperature: ts.config.Temperature,
 		Stream:      true, // Enable streaming
 		Messages: []ChatMessage{
 			{
@@ -580,13 +589,13 @@ func (ts *TranslationStage) callOpenAIStreaming(ctx context.Context, prompt stri
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.endpoint, bytes.NewReader(requestBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.config.Endpoint, bytes.NewReader(requestBody))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+ts.apiKey)
+	req.Header.Set("Authorization", "Bearer "+ts.config.APIKey)
 	req.Header.Set("Accept", "text/event-stream")
 
 	resp, err := ts.client.Do(req)

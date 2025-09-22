@@ -26,7 +26,11 @@ func BenchmarkTTSParallelGeneration(b *testing.B) {
 	defer mockServer.Close()
 
 	// Create TTS stage
-	stage := NewTextToSpeechStage("bench", 50, "test-key", "", "")
+	stage := NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "bench",
+		Priority: 50,
+		APIKey:   "test-key",
+	})
 	stage.SetEndpoint(mockServer.URL)
 
 	ctx := context.Background()
@@ -82,7 +86,11 @@ func BenchmarkTTSSingleGeneration(b *testing.B) {
 	}))
 	defer mockServer.Close()
 
-	stage := NewTextToSpeechStage("bench", 50, "test-key", "", "")
+	stage := NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "bench",
+		Priority: 50,
+		APIKey:   "test-key",
+	})
 	stage.SetEndpoint(mockServer.URL)
 	stage.SetRateLimiter(nil) // Disable rate limiting for benchmarks
 	ctx := context.Background()
@@ -97,7 +105,11 @@ func BenchmarkTTSSingleGeneration(b *testing.B) {
 }
 
 func BenchmarkTTSCircuitBreaker(b *testing.B) {
-	stage := NewTextToSpeechStage("bench", 50, "test-key", "", "")
+	stage := NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "bench",
+		Priority: 50,
+		APIKey:   "test-key",
+	})
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -106,7 +118,11 @@ func BenchmarkTTSCircuitBreaker(b *testing.B) {
 }
 
 func BenchmarkTTSRateLimit(b *testing.B) {
-	stage := NewTextToSpeechStage("bench", 50, "test-key", "", "")
+	stage := NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "bench",
+		Priority: 50,
+		APIKey:   "test-key",
+	})
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -115,7 +131,11 @@ func BenchmarkTTSRateLimit(b *testing.B) {
 }
 
 func BenchmarkTTSMetricsUpdate(b *testing.B) {
-	stage := NewTextToSpeechStage("bench", 50, "test-key", "", "")
+	stage := NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "bench",
+		Priority: 50,
+		APIKey:   "test-key",
+	})
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -134,7 +154,11 @@ func BenchmarkTTSMemoryAllocation(b *testing.B) {
 	}))
 	defer mockServer.Close()
 
-	stage := NewTextToSpeechStage("bench", 50, "test-key", "", "")
+	stage := NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "bench",
+		Priority: 50,
+		APIKey:   "test-key",
+	})
 	stage.SetEndpoint(mockServer.URL)
 	stage.SetRateLimiter(nil) // Disable rate limiting for benchmarks
 	ctx := context.Background()
@@ -164,7 +188,11 @@ func BenchmarkTTSConcurrentLoad(b *testing.B) {
 	}))
 	defer mockServer.Close()
 
-	stage := NewTextToSpeechStage("bench", 50, "test-key", "", "")
+	stage := NewTextToSpeechStage(&TextToSpeechConfig{
+		Name:     "bench",
+		Priority: 50,
+		APIKey:   "test-key",
+	})
 	stage.SetEndpoint(mockServer.URL)
 	stage.SetRateLimiter(nil) // Disable rate limiting for benchmarks
 	ctx := context.Background()

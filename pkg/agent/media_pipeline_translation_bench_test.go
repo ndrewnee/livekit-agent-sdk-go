@@ -11,7 +11,11 @@ import (
 
 // BenchmarkTranslationCacheHit benchmarks cache hit performance.
 func BenchmarkTranslationCacheHit(b *testing.B) {
-	stage := NewTranslationStage("bench", 30, "test-key", "")
+	stage := NewTranslationStage(&TranslationConfig{
+		Name:     "bench",
+		Priority: 30,
+		APIKey:   "test-key",
+	})
 	defer stage.Disconnect()
 
 	// Pre-populate cache
@@ -51,7 +55,11 @@ data: [DONE]
 	}))
 	defer mockServer.Close()
 
-	stage := NewTranslationStage("bench", 30, "test-key", "")
+	stage := NewTranslationStage(&TranslationConfig{
+		Name:     "bench",
+		Priority: 30,
+		APIKey:   "test-key",
+	})
 	stage.SetEndpoint(mockServer.URL)
 	defer stage.Disconnect()
 
@@ -81,7 +89,11 @@ data: [DONE]
 
 // BenchmarkLanguageFiltering benchmarks language filtering logic.
 func BenchmarkLanguageFiltering(b *testing.B) {
-	stage := NewTranslationStage("bench", 30, "test-key", "")
+	stage := NewTranslationStage(&TranslationConfig{
+		Name:     "bench",
+		Priority: 30,
+		APIKey:   "test-key",
+	})
 	defer stage.Disconnect()
 
 	b.ResetTimer()
