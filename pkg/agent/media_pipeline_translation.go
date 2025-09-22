@@ -504,7 +504,7 @@ func (ts *TranslationStage) updateStats(translationCount int, failed bool, durat
 		ts.stats.LastTranslationAt = time.Now()
 
 		// Update average latency (simple moving average)
-		latencyMs := float64(duration.Microseconds()) / 1000.0
+		latencyMs := float64(duration.Milliseconds())
 		if ts.stats.AverageLatencyMs == 0 {
 			ts.stats.AverageLatencyMs = latencyMs
 		} else {
@@ -820,7 +820,7 @@ func (ts *TranslationStage) recordAPILatency(duration time.Duration) {
 	ts.metrics.mu.Lock()
 	defer ts.metrics.mu.Unlock()
 
-	latencyMs := float64(duration.Nanoseconds()) / 1e6
+	latencyMs := float64(duration.Milliseconds())
 
 	// Update total calls
 	ts.metrics.totalCalls++
@@ -899,7 +899,7 @@ func (ts *TranslationStage) recordTimeToFirstToken(duration time.Duration) {
 	ts.metrics.mu.Lock()
 	defer ts.metrics.mu.Unlock()
 
-	ttftMs := float64(duration.Nanoseconds()) / 1e6
+	ttftMs := float64(duration.Milliseconds())
 
 	// Update rolling average using circular buffer
 	ts.metrics.timeToFirstTokenBuckets[ts.metrics.ttftBucketIndex] = ttftMs
