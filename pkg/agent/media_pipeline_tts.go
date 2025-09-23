@@ -27,18 +27,18 @@ const (
 	ttsResponseFormat = "opus" // Opus format for direct streaming to LiveKit
 
 	// HTTP Client Configuration
-	ttsHTTPTimeout = 30 * time.Second
+	ttsHTTPTimeout = 15 * time.Second
 
 	// Input validation
 	maxTTSInputSize = 4096 // characters
 
 	// Rate limiting (requests per second)
-	ttsRateLimit = rate.Limit(5) // 5 requests per second for TTS
-	ttsBurstSize = 10
+	ttsRateLimit = rate.Limit(10) // Increase to 10 requests per second for TTS
+	ttsBurstSize = 20
 
 	// Circuit breaker configuration
-	ttsMaxFailures    = 3
-	ttsCircuitTimeout = 60 * time.Second
+	ttsMaxFailures    = 5
+	ttsCircuitTimeout = 30 * time.Second
 	ttsLatencyBuckets = 10
 )
 

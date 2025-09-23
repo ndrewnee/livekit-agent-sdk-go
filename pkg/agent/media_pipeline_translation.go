@@ -21,7 +21,7 @@ import (
 // Constants for configuration
 const (
 	// HTTP Client Configuration
-	defaultHTTPTimeout = 30 * time.Second
+	defaultHTTPTimeout = 15 * time.Second
 
 	// OpenAI Streaming API Configuration
 	openAIStreamingEndpoint = "https://api.openai.com/v1/chat/completions"
@@ -29,7 +29,7 @@ const (
 	defaultTemperature      = 0.3
 
 	// Streaming Configuration
-	streamReadTimeout = 30 * time.Second
+	streamReadTimeout = 15 * time.Second
 	streamBufferSize  = 8192
 	maxStreamChunks   = 1000
 
@@ -312,6 +312,20 @@ func (ts *TranslationStage) Process(ctx context.Context, input MediaData) (outpu
 		return input, nil
 	}
 
+	// For partial transcriptions, only process if text is substantial (>30 characters)
+	// This enables faster streaming while avoiding processing very short fragments
+	if !transcriptionEvent.IsFinal {
+		textLength := len(strings.TrimSpace(transcriptionEvent.Text))
+		if textLength < 30 {
+			return input, nil
+		}
+		// Mark as partial for downstream stages
+		if input.Metadata == nil {
+			input.Metadata = make(map[string]interface{})
+		}
+		input.Metadata["from_partial_transcription"] = true
+	}
+
 	// Get source language from transcription
 	sourceLang := transcriptionEvent.Language
 	if sourceLang == "" {
@@ -393,24 +407,9 @@ func (ts *TranslationStage) translateViaStreaming(ctx context.Context, text, sou
 
 	// Create multi-language translation prompt
 	targetLangList := strings.Join(targetLangs, ", ")
-	prompt := fmt.Sprintf(`You are a professional translator. Translate the given text accurately to multiple languages while preserving meaning and context.
-
-IMPORTANT INSTRUCTIONS:
-- Respond with ONLY a valid JSON object
-- Use the exact format shown below with language codes as keys
-- Do not include any explanation, markdown, or additional text
-- Preserve the original meaning, tone, and context
-- Use ISO 639-1 language codes as keys (e.g., "en", "es", "fr")
-
-REQUIRED FORMAT:
-{"en": "English translation", "es": "Spanish translation", "fr": "French translation"}
-
-TRANSLATION TASK:
-- Source language: %s
-- Target languages: %s
-- Original text: %s
-
-JSON RESPONSE:`, sourceLang, targetLangList, text)
+	prompt := fmt.Sprintf(`Translate from %s to %s.
+Text: %s
+Return only JSON with language codes as keys.`, sourceLang, targetLangList, text)
 
 	// Check circuit breaker
 	if !ts.canMakeAPICall() {
