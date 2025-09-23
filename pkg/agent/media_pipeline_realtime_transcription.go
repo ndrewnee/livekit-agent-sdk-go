@@ -217,6 +217,9 @@ type RealtimeTranscriptionStats struct {
 	AverageLatencyMs    float64
 	LastTranscriptionAt time.Time
 	BytesTranscribed    uint64
+
+	// Latency tracking
+	packetSendTimes map[uint16]time.Time // sequence number -> send time
 }
 
 // NewRealtimeTranscriptionStage creates a new OpenAI Realtime transcription stage.
@@ -262,7 +265,9 @@ func NewRealtimeTranscriptionStage(config *RealtimeTranscriptionConfig) *Realtim
 		beforeTranscriptionCallbacks: make([]BeforeTranscriptionCallback, 0),
 		eventChan:                    make(chan RealtimeEvent, 100),
 		closeChan:                    make(chan struct{}),
-		stats:                        &RealtimeTranscriptionStats{},
+		stats: &RealtimeTranscriptionStats{
+			packetSendTimes: make(map[uint16]time.Time),
+		},
 		// RTP packet tracking
 		sequenceNumber: 0,
 		timestampBase:  uint32(time.Now().UnixNano() / 1000000), // Start with current time in ms
@@ -417,7 +422,19 @@ func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaD
 			getLogger := logger.GetLogger()
 			getLogger.Debugw("failed to write audio to WebRTC track", "error", err)
 		} else {
+			// Record packet send time for latency calculation and update stats
+			sendTime := time.Now()
 			rts.stats.mu.Lock()
+			rts.stats.packetSendTimes[seqNum] = sendTime
+			// Keep only recent packets (last 1000) to prevent memory leak
+			if len(rts.stats.packetSendTimes) > 1000 {
+				// Remove oldest entries
+				for seq := range rts.stats.packetSendTimes {
+					if seq < seqNum-1000 {
+						delete(rts.stats.packetSendTimes, seq)
+					}
+				}
+			}
 			rts.stats.AudioPacketsSent++
 			rts.stats.BytesTranscribed += uint64(len(input.Data))
 			rts.stats.mu.Unlock()
@@ -794,31 +811,33 @@ func (rts *RealtimeTranscriptionStage) handleDataChannelMessage(data []byte) {
 	case "conversation.item.input_audio_transcription.delta":
 		// Handle partial transcriptions from input audio
 		if delta, ok := msg["delta"].(string); ok && delta != "" {
+			transcriptionTime := time.Now()
 			rts.notifyTranscription(TranscriptionEvent{
 				Type:      "partial",
 				Text:      delta,
-				Timestamp: time.Now(),
+				Timestamp: transcriptionTime,
 				Language:  rts.audioTranscriptionConfig.Language,
 				IsFinal:   false,
 			})
-			rts.stats.mu.Lock()
-			rts.stats.PartialTranscriptions++
-			rts.stats.mu.Unlock()
+
+			// Update stats using unified method
+			rts.updateStats("partial", transcriptionTime, false)
 		}
 
 	case "conversation.item.input_audio_transcription.completed":
 		// Handle final transcriptions from input audio
 		if transcript, ok := msg["transcript"].(string); ok && transcript != "" {
+			transcriptionTime := time.Now()
 			rts.notifyTranscription(TranscriptionEvent{
 				Type:      "final",
 				Text:      transcript,
-				Timestamp: time.Now(),
+				Timestamp: transcriptionTime,
 				Language:  rts.audioTranscriptionConfig.Language,
 				IsFinal:   true,
 			})
-			rts.stats.mu.Lock()
-			rts.stats.FinalTranscriptions++
-			rts.stats.mu.Unlock()
+
+			// Update stats using unified method
+			rts.updateStats("final", transcriptionTime, false)
 		}
 
 	default:
@@ -840,19 +859,17 @@ func (rts *RealtimeTranscriptionStage) handleDataChannelMessage(data []byte) {
 func (rts *RealtimeTranscriptionStage) handleTranscriptionDelta(msg map[string]interface{}) {
 	if delta, ok := msg["delta"].(map[string]interface{}); ok {
 		if transcript, ok := delta["transcript"].(string); ok && transcript != "" {
+			transcriptionTime := time.Now()
 			rts.notifyTranscription(TranscriptionEvent{
 				Type:      "partial",
 				Text:      transcript,
-				Timestamp: time.Now(),
+				Timestamp: transcriptionTime,
 				Language:  rts.audioTranscriptionConfig.Language,
 				IsFinal:   false,
 			})
 
-			rts.stats.mu.Lock()
-			rts.stats.PartialTranscriptions++
-			rts.stats.TranscriptionsReceived++
-			rts.stats.LastTranscriptionAt = time.Now()
-			rts.stats.mu.Unlock()
+			// Update stats using unified method
+			rts.updateStats("partial", transcriptionTime, false)
 		}
 	}
 }
@@ -860,19 +877,17 @@ func (rts *RealtimeTranscriptionStage) handleTranscriptionDelta(msg map[string]i
 // handleTranscriptionComplete handles final transcription.
 func (rts *RealtimeTranscriptionStage) handleTranscriptionComplete(msg map[string]interface{}) {
 	if transcript, ok := msg["transcript"].(string); ok && transcript != "" {
+		transcriptionTime := time.Now()
 		rts.notifyTranscription(TranscriptionEvent{
 			Type:      "final",
 			Text:      transcript,
-			Timestamp: time.Now(),
+			Timestamp: transcriptionTime,
 			Language:  rts.audioTranscriptionConfig.Language,
 			IsFinal:   true,
 		})
 
-		rts.stats.mu.Lock()
-		rts.stats.FinalTranscriptions++
-		rts.stats.TranscriptionsReceived++
-		rts.stats.LastTranscriptionAt = time.Now()
-		rts.stats.mu.Unlock()
+		// Update stats using unified method
+		rts.updateStats("final", transcriptionTime, false)
 	}
 }
 
@@ -884,19 +899,17 @@ func (rts *RealtimeTranscriptionStage) handleConversationItem(msg map[string]int
 				if contentItem, ok := c.(map[string]interface{}); ok {
 					// Check for transcript in the content
 					if transcript, ok := contentItem["transcript"].(string); ok && transcript != "" {
+						transcriptionTime := time.Now()
 						rts.notifyTranscription(TranscriptionEvent{
 							Type:      "final",
 							Text:      transcript,
-							Timestamp: time.Now(),
+							Timestamp: transcriptionTime,
 							Language:  rts.audioTranscriptionConfig.Language,
 							IsFinal:   true,
 						})
 
-						rts.stats.mu.Lock()
-						rts.stats.FinalTranscriptions++
-						rts.stats.TranscriptionsReceived++
-						rts.stats.LastTranscriptionAt = time.Now()
-						rts.stats.mu.Unlock()
+						// Update stats using unified method
+						rts.updateStats("final", transcriptionTime, false)
 					}
 				}
 			}
@@ -913,15 +926,15 @@ func (rts *RealtimeTranscriptionStage) handleError(msg map[string]interface{}) {
 		}
 	}
 
+	errorTime := time.Now()
 	rts.notifyTranscription(TranscriptionEvent{
 		Type:      "error",
-		Timestamp: time.Now(),
+		Timestamp: errorTime,
 		Error:     fmt.Errorf("realtime API error: %s", errorMsg),
 	})
 
-	rts.stats.mu.Lock()
-	rts.stats.Errors++
-	rts.stats.mu.Unlock()
+	// Update stats using unified method
+	rts.updateStats("error", errorTime, true)
 
 	getLogger := logger.GetLogger()
 	getLogger.Errorw("Realtime API error", fmt.Errorf("%s", errorMsg))
@@ -1176,5 +1189,55 @@ func (rts *RealtimeTranscriptionStage) SetPrompt(prompt string) {
 	defer rts.mu.Unlock()
 	if rts.audioTranscriptionConfig != nil {
 		rts.audioTranscriptionConfig.Prompt = prompt
+	}
+}
+
+// updateStats updates transcription statistics following the pattern of other pipeline stages.
+func (rts *RealtimeTranscriptionStage) updateStats(transcriptionType string, transcriptionTime time.Time, isError bool) {
+	rts.stats.mu.Lock()
+	defer rts.stats.mu.Unlock()
+
+	// Update counters based on transcription type
+	if isError {
+		rts.stats.Errors++
+	} else {
+		rts.stats.TranscriptionsReceived++
+		rts.stats.LastTranscriptionAt = transcriptionTime
+
+		switch transcriptionType {
+		case "partial":
+			rts.stats.PartialTranscriptions++
+		case "final":
+			rts.stats.FinalTranscriptions++
+		}
+
+		// Calculate and update average latency
+		rts.updateAverageLatencyLocked(transcriptionTime)
+	}
+}
+
+// updateAverageLatencyLocked calculates and updates the average latency based on packet send times.
+// This method assumes stats.mu is already locked.
+func (rts *RealtimeTranscriptionStage) updateAverageLatencyLocked(transcriptionTime time.Time) {
+	// Find the most recent packet that could correspond to this transcription
+	// We'll use a simple heuristic: find the packet sent closest to but before the transcription
+	var latestPacketTime time.Time
+	for _, sendTime := range rts.stats.packetSendTimes {
+		if sendTime.Before(transcriptionTime) && sendTime.After(latestPacketTime) {
+			latestPacketTime = sendTime
+		}
+	}
+
+	// If we found a packet time, calculate latency
+	if !latestPacketTime.IsZero() {
+		latency := transcriptionTime.Sub(latestPacketTime)
+		latencyMs := float64(latency.Milliseconds())
+
+		// Update average latency using exponentially weighted moving average
+		if rts.stats.AverageLatencyMs == 0 {
+			rts.stats.AverageLatencyMs = latencyMs
+		} else {
+			rts.stats.AverageLatencyMs = (rts.stats.AverageLatencyMs * 0.9) + (latencyMs * 0.1)
+		}
 	}
 }

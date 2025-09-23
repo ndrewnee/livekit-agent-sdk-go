@@ -530,6 +530,41 @@ func TestRealtimeStatistics(t *testing.T) {
 	assert.False(t, stats.CurrentlyConnected)
 }
 
+// TestRealtimeLatencyCalculation tests that AverageLatencyMs is calculated correctly
+func TestRealtimeLatencyCalculation(t *testing.T) {
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
+
+	// Simulate sending a packet first
+	stage.stats.mu.Lock()
+	sendTime := time.Now().Add(-100 * time.Millisecond) // Simulate packet sent 100ms ago
+	stage.stats.packetSendTimes[1] = sendTime
+	stage.stats.mu.Unlock()
+
+	// Simulate receiving a transcription after the packet was sent
+	transcriptionTime := time.Now()
+
+	// Manually trigger stats update with latency calculation
+	stage.updateStats("partial", transcriptionTime, false)
+
+	// Check stats - should have calculated latency around 100ms
+	stats := stage.GetStats()
+	assert.Greater(t, stats.AverageLatencyMs, float64(95)) // Allow for small timing variations
+	assert.Less(t, stats.AverageLatencyMs, float64(110))   // Allow for small timing variations
+
+	// Test exponentially weighted moving average
+	// Add another packet and transcription
+	stage.stats.mu.Lock()
+	stage.stats.packetSendTimes[2] = time.Now().Add(-50 * time.Millisecond) // 50ms ago
+	stage.stats.mu.Unlock()
+
+	stage.updateStats("final", time.Now(), false)
+
+	// The new average should be affected by the second measurement (around 50ms)
+	newStats := stage.GetStats()
+	assert.NotEqual(t, stats.AverageLatencyMs, newStats.AverageLatencyMs)
+	assert.Greater(t, newStats.AverageLatencyMs, float64(0))
+}
+
 // TestRealtimeDisconnection tests disconnection handling
 func TestRealtimeDisconnection(t *testing.T) {
 	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
