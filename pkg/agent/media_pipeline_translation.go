@@ -20,13 +20,10 @@ import (
 
 // Constants for configuration
 const (
-	// HTTP Client Configuration
-	defaultHTTPTimeout = 15 * time.Second
-
 	// OpenAI Streaming API Configuration
 	openAIStreamingEndpoint = "https://api.openai.com/v1/chat/completions"
 	defaultModel            = "gpt-4o-mini"
-	defaultTemperature      = 0.3
+	defaultTemperature      = 0.0
 
 	// Streaming Configuration
 	streamReadTimeout = 15 * time.Second
@@ -248,10 +245,8 @@ func NewTranslationStage(config *TranslationConfig) *TranslationStage {
 	}
 
 	return &TranslationStage{
-		config: config,
-		client: &http.Client{
-			Timeout: defaultHTTPTimeout,
-		},
+		config:                     config,
+		client:                     getSharedHTTPClient(),
 		translationCallbacks:       make([]TranslationCallback, 0),
 		beforeTranslationCallbacks: make([]BeforeTranslationCallback, 0),
 		rateLimiter:                rate.NewLimiter(defaultRateLimit, defaultBurstSize),

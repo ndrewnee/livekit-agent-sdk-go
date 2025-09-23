@@ -26,9 +26,6 @@ const (
 	// Audio format configuration
 	ttsResponseFormat = "opus" // Opus format for direct streaming to LiveKit
 
-	// HTTP Client Configuration
-	ttsHTTPTimeout = 15 * time.Second
-
 	// Input validation
 	maxTTSInputSize = 4096 // characters
 
@@ -181,10 +178,8 @@ func NewTextToSpeechStage(config *TextToSpeechConfig) *TextToSpeechStage {
 	return &TextToSpeechStage{
 		config:       config,
 		ttsCallbacks: make([]TTSCallback, 0),
-		client: &http.Client{
-			Timeout: ttsHTTPTimeout,
-		},
-		rateLimiter: rate.NewLimiter(ttsRateLimit, ttsBurstSize),
+		client:       getSharedHTTPClient(),
+		rateLimiter:  rate.NewLimiter(ttsRateLimit, ttsBurstSize),
 		breaker: &ttsCircuitBreaker{
 			state: ttsCircuitClosed,
 		},
