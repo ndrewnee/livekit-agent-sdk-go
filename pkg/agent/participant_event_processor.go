@@ -327,15 +327,36 @@ func (p *ParticipantEventProcessor) processBatches() {
 
 	batchMap := make(map[BatchEventProcessor][]ParticipantEvent)
 	timers := make(map[BatchEventProcessor]*time.Timer)
+	var bmMu sync.Mutex
 
 	for {
 		select {
 		case <-p.ctx.Done():
-			// Process remaining batches
+			// Process remaining batches safely
+			bmMu.Lock()
+			remaining := make([]struct {
+				proc   BatchEventProcessor
+				events []ParticipantEvent
+			}, 0, len(batchMap))
 			for processor, events := range batchMap {
 				if len(events) > 0 {
-					_ = processor.ProcessBatch(events)
+					remaining = append(remaining, struct {
+						proc   BatchEventProcessor
+						events []ParticipantEvent
+					}{proc: processor, events: events})
 				}
+			}
+			// Clear maps to avoid concurrent timer callbacks accessing them
+			batchMap = make(map[BatchEventProcessor][]ParticipantEvent)
+			for _, t := range timers {
+				if t != nil {
+					t.Stop()
+				}
+			}
+			timers = make(map[BatchEventProcessor]*time.Timer)
+			bmMu.Unlock()
+			for _, item := range remaining {
+				_ = item.proc.ProcessBatch(item.events)
 			}
 			return
 
@@ -344,26 +365,39 @@ func (p *ParticipantEventProcessor) processBatches() {
 			for _, processor := range p.batchProcessors {
 				if processor.ShouldBatch(event) {
 					// Add to batch
+					bmMu.Lock()
 					if _, exists := batchMap[processor]; !exists {
 						batchMap[processor] = make([]ParticipantEvent, 0)
-
 						// Start timer
-						timer := time.AfterFunc(processor.GetBatchTimeout(), func() {
-							p.processBatch(processor, batchMap[processor])
-							delete(batchMap, processor)
-							delete(timers, processor)
+						procRef := processor
+						timer := time.AfterFunc(procRef.GetBatchTimeout(), func() {
+							bmMu.Lock()
+							ev := batchMap[procRef]
+							delete(batchMap, procRef)
+							if t := timers[procRef]; t != nil {
+								delete(timers, procRef)
+							}
+							bmMu.Unlock()
+							p.processBatch(procRef, ev)
 						})
 						timers[processor] = timer
 					}
-
 					batchMap[processor] = append(batchMap[processor], event)
+					bmMu.Unlock()
 
 					// Check if batch is full
+					bmMu.Lock()
 					if len(batchMap[processor]) >= processor.GetBatchSize() {
-						timers[processor].Stop()
-						p.processBatch(processor, batchMap[processor])
+						if timers[processor] != nil {
+							timers[processor].Stop()
+						}
+						ev := batchMap[processor]
 						delete(batchMap, processor)
 						delete(timers, processor)
+						bmMu.Unlock()
+						p.processBatch(processor, ev)
+					} else {
+						bmMu.Unlock()
 					}
 
 					// Update metrics

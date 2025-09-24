@@ -254,6 +254,10 @@ type WorkerOptions struct {
 	// Prevents "too many open files" errors.
 	// Set to 0 to use default of 1024.
 	MaxFileDescriptors int
+
+	// WebSocketPath overrides the default WS path ("/agent").
+	// Provide a leading "/" or a plain segment; empty uses the default.
+	WebSocketPath string
 }
 
 // WorkerStatus represents the current state of the worker.

@@ -2,7 +2,11 @@
 
 # Test script to verify all examples can build
 
-set -e
+set -euo pipefail
+
+# Always operate relative to this script's directory so it can be run from anywhere
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
 echo "Testing LiveKit Agent SDK Go Examples"
 echo "===================================="
@@ -18,7 +22,7 @@ test_example() {
     local example=$1
     echo -n "Testing $example... "
     
-    cd "$example"
+    cd "$SCRIPT_DIR/$example"
     
     # Download dependencies
     if go mod download > /dev/null 2>&1; then

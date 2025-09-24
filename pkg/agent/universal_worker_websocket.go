@@ -28,7 +28,7 @@ func (w *UniversalWorker) connect(ctx context.Context) error {
 	}
 
 	// Connect to WebSocket
-	wsURL := buildWebSocketURL(w.serverURL)
+	wsURL := buildWebSocketURL(w.serverURL, w.opts.WebSocketPath)
 	dialer := websocket.DefaultDialer
 
 	// Set connection parameters
@@ -257,7 +257,10 @@ func (w *UniversalWorker) handleServerMessage(msg *livekit.ServerMessage) error 
 		if w.opts.StrictProtocolMode {
 			return fmt.Errorf("unknown message type: %T", m)
 		}
-		// Ignore unknown messages in non-strict mode
+		// Route unknown/custom messages to message handler for extensibility
+		if w.messageHandler != nil {
+			_ = w.messageHandler.HandleMessage(&ServerMessage{Message: msg.Message})
+		}
 		return nil
 	}
 }
@@ -278,12 +281,22 @@ func (w *UniversalWorker) handleAvailabilityRequest(req *livekit.AvailabilityReq
 		Available: accept,
 	}
 
-	// Add metadata fields if metadata is provided
+	// Add metadata fields; generate sane defaults if not provided to avoid empty identity tokens
 	if metadata != nil {
 		resp.SupportsResume = metadata.SupportsResume
 		resp.ParticipantIdentity = metadata.ParticipantIdentity
 		resp.ParticipantName = metadata.ParticipantName
 		resp.ParticipantMetadata = metadata.ParticipantMetadata
+		resp.ParticipantAttributes = metadata.ParticipantAttributes
+	} else {
+		// Default non-empty identity so assignment token is valid
+		resp.ParticipantIdentity = fmt.Sprintf("agent-%s", req.Job.Id)
+		if w.opts.AgentName != "" {
+			resp.ParticipantName = w.opts.AgentName
+		} else {
+			resp.ParticipantName = "Agent"
+		}
+		resp.SupportsResume = false
 	}
 
 	return w.sendMessage(&livekit.WorkerMessage{
@@ -329,25 +342,23 @@ func (w *UniversalWorker) sendPong(timestamp int64) error {
 
 // sendJobAccept sends a job acceptance message
 func (w *UniversalWorker) sendJobAccept(jobID string, accept *JobAcceptInfo) error {
-	// Convert JobAcceptInfo to the expected livekit types
-	// For now, we'll send an availability response instead
-	return w.sendMessage(&livekit.WorkerMessage{
-		Message: &livekit.WorkerMessage_Availability{
-			Availability: &livekit.AvailabilityResponse{
-				JobId:               jobID,
-				Available:           true,
-				ParticipantIdentity: accept.Identity,
-				ParticipantName:     accept.Name,
-				ParticipantMetadata: accept.Metadata,
-			},
-		},
-	})
+	// No explicit accept message is required by the protocol after assignment.
+	// Availability was already confirmed via AvailabilityResponse.
+	// Keep this as a no-op to avoid sending misleading messages.
+	_ = jobID
+	_ = accept
+	return nil
 }
 
 // maintainConnection maintains the WebSocket connection with reconnection logic
 func (w *UniversalWorker) maintainConnection(ctx context.Context) {
 	pingTicker := time.NewTicker(w.opts.PingInterval)
 	defer pingTicker.Stop()
+
+	// Exponential backoff settings
+	var attempts int
+	const baseDelay = 500 * time.Millisecond
+	const maxDelay = 30 * time.Second
 
 	for {
 		select {
@@ -362,15 +373,25 @@ func (w *UniversalWorker) maintainConnection(ctx context.Context) {
 				w.handleConnectionError(err)
 			}
 		case <-w.reconnectChan:
-			// Reconnection requested
+			// Reconnection requested with backoff
 			if err := w.reconnect(ctx); err != nil {
-				w.logger.Error("Failed to reconnect", "error", err)
-				// Retry after delay
-				time.Sleep(5 * time.Second)
+				attempts++
+				// Compute backoff with jitter
+				delay := baseDelay << (attempts - 1)
+				if delay > maxDelay {
+					delay = maxDelay
+				}
+				// add simple jitter +/- 20%
+				jitter := time.Duration(float64(delay) * (0.8 + 0.4*(float64(time.Now().UnixNano()%100)/100)))
+				w.logger.Error("Failed to reconnect", "error", err, "attempt", attempts, "backoff", jitter)
+				time.Sleep(jitter)
 				select {
 				case w.reconnectChan <- struct{}{}:
 				default:
 				}
+			} else {
+				// Success: reset attempts
+				attempts = 0
 			}
 		}
 	}

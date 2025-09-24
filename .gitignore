@@ -38,3 +38,4 @@ examples/transcription-agent/transcription-agent
 # Environment variable files
 .env
 /server-sdk-go/
+/venv/

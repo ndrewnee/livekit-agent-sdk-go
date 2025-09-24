@@ -208,6 +208,19 @@ func (m *mockWebSocketServer) SendJobAssignment(job *livekit.Job, token string) 
 	m.responses <- msg
 }
 
+func (m *mockWebSocketServer) SendJobAssignmentWithURL(job *livekit.Job, token, url string) {
+	msg := &livekit.ServerMessage{
+		Message: &livekit.ServerMessage_Assignment{
+			Assignment: &livekit.JobAssignment{
+				Job:   job,
+				Token: token,
+				Url:   &url,
+			},
+		},
+	}
+	m.responses <- msg
+}
+
 func (m *mockWebSocketServer) SendJobTermination(jobID string) {
 	msg := &livekit.ServerMessage{
 		Message: &livekit.ServerMessage_Termination{

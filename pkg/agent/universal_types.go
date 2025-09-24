@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/livekit/protocol/livekit"
+	neturl "net/url"
+	"strings"
 )
 
 const (
@@ -210,7 +212,30 @@ func (h *MessageHandler) RegisterHandler(messageType string, handler func(*Serve
 
 // HandleMessage handles a server message
 func (h *MessageHandler) HandleMessage(msg *ServerMessage) error {
-	// Implementation would check message type and dispatch to appropriate handler
+	if msg == nil {
+		return nil
+	}
+	// Determine keys based on the concrete message type
+	typeKey := fmt.Sprintf("%T", msg.Message) // e.g. *livekit.ServerMessage_Pong
+
+	// Try exact type string first
+	if handler, ok := h.handlers[typeKey]; ok {
+		return handler(msg)
+	}
+
+	// Derive a short key from oneof wrapper name: ..._Pong -> Pong
+	shortKey := typeKey
+	if idx := strings.LastIndex(typeKey, "_"); idx != -1 && idx < len(typeKey)-1 {
+		shortKey = typeKey[idx+1:]
+	}
+	if handler, ok := h.handlers[shortKey]; ok {
+		return handler(msg)
+	}
+
+	// Fallback to wildcard if registered
+	if handler, ok := h.handlers["*"]; ok {
+		return handler(msg)
+	}
 	return nil
 }
 
@@ -290,21 +315,68 @@ func workerStatusToProto(status WorkerStatus) livekit.WorkerStatus {
 }
 
 // buildWebSocketURL builds the WebSocket URL for agent connection
-func buildWebSocketURL(serverURL string) string {
-	// Convert http/https to ws/wss
-	wsURL := serverURL
-	if len(wsURL) > 4 && wsURL[:4] == "http" {
-		if wsURL[:5] == "https" {
-			wsURL = "wss" + wsURL[5:]
+func buildWebSocketURL(serverURL, path string) string {
+	// Default for empty input to avoid panics
+	if strings.TrimSpace(serverURL) == "" {
+		// default path
+		p := "agent"
+		if strings.TrimSpace(path) != "" {
+			p = strings.TrimLeft(path, "/")
+		}
+		return fmt.Sprintf("ws://localhost/%s?protocol=%d", p, CurrentProtocol)
+	}
+
+	// Parse and normalize
+	u, err := neturl.Parse(serverURL)
+	if err != nil || u.Scheme == "" {
+		// If parsing failed or scheme missing, assume ws
+		// Try to treat serverURL as host[:port]
+		host := serverURL
+		if !strings.Contains(host, "://") {
+			host = "ws://" + host
+		}
+		u, _ = neturl.Parse(host)
+	}
+
+	// Map http/https to ws/wss if needed
+	switch u.Scheme {
+	case "http":
+		u.Scheme = "ws"
+	case "https":
+		u.Scheme = "wss"
+	case "ws", "wss":
+		// ok
+	default:
+		// Unknown scheme; default to ws
+		u.Scheme = "ws"
+	}
+
+	// Determine path to use
+	segment := "agent"
+	if strings.TrimSpace(path) != "" {
+		segment = strings.TrimLeft(path, "/")
+	}
+	// Normalize existing path and append segment only once
+	if u.Path == "" || u.Path == "/" {
+		u.Path = "/" + segment
+	} else {
+		// If already ends with segment, normalize trailing slash
+		if strings.HasSuffix(u.Path, "/"+segment) || strings.HasSuffix(u.Path, "/"+segment+"/") {
+			u.Path = strings.TrimRight(u.Path, "/")
 		} else {
-			wsURL = "ws" + wsURL[4:]
+			if !strings.HasSuffix(u.Path, "/") {
+				u.Path += "/"
+			}
+			u.Path += segment
 		}
 	}
-	// Add agent path and protocol version
-	if wsURL[len(wsURL)-1] != '/' {
-		wsURL += "/"
-	}
-	return fmt.Sprintf("%sagent?protocol=%d", wsURL, CurrentProtocol)
+
+	// Append protocol query parameter
+	q := u.Query()
+	q.Set("protocol", fmt.Sprintf("%d", CurrentProtocol))
+	u.RawQuery = q.Encode()
+
+	return u.String()
 }
 
 // workerTypeToProto converts JobType to protobuf job type (no conversion needed)
