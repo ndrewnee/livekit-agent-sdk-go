@@ -23,7 +23,7 @@ test-coverage:
 # Run linter
 lint:
 	@if command -v golangci-lint > /dev/null; then \
-		golangci-lint run ./...; \
+		GOOS=$$(go env GOOS) GOARCH=$$(go env GOARCH) golangci-lint run ./...; \
 	else \
 		echo "golangci-lint not installed. Install with: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"; \
 		exit 1; \

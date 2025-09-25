@@ -250,7 +250,7 @@ func TestJobContext(t *testing.T) {
 	t.Run("publish data", func(t *testing.T) {
 		// Use a real LiveKit room to exercise PublishData
 		if err := TestLiveKitConnection(); err != nil {
-			t.Fatalf("LiveKit server not available for PublishData test: %v", err)
+			t.Skipf("LiveKit server not available for PublishData test: %v", err)
 		}
 
 		manager := NewTestRoomManager()
