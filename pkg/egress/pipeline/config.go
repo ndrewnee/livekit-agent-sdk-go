@@ -13,16 +13,25 @@ const (
 
 // Config holds pipeline configuration
 type Config struct {
-	VideoPort          int
-	AudioPort          int
+	// Output configuration
 	OutputDir          string
 	SegmentDuration    int
+
+	// Pipeline configuration
 	JitterBufferMs     int
-	EnableScreenshots  bool
-	ScreenshotInterval int
+
+	// Audio configuration
 	AudioMode          AudioMode
 	AACBitrate         int
 	MP3Bitrate         int
+
+	// Screenshot configuration
+	EnableScreenshots  bool
+	ScreenshotInterval int
+
+	// Deprecated: UDP ports are no longer needed with direct appsrc injection
+	VideoPort          int `deprecated:"true"`
+	AudioPort          int `deprecated:"true"`
 }
 
 // AudioMode defines audio processing mode
@@ -36,14 +45,8 @@ const (
 
 // ValidateConfig validates pipeline configuration
 func ValidateConfig(c *Config) error {
-	if c.VideoPort <= 0 || c.VideoPort > 65535 {
-		return fmt.Errorf("invalid video port: %d", c.VideoPort)
-	}
-	if c.AudioPort <= 0 || c.AudioPort > 65535 {
-		return fmt.Errorf("invalid audio port: %d", c.AudioPort)
-	}
-	if c.VideoPort == c.AudioPort {
-		return fmt.Errorf("video and audio ports must be different")
+	if c.OutputDir == "" {
+		return fmt.Errorf("output directory is required")
 	}
 	if c.SegmentDuration <= 0 {
 		return fmt.Errorf("segment duration must be positive")
@@ -57,8 +60,6 @@ func ValidateConfig(c *Config) error {
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		VideoPort:          5004,
-		AudioPort:          5006,
 		OutputDir:          "/tmp/recordings",
 		SegmentDuration:    4,
 		JitterBufferMs:     200,

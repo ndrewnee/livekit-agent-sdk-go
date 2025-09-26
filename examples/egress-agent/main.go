@@ -9,7 +9,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/go-gst/go-gst/gst"
 	"github.com/livekit/agent-sdk-go/pkg/agent"
+	"github.com/livekit/agent-sdk-go/pkg/egress/pipeline"
 	"github.com/livekit/protocol/livekit"
 )
 
@@ -23,20 +25,21 @@ var (
 func main() {
 	flag.Parse()
 
+	// Initialize GStreamer
+	gst.Init(nil)
+
 	// Validate required parameters
 	if *url == "" || *apiKey == "" || *apiSecret == "" {
 		log.Fatal("LiveKit URL, API key, and API secret are required")
 	}
 
 	// Load configuration
-	config, err := LoadConfig(*configFile)
-	if err != nil {
-		log.Printf("Warning: Failed to load config file %s: %v. Using defaults.", *configFile, err)
-		config = DefaultConfig()
-	}
+	config := pipeline.DefaultConfig()
+	config.OutputDir = "/tmp/recordings"
+	log.Printf("Using direct pipeline configuration: output=%s", config.OutputDir)
 
-	// Create egress handler
-	handler := NewEgressHandler(config)
+	// Create direct egress handler (no UDP ports needed!)
+	handler := NewDirectEgressHandler(config)
 
 	// Create worker using livekit-agent-sdk-go
 	worker := agent.NewUniversalWorker(
@@ -82,22 +85,3 @@ func main() {
 	log.Println("Shutdown complete")
 }
 
-// DefaultConfig returns default configuration
-func DefaultConfig() *EgressConfig {
-	return &EgressConfig{
-		OutputDir:       "/tmp/recordings",
-		SegmentDuration: 4,
-		JitterBufferMs:  200,
-		VideoPort:       5004,
-		AudioPort:       5006,
-		AudioMode:       AudioPassThrough,
-		EnableScreenshots: false,
-	}
-}
-
-// LoadConfig loads configuration from file
-func LoadConfig(path string) (*EgressConfig, error) {
-	// TODO: Implement YAML configuration loading
-	// For now, return default config
-	return DefaultConfig(), fmt.Errorf("config loading not yet implemented")
-}

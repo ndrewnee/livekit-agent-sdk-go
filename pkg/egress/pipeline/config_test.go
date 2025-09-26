@@ -1,7 +1,6 @@
 package pipeline
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -114,7 +113,7 @@ func TestStateString(t *testing.T) {
 		StatePaused:  "paused",
 	}
 
-	for state, expected := range states {
+	for _, expected := range states {
 		assert.Contains(t, []string{"stopped", "playing", "paused"}, expected)
 	}
 }

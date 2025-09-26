@@ -129,7 +129,7 @@ func TestPipelineWithRTPInput(t *testing.T) {
 	time.Sleep(3 * time.Second)
 
 	// Check if pipeline received packets (stats should be updated)
-	stats := pipeline.GetStats()
+	_ = pipeline.GetStats()
 
 	// We should have at least one segment if pipeline is working
 	// Note: Actual segment creation depends on having valid H.264/Opus data
@@ -153,8 +153,8 @@ func TestPipelineAudioModes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tmpDir := t.TempDir()
 			config := &Config{
-				VideoPort:          15304 + int(tt.audioMode)*10,
-				AudioPort:          15306 + int(tt.audioMode)*10,
+				VideoPort:          15304,
+				AudioPort:          15306,
 				OutputDir:          tmpDir,
 				SegmentDuration:    2,
 				JitterBufferMs:     200,
