@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Media Publisher Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .section { margin: 20px 0; padding: 10px; border: 1px solid #ccc; }
+        button { margin: 5px; padding: 5px 10px; }
+        #log { background: #f0f0f0; padding: 10px; height: 200px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <h1>Media Publisher Agent Test Page</h1>
+    
+    <div class="section">
+        <h2>Room: media-publisher-test-1756120315</h2>
+        <p>Use this page to test interactive commands with the media publisher agent.</p>
+    </div>
+    
+    <div class="section">
+        <h3>Quick Commands</h3>
+        <button onclick="sendCommand('volume_up')">Volume Up</button>
+        <button onclick="sendCommand('volume_down')">Volume Down</button>
+        <button onclick="sendCommand('next_pattern')">Next Pattern</button>
+        <button onclick="sendCommand('hello')">Say Hello</button>
+        <button onclick="sendCommand('status')">Get Status</button>
+    </div>
+    
+    <div class="section">
+        <h3>Tone Control</h3>
+        <label>Frequency: <input type="number" id="frequency" value="440" min="100" max="2000"></label>
+        <button onclick="setFrequency()">Set Frequency</button>
+    </div>
+    
+    <div class="section">
+        <h3>Volume Control</h3>
+        <label>Volume: <input type="range" id="volume" min="0" max="100" value="50"></label>
+        <span id="volumeLabel">50%</span>
+        <button onclick="setVolume()">Set Volume</button>
+    </div>
+    
+    <div class="section">
+        <h3>Pattern Control</h3>
+        <select id="pattern">
+            <option value="color_bars">Color Bars</option>
+            <option value="moving_circle">Moving Circle</option>
+            <option value="checkerboard">Checkerboard</option>
+            <option value="gradient">Gradient</option>
+        </select>
+        <button onclick="setPattern()">Change Pattern</button>
+    </div>
+    
+    <div class="section">
+        <h3>Log</h3>
+        <div id="log"></div>
+    </div>
+    
+    <script>
+        // Update volume label
+        document.getElementById('volume').oninput = function() {
+            document.getElementById('volumeLabel').innerText = this.value + '%';
+        };
+        
+        function log(message) {
+            const logDiv = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            logDiv.innerHTML += time + ' - ' + message + '<br>';
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+        
+        function sendCommand(command) {
+            const data = {
+                type: 'command',
+                command: command
+            };
+            log('Sending command: ' + command);
+            // TODO: Implement actual LiveKit data channel sending
+            console.log('Would send:', data);
+        }
+        
+        function setFrequency() {
+            const freq = document.getElementById('frequency').value;
+            const data = {
+                type: 'set_tone_frequency',
+                frequency: parseFloat(freq)
+            };
+            log('Setting frequency to ' + freq + ' Hz');
+            // TODO: Implement actual LiveKit data channel sending
+            console.log('Would send:', data);
+        }
+        
+        function setVolume() {
+            const vol = document.getElementById('volume').value / 100;
+            const data = {
+                type: 'set_volume',
+                volume: vol
+            };
+            log('Setting volume to ' + (vol * 100) + '%');
+            // TODO: Implement actual LiveKit data channel sending
+            console.log('Would send:', data);
+        }
+        
+        function setPattern() {
+            const pattern = document.getElementById('pattern').value;
+            const data = {
+                type: 'change_pattern',
+                pattern: pattern
+            };
+            log('Changing pattern to ' + pattern);
+            // TODO: Implement actual LiveKit data channel sending
+            console.log('Would send:', data);
+        }
+        
+        log('Test page loaded - implement LiveKit SDK integration to send commands');
+    </script>
+</body>
+</html>

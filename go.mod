@@ -27,6 +27,8 @@ require (
 	github.com/frostbyte73/core v0.1.1 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/gammazero/deque v1.1.0 // indirect
+	github.com/go-gst/go-glib v1.4.0 // indirect
+	github.com/go-gst/go-gst v1.4.0 // indirect
 	github.com/go-jose/go-jose/v3 v3.0.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
@@ -40,6 +42,7 @@ require (
 	github.com/livekit/mediatransportutil v0.0.0-20250519131108-fb90f5acfded // indirect
 	github.com/livekit/psrpc v0.6.1-0.20250726180611-3915e005e741 // indirect
 	github.com/magefile/mage v1.15.0 // indirect
+	github.com/mattn/go-pointer v0.0.1 // indirect
 	github.com/nats-io/nats.go v1.44.0 // indirect
 	github.com/nats-io/nkeys v0.4.11 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect

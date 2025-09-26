@@ -39,3 +39,5 @@ examples/transcription-agent/transcription-agent
 .env
 /server-sdk-go/
 /venv/
+/.venv/
+/node_modules/
