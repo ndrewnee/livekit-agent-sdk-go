@@ -1,6 +1,6 @@
 # LiveKit Egress Agent
 
-A zero-transcode HLS egress agent for LiveKit rooms, built using the LiveKit Agent SDK Go and GStreamer.
+A zero-transcode HLS egress agent for LiveKit rooms, built using the LiveKit Agent SDK Go and GStreamer with go-gst bindings.
 
 ## Overview
 
@@ -14,16 +14,18 @@ This egress agent provides efficient room recording and HLS streaming capabiliti
 ## Features
 
 - **Zero-transcode operation** for H.264 video and Opus/MP3 audio
+- **Native GStreamer integration** using go-gst bindings (no subprocess)
 - **HLS output** with configurable segment duration
 - **Multiple audio modes**:
   - Pass-through (Opus/MP3 as-is)
   - Transcode to AAC (maximum compatibility)
   - Transcode to MP3 (lower CPU usage)
-- **Automatic gap filling** for network interruptions
+- **Automatic gap filling** via videorate/audiorate elements
 - **Screenshot extraction** at configurable intervals
 - **S3 upload** support (MinIO/AWS S3 compatible)
-- **Crash recovery** with exponential backoff
+- **Crash recovery** with exponential backoff (3 attempts)
 - **Concurrent session handling**
+- **Performance monitoring** with real-time statistics
 
 ## Prerequisites
 
@@ -169,26 +171,57 @@ make dev-setup
 ## Architecture
 
 ```
-WebRTC Track → RTP Router → UDP → GStreamer Pipeline → HLS Output
-                                        ↓
-                                 Optional S3 Upload
+WebRTC Track → RTP Router → UDP (localhost) → GStreamer Pipeline (go-gst) → HLS Output
+                                                      ↓
+                                               Gap Filling & Sync
+                                                      ↓
+                                              Optional S3 Upload
 ```
 
 ### Components
 
 1. **RTP Router** (`pkg/egress/router`): Routes RTP packets from WebRTC to GStreamer via UDP
-2. **Pipeline Manager** (`pkg/egress/pipeline`): Manages GStreamer subprocess lifecycle
+2. **GStreamer Pipeline** (`pkg/egress/pipeline`): Native GStreamer integration using go-gst bindings
+   - Zero-transcode H.264/Opus pipeline
+   - Automatic gap filling (videorate/audiorate)
+   - Bus message handling for state management
+   - Crash recovery with exponential backoff
 3. **Configuration** (`pkg/egress/config`): Handles YAML configuration loading
 4. **Agent Handler** (`examples/egress-agent/handler.go`): Implements LiveKit agent interface
 
+## Implementation Status
+
+### Milestone 1: GStreamer Pipeline Core ✅
+- ✅ Pipeline implementation with go-gst bindings
+- ✅ UDP RTP reception (ports 5004/5006)
+- ✅ Zero-transcode H.264/Opus pipeline
+- ✅ Automatic gap filling via videorate/audiorate
+- ✅ Process crash recovery (3 attempts, exponential backoff)
+- ✅ Performance monitoring and statistics
+- ✅ HLS output with configurable segments
+- ✅ Audio mode support (passthrough/AAC/MP3)
+
+### Performance Targets (Milestone 1)
+- CPU Usage: < 3% per stream (zero-transcode mode)
+- Memory: < 100MB including buffers
+- Gap Filling: Handles 100-500ms gaps
+- A/V Sync: Maintained within 40ms
+- Auto-restart: Max 3 attempts with backoff
+
 ### GStreamer Pipeline
 
-The agent constructs a GStreamer pipeline that:
-1. Receives RTP packets via UDP
-2. Manages jitter buffering and synchronization
-3. Handles gap filling for interrupted streams
-4. Muxes audio/video into MPEG-TS
-5. Outputs HLS segments and playlist
+The agent uses go-gst bindings to construct a native GStreamer pipeline that:
+1. Receives RTP packets via UDP (udpsrc elements)
+2. Manages jitter buffering and synchronization (rtpbin)
+3. Handles gap filling for interrupted streams (videorate/audiorate)
+4. Muxes audio/video into MPEG-TS (mpegtsmux)
+5. Outputs HLS segments and playlist (hlssink2)
+
+Key pipeline elements:
+- **rtpbin**: Jitter buffer with configurable latency (default 200ms)
+- **videorate**: Duplicates frames on gaps, maintains framerate
+- **audiorate**: Fills audio gaps, maintains sample rate
+- **hlssink2**: Generates HLS segments with proper timestamps
 
 ## Troubleshooting
 
