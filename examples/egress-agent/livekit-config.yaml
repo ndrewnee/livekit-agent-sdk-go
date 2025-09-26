@@ -1,0 +1,22 @@
+port: 7880
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: false
+  enable_loopback_candidate: true
+redis:
+  # Comment out if not using Redis
+  # address: localhost:6379
+keys:
+  APIhZLy9N9dS7k: 2PuQxDGCYnD3N96bQUW1OlKzBPJzUykpHGhf0Mhr9m1
+api_key: APIhZLy9N9dS7k
+api_secret: 2PuQxDGCYnD3N96bQUW1OlKzBPJzUykpHGhf0Mhr9m1
+logging:
+  level: debug
+  sample: true
+webhook:
+  # Comment out if not using webhook
+  # urls:
+  #   - http://localhost:8080/webhook
+development: true

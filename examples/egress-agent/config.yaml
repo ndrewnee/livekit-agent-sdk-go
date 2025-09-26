@@ -1,0 +1,39 @@
+# Egress Agent Configuration
+
+# Output configuration
+output:
+  dir: /tmp/recordings
+  segment_duration: 4  # seconds
+
+# GStreamer pipeline configuration
+pipeline:
+  video_port: 5004
+  audio_port: 5006
+  jitter_buffer_ms: 200
+
+# Audio processing mode
+# Options: passthrough, transcode_aac, transcode_mp3
+audio:
+  mode: passthrough
+  aac_bitrate: 192  # kbps (for transcode_aac mode)
+  mp3_bitrate: 192  # kbps (for transcode_mp3 mode)
+
+# Screenshot extraction
+screenshots:
+  enabled: false
+  interval: 5  # seconds
+
+# S3 upload configuration (optional)
+s3:
+  enabled: false
+  endpoint: http://localhost:9000
+  bucket: recordings
+  region: us-east-1
+  access_key: minioadmin
+  secret_key: minioadmin
+  path_prefix: egress/
+
+# Agent configuration
+agent:
+  max_jobs: 10
+  log_level: debug
