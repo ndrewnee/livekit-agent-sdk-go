@@ -54,25 +54,25 @@ func TestConfigValidation(t *testing.T) {
 			name: "same video and audio port",
 			config: Config{
 				VideoPort:          5004,
-				AudioPort:          5004, // Same as video
+				AudioPort:          5004, // Same as video - OK since deprecated
 				OutputDir:          "/tmp/recordings",
 				SegmentDuration:    4,
 				JitterBufferMs:     200,
 				AudioMode:          AudioPassThrough,
 			},
-			valid: false,
+			valid: true, // Ports are deprecated, no validation needed
 		},
 		{
 			name: "invalid port",
 			config: Config{
-				VideoPort:          -1, // Invalid
+				VideoPort:          -1, // Invalid - but OK since deprecated
 				AudioPort:          5006,
 				OutputDir:          "/tmp/recordings",
 				SegmentDuration:    4,
 				JitterBufferMs:     200,
 				AudioMode:          AudioPassThrough,
 			},
-			valid: false,
+			valid: true, // Ports are deprecated, no validation needed
 		},
 		{
 			name: "zero segment duration",

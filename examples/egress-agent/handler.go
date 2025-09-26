@@ -9,7 +9,7 @@ import (
 	"github.com/livekit/agent-sdk-go/pkg/agent"
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/server-sdk-go/v2"
-	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v4"
 )
 
 // AudioProcessingMode defines how audio is processed

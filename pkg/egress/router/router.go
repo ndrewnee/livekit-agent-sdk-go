@@ -70,6 +70,12 @@ func New(videoPort, audioPort int) (*Router, error) {
 
 // RoutePacket routes an RTP packet to the appropriate UDP port
 func (r *Router) RoutePacket(packet *rtp.Packet, kind TrackKind) error {
+	// Check for nil packet
+	if packet == nil {
+		atomic.AddUint64(&r.stats.PacketsDropped, 1)
+		return fmt.Errorf("packet is nil")
+	}
+
 	r.mu.RLock()
 	if r.closed {
 		r.mu.RUnlock()

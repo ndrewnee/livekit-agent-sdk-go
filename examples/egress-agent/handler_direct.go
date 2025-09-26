@@ -11,7 +11,7 @@ import (
 	"github.com/livekit/agent-sdk-go/pkg/egress/router"
 	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
-	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v4"
 )
 
 // DirectEgressHandler handles egress jobs using direct pipeline injection

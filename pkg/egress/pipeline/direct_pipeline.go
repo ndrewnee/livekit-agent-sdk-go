@@ -86,6 +86,9 @@ func (p *DirectPipeline) createPipeline() error {
 	p.videoSrc.SetProperty("is-live", true)
 	p.videoSrc.SetProperty("format", gst.FormatTime)
 	p.videoSrc.SetProperty("do-timestamp", false) // We'll set timestamps ourselves
+	p.videoSrc.SetProperty("emit-signals", true) // Enable signal emission
+	p.videoSrc.SetProperty("block", false) // Don't block when buffer is full
+	p.videoSrc.SetProperty("max-bytes", uint64(10*1024*1024)) // 10MB buffer
 	caps := gst.NewCapsFromString("application/x-rtp,media=video,clock-rate=90000,encoding-name=H264")
 	p.videoSrc.SetProperty("caps", caps)
 
@@ -97,6 +100,9 @@ func (p *DirectPipeline) createPipeline() error {
 	p.audioSrc.SetProperty("is-live", true)
 	p.audioSrc.SetProperty("format", gst.FormatTime)
 	p.audioSrc.SetProperty("do-timestamp", false) // We'll set timestamps ourselves
+	p.audioSrc.SetProperty("emit-signals", true) // Enable signal emission
+	p.audioSrc.SetProperty("block", false) // Don't block when buffer is full
+	p.audioSrc.SetProperty("max-bytes", uint64(2*1024*1024)) // 2MB buffer
 	caps = gst.NewCapsFromString("application/x-rtp,media=audio,clock-rate=48000,encoding-name=OPUS")
 	p.audioSrc.SetProperty("caps", caps)
 
@@ -216,6 +222,7 @@ func (p *DirectPipeline) createPipeline() error {
 	hlssink2.SetProperty("target-duration", uint(p.config.SegmentDuration))
 	hlssink2.SetProperty("max-files", uint(0)) // Keep all segments
 	hlssink2.SetProperty("send-keyframe-requests", false)
+	hlssink2.SetProperty("async-handling", true) // Allow async state changes
 
 	// Add all elements to pipeline
 	elements := []*gst.Element{

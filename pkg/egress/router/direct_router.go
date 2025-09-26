@@ -36,17 +36,18 @@ func NewDirectRouter(pipeline PipelineInjector) (*DirectRouter, error) {
 
 // RoutePacket routes an RTP packet directly to the pipeline
 func (r *DirectRouter) RoutePacket(packet *rtp.Packet, kind TrackKind) error {
+	// Check for nil packet first
+	if packet == nil {
+		atomic.AddUint64(&r.stats.PacketsDropped, 1)
+		return fmt.Errorf("packet is nil")
+	}
+
 	r.mu.RLock()
 	if r.closed {
 		r.mu.RUnlock()
 		return fmt.Errorf("router is closed")
 	}
 	r.mu.RUnlock()
-
-	if packet == nil {
-		atomic.AddUint64(&r.stats.PacketsDropped, 1)
-		return fmt.Errorf("packet is nil")
-	}
 
 	// Route packet based on track kind
 	var err error
