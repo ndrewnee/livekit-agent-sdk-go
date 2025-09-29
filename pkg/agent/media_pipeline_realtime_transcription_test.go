@@ -663,3 +663,46 @@ func TestRealtimeConcurrentOperations(t *testing.T) {
 	// Test passed if no panics or deadlocks
 	assert.True(t, true)
 }
+
+// TestRealtimeMultipleDisconnects tests that multiple calls to Disconnect() don't cause a panic
+func TestRealtimeMultipleDisconnects(t *testing.T) {
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
+
+	// Simulate a connected state
+	stage.connected = true
+	stage.connecting = false
+
+	// Create a mock peer connection to simulate an active connection
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	require.NoError(t, err)
+	stage.peerConnection = pc
+
+	// Call Disconnect() multiple times concurrently
+	// This would previously cause a "close of closed channel" panic
+	var wg sync.WaitGroup
+	numGoroutines := 10
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			// This should not panic, even when called multiple times
+			stage.Disconnect()
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Verify final state
+	assert.False(t, stage.IsConnected())
+	assert.False(t, stage.GetStats().CurrentlyConnected)
+	assert.Nil(t, stage.peerConnection)
+
+	// Test additional disconnect calls after all goroutines complete
+	// These should also be safe
+	stage.Disconnect()
+	stage.Disconnect()
+
+	// Test passed if no panics occurred
+	assert.True(t, true)
+}

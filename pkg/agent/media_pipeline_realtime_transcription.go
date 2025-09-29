@@ -57,6 +57,7 @@ type RealtimeTranscriptionStage struct {
 	beforeTranscriptionCallbacks []BeforeTranscriptionCallback
 	eventChan                    chan RealtimeEvent
 	closeChan                    chan struct{}
+	closeOnce                    sync.Once
 	wg                           sync.WaitGroup
 
 	// Connection state
@@ -1117,7 +1118,9 @@ func (rts *RealtimeTranscriptionStage) Disconnect() {
 	rts.mu.Unlock()
 
 	// Signal shutdown
-	close(rts.closeChan)
+	rts.closeOnce.Do(func() {
+		close(rts.closeChan)
+	})
 
 	// Wait for goroutines
 	rts.wg.Wait()
