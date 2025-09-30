@@ -110,7 +110,7 @@ func (suite *RealtimeTranscriptionIntegrationTestSuite) TestModelComparison() {
 		suite.T().Skipf("Skipping test: audiobook.wav not found at %s", suite.audioFile)
 	}
 
-	models := []string{"gpt-4o-transcribe", "whisper-1"}
+	models := []string{"gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"}
 	results := make(map[string]*ModelTestResult)
 
 	fmt.Printf("\n=== Model Performance Comparison ===\n")
@@ -123,39 +123,41 @@ func (suite *RealtimeTranscriptionIntegrationTestSuite) TestModelComparison() {
 
 	// Display comparison
 	fmt.Printf("\n=== Model Comparison Results ===\n")
-	fmt.Printf("%-20s | %15s | %12s | %10s\n", "Model", "First Trans (ms)", "Total Count", "Packets")
-	fmt.Println(repeatString("-", 80))
+	fmt.Printf("%-25s | %15s | %12s | %10s | %10s\n", "Model", "First Trans (ms)", "Total Count", "Packets", "Avg Latency")
+	fmt.Println(repeatString("-", 90))
 
-	for model, result := range results {
-		fmt.Printf("%-20s | %15d | %12d | %10d\n",
+	for _, model := range models {
+		result := results[model]
+		fmt.Printf("%-25s | %15d | %12d | %10d | %9.2fms\n",
 			model,
 			result.FirstTranscriptionMs,
 			result.TranscriptionCount,
-			result.PacketsProcessed)
+			result.PacketsProcessed,
+			result.AvgLatencyMs)
 	}
 	fmt.Println()
 
-	// Show winner
-	if len(results) == 2 {
-		gpt4o := results["gpt-4o-transcribe"]
-		whisper := results["whisper-1"]
-
-		if gpt4o.FirstTranscriptionMs > 0 && whisper.FirstTranscriptionMs > 0 {
-			var winner string
-			var winnerMs, loserMs int64
-
-			if gpt4o.FirstTranscriptionMs < whisper.FirstTranscriptionMs {
-				winner = "gpt-4o-transcribe"
-				winnerMs, loserMs = gpt4o.FirstTranscriptionMs, whisper.FirstTranscriptionMs
-			} else {
-				winner = "whisper-1"
-				winnerMs, loserMs = whisper.FirstTranscriptionMs, gpt4o.FirstTranscriptionMs
-			}
-
-			improvement := float64(loserMs-winnerMs) / float64(loserMs) * 100
-			fmt.Printf("🏆 Winner: %s is %.1f%% faster (%dms vs %dms)\n\n",
-				winner, improvement, winnerMs, loserMs)
+	// Find fastest model
+	var fastestModel string
+	var fastestMs int64 = 999999
+	for model, result := range results {
+		if result.FirstTranscriptionMs > 0 && result.FirstTranscriptionMs < fastestMs {
+			fastestMs = result.FirstTranscriptionMs
+			fastestModel = model
 		}
+	}
+
+	if fastestModel != "" {
+		fmt.Printf("🏆 Fastest Model: %s (%dms)\n\n", fastestModel, fastestMs)
+		fmt.Println("Performance vs fastest:")
+		for _, model := range models {
+			result := results[model]
+			if result.FirstTranscriptionMs > 0 && model != fastestModel {
+				slowdown := float64(result.FirstTranscriptionMs-fastestMs) / float64(fastestMs) * 100
+				fmt.Printf("  %s: +%.1f%% slower (%dms)\n", model, slowdown, result.FirstTranscriptionMs)
+			}
+		}
+		fmt.Println()
 	}
 
 	// Assertions

@@ -102,7 +102,7 @@ type RealtimeTranscriptionConfig struct {
 	Name      string         // Unique identifier for this stage
 	Priority  int            // Execution order (lower runs first)
 	APIKey    string         // OpenAI API key for authentication
-	Model     string         // Model to use (defaults to "gpt-4o-transcribe")
+	Model     string         // Model to use (defaults to "gpt-4o-mini-transcribe" - fastest and most cost-effective)
 	Language  string         // Language code (e.g., "en", "ru", "zh", "ar")
 	Prompt    string         // Context prompt for better transcription accuracy
 	Voice     string         // Voice to use (e.g., "alloy", "echo", "fable", "onyx", "nova", "shimmer")
@@ -234,7 +234,7 @@ func NewRealtimeTranscriptionStage(config *RealtimeTranscriptionConfig) *Realtim
 
 	// Apply defaults to config
 	if config.Model == "" {
-		config.Model = "gpt-4o-transcribe"
+		config.Model = "gpt-4o-mini-transcribe" // Fastest and most cost-effective model
 	}
 	if config.Voice == "" {
 		config.Voice = "alloy" // Default voice
