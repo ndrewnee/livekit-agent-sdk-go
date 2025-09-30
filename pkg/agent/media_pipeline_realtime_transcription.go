@@ -102,10 +102,11 @@ type RealtimeTranscriptionConfig struct {
 	Name      string         // Unique identifier for this stage
 	Priority  int            // Execution order (lower runs first)
 	APIKey    string         // OpenAI API key for authentication
-	Model     string         // Model to use (defaults to "gpt-4o-transcribe")
+	Model     string         // Model to use (defaults to "gpt-4o-mini-transcribe" - fastest and most cost-effective)
 	Language  string         // Language code (e.g., "en", "ru", "zh", "ar")
 	Prompt    string         // Context prompt for better transcription accuracy
 	Voice     string         // Voice to use (e.g., "alloy", "echo", "fable", "onyx", "nova", "shimmer")
+	Timeout   time.Duration  // Timeout for API calls (empty for default 5s)
 	VADConfig *TurnDetection // Optional VAD configuration (auto-configured if nil)
 }
 
@@ -219,8 +220,8 @@ type RealtimeTranscriptionStats struct {
 	LastTranscriptionAt time.Time
 	BytesTranscribed    uint64
 
-	// Latency tracking
-	packetSendTimes map[uint16]time.Time // sequence number -> send time
+	// Latency tracking (for per-transcription latency measurement)
+	CurrentSegmentStartTime time.Time // When the current audio segment started (reset after each transcription)
 }
 
 // NewRealtimeTranscriptionStage creates a new OpenAI Realtime transcription stage.
@@ -234,10 +235,13 @@ func NewRealtimeTranscriptionStage(config *RealtimeTranscriptionConfig) *Realtim
 
 	// Apply defaults to config
 	if config.Model == "" {
-		config.Model = "gpt-4o-transcribe"
+		config.Model = "gpt-4o-mini-transcribe" // Fastest and most cost-effective model
 	}
 	if config.Voice == "" {
 		config.Voice = "alloy" // Default voice
+	}
+	if config.Timeout == 0 {
+		config.Timeout = sharedHTTPTimeout
 	}
 
 	// Create audio transcription config
@@ -266,9 +270,7 @@ func NewRealtimeTranscriptionStage(config *RealtimeTranscriptionConfig) *Realtim
 		beforeTranscriptionCallbacks: make([]BeforeTranscriptionCallback, 0),
 		eventChan:                    make(chan RealtimeEvent, 100),
 		closeChan:                    make(chan struct{}),
-		stats: &RealtimeTranscriptionStats{
-			packetSendTimes: make(map[uint16]time.Time),
-		},
+		stats:                        &RealtimeTranscriptionStats{},
 		// RTP packet tracking
 		sequenceNumber: 0,
 		timestampBase:  uint32(time.Now().UnixNano() / 1000000), // Start with current time in ms
@@ -423,18 +425,10 @@ func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaD
 			getLogger := logger.GetLogger()
 			getLogger.Debugw("failed to write audio to WebRTC track", "error", err)
 		} else {
-			// Record packet send time for latency calculation and update stats
-			sendTime := time.Now()
+			// Update stats
 			rts.stats.mu.Lock()
-			rts.stats.packetSendTimes[seqNum] = sendTime
-			// Keep only recent packets (last 1000) to prevent memory leak
-			if len(rts.stats.packetSendTimes) > 1000 {
-				// Remove oldest entries
-				for seq := range rts.stats.packetSendTimes {
-					if seq < seqNum-1000 {
-						delete(rts.stats.packetSendTimes, seq)
-					}
-				}
+			if rts.stats.CurrentSegmentStartTime.IsZero() {
+				rts.stats.CurrentSegmentStartTime = time.Now()
 			}
 			rts.stats.AudioPacketsSent++
 			rts.stats.BytesTranscribed += uint64(len(input.Data))
@@ -654,10 +648,15 @@ func (rts *RealtimeTranscriptionStage) getEphemeralKey(ctx context.Context) (str
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("OpenAI-Beta", "realtime=v1")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	// Use shared HTTP/2 client with connection pooling
+	ctx, cancel := context.WithTimeout(req.Context(), rts.config.Timeout)
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	client := getSharedHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("ephemeral key request failed: %w", err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
@@ -721,10 +720,15 @@ func (rts *RealtimeTranscriptionStage) exchangeSDPWithOpenAI(ctx context.Context
 	getLogger := logger.GetLogger()
 	getLogger.Debugw("Sending SDP offer", "url", url, "auth", "Bearer "+rts.ephemeralKey[:10]+"...")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	// Use shared HTTP/2 client with connection pooling
+	sdpCtx, sdpCancel := context.WithTimeout(req.Context(), rts.config.Timeout)
+	defer sdpCancel()
+	req = req.WithContext(sdpCtx)
+
+	client := getSharedHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sdp exchange request failed: %w", err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
@@ -847,6 +851,7 @@ func (rts *RealtimeTranscriptionStage) handleDataChannelMessage(data []byte) {
 			Type: msgType,
 			Data: msg,
 		}
+
 		select {
 		case rts.eventChan <- event:
 		default:
@@ -989,18 +994,6 @@ func (rts *RealtimeTranscriptionStage) processEvents() {
 // processRealtimeEvent processes a single Realtime API event.
 func (rts *RealtimeTranscriptionStage) processRealtimeEvent(event RealtimeEvent) {
 	switch event.Type {
-	case "conversation.item.input_audio_transcription.delta":
-		//// Handle partial transcriptions from input audio
-		//if delta, ok := event.Data["delta"].(string); ok && delta != "" {
-		//	rts.notifyTranscription(TranscriptionEvent{
-		//		Type:      "partial",
-		//		Text:      delta,
-		//		Timestamp: time.Now(),
-		//		IsFinal:   false,
-		//	})
-		//	rts.stats.PartialTranscriptions++
-		//}
-
 	case "conversation.item.input_audio_transcription.completed":
 		// Handle final transcriptions from input audio
 		if transcript, ok := event.Data["transcript"].(string); ok && transcript != "" {
@@ -1219,21 +1212,14 @@ func (rts *RealtimeTranscriptionStage) updateStats(transcriptionType string, tra
 	}
 }
 
-// updateAverageLatencyLocked calculates and updates the average latency based on packet send times.
+// updateAverageLatencyLocked calculates and updates per-transcription latency.
 // This method assumes stats.mu is already locked.
+// Measures latency for each transcription segment independently (resets after each transcription).
 func (rts *RealtimeTranscriptionStage) updateAverageLatencyLocked(transcriptionTime time.Time) {
-	// Find the most recent packet that could correspond to this transcription
-	// We'll use a simple heuristic: find the packet sent closest to but before the transcription
-	var latestPacketTime time.Time
-	for _, sendTime := range rts.stats.packetSendTimes {
-		if sendTime.Before(transcriptionTime) && sendTime.After(latestPacketTime) {
-			latestPacketTime = sendTime
-		}
-	}
-
-	// If we found a packet time, calculate latency
-	if !latestPacketTime.IsZero() {
-		latency := transcriptionTime.Sub(latestPacketTime)
+	// Calculate per-transcription latency from when current audio segment started
+	// Each transcription closes one segment and starts the next
+	if !rts.stats.CurrentSegmentStartTime.IsZero() && rts.stats.CurrentSegmentStartTime.Before(transcriptionTime) {
+		latency := transcriptionTime.Sub(rts.stats.CurrentSegmentStartTime)
 		latencyMs := float64(latency.Milliseconds())
 
 		// Update average latency using exponentially weighted moving average
@@ -1242,5 +1228,9 @@ func (rts *RealtimeTranscriptionStage) updateAverageLatencyLocked(transcriptionT
 		} else {
 			rts.stats.AverageLatencyMs = (rts.stats.AverageLatencyMs * 0.9) + (latencyMs * 0.1)
 		}
+
+		// Reset to zero time - will be set by next audio packet arrival
+		// This ensures we measure from when new audio actually starts, not from transcription time
+		rts.stats.CurrentSegmentStartTime = time.Time{}
 	}
 }

@@ -192,7 +192,7 @@ func TestRealtimeTranscriptionStageCreation(t *testing.T) {
 	assert.Equal(t, 20, stage.GetPriority())
 	assert.True(t, stage.CanProcess(MediaTypeAudio))
 	assert.False(t, stage.CanProcess(MediaTypeVideo))
-	assert.Equal(t, "gpt-4o-transcribe", stage.config.Model)
+	assert.Equal(t, "gpt-4o-mini-transcribe", stage.config.Model)
 	assert.Equal(t, "alloy", stage.config.Voice)
 	assert.NotNil(t, stage.stats)
 	assert.False(t, stage.IsConnected())
@@ -534,35 +534,32 @@ func TestRealtimeStatistics(t *testing.T) {
 func TestRealtimeLatencyCalculation(t *testing.T) {
 	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
-	// Simulate sending a packet first
+	// Simulate audio segment started 2000ms ago
 	stage.stats.mu.Lock()
-	sendTime := time.Now().Add(-100 * time.Millisecond) // Simulate packet sent 100ms ago
-	stage.stats.packetSendTimes[1] = sendTime
+	stage.stats.CurrentSegmentStartTime = time.Now().Add(-2000 * time.Millisecond)
 	stage.stats.mu.Unlock()
 
-	// Simulate receiving a transcription after the packet was sent
+	// Simulate receiving first transcription now (2000ms after segment started)
 	transcriptionTime := time.Now()
-
-	// Manually trigger stats update with latency calculation
 	stage.updateStats("partial", transcriptionTime, false)
 
-	// Check stats - should have calculated latency around 100ms
+	// Check stats - should have calculated latency around 2000ms
 	stats := stage.GetStats()
-	assert.Greater(t, stats.AverageLatencyMs, float64(95)) // Allow for small timing variations
-	assert.Less(t, stats.AverageLatencyMs, float64(110))   // Allow for small timing variations
+	assert.Greater(t, stats.AverageLatencyMs, float64(1950)) // Allow for small timing variations
+	assert.Less(t, stats.AverageLatencyMs, float64(2050))    // Allow for small timing variations
 
-	// Test exponentially weighted moving average
-	// Add another packet and transcription
-	stage.stats.mu.Lock()
-	stage.stats.packetSendTimes[2] = time.Now().Add(-50 * time.Millisecond) // 50ms ago
-	stage.stats.mu.Unlock()
+	// Simulate second transcription 1500ms later (new segment)
+	// This should measure latency for the second segment, not cumulative
+	time.Sleep(100 * time.Millisecond)
+	secondTranscriptionTime := time.Now()
+	stage.updateStats("final", secondTranscriptionTime, false)
 
-	stage.updateStats("final", time.Now(), false)
-
-	// The new average should be affected by the second measurement (around 50ms)
+	// The new average should reflect both measurements via EWMA
+	// First: 2000ms, Second: ~100ms, EWMA: 2000*0.9 + 100*0.1 = 1810ms
 	newStats := stage.GetStats()
 	assert.NotEqual(t, stats.AverageLatencyMs, newStats.AverageLatencyMs)
-	assert.Greater(t, newStats.AverageLatencyMs, float64(0))
+	assert.Less(t, newStats.AverageLatencyMs, stats.AverageLatencyMs) // Should decrease due to shorter second segment
+	assert.Greater(t, newStats.AverageLatencyMs, float64(1700))       // Should be around 1800ms
 }
 
 // TestRealtimeDisconnection tests disconnection handling
