@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -136,148 +135,6 @@ func (suite *TranslationLoadTestSuite) TestHighConcurrencyProcessing() {
 		stats.TotalTranslations, stats.FailedTranslations)
 }
 
-// TestCachePerformanceUnderLoad tests caching behavior with high volume.
-func (suite *TranslationLoadTestSuite) TestCachePerformanceUnderLoad() {
-	const (
-		numGoroutines        = 50
-		requestsPerGoroutine = 100
-		uniqueTexts          = 20 // Repeated texts to test cache efficiency
-	)
-
-	var (
-		cacheHits   int64
-		cacheMisses int64
-	)
-
-	// Pre-populate some cache entries
-	baseTexts := make([]string, uniqueTexts)
-	for i := 0; i < uniqueTexts; i++ {
-		baseTexts[i] = fmt.Sprintf("Test text number %d for caching", i)
-	}
-
-	var wg sync.WaitGroup
-
-	// Concurrent cache operations
-	for i := 0; i < numGoroutines; i++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-
-			for j := 0; j < requestsPerGoroutine; j++ {
-				text := baseTexts[j%uniqueTexts]
-				targetLangs := []string{"es", "fr"}
-
-				// Generate cache key
-				cacheKey := suite.stage.generateCacheKey(text, "en", targetLangs)
-
-				// Check cache
-				if cached := suite.stage.getCachedTranslation(cacheKey); cached != nil {
-					atomic.AddInt64(&cacheHits, 1)
-				} else {
-					atomic.AddInt64(&cacheMisses, 1)
-
-					// Simulate adding to cache
-					mockTranslations := map[string]string{
-						"es": fmt.Sprintf("Spanish translation of text %d", j%uniqueTexts),
-						"fr": fmt.Sprintf("French translation of text %d", j%uniqueTexts),
-					}
-					suite.stage.cacheTranslation(cacheKey, mockTranslations)
-				}
-			}
-		}(i)
-	}
-
-	wg.Wait()
-
-	suite.T().Logf("Cache performance: %d hits, %d misses (%.2f%% hit rate)",
-		cacheHits, cacheMisses, float64(cacheHits)/float64(cacheHits+cacheMisses)*100)
-
-	// Should have good cache hit rate due to repeated texts
-	hitRate := float64(cacheHits) / float64(cacheHits+cacheMisses)
-	suite.Greater(hitRate, 0.5, "Cache hit rate should be > 50% with repeated texts")
-}
-
-// TestCacheEvictionUnderPressure tests cache cleanup behavior.
-func (suite *TranslationLoadTestSuite) TestCacheEvictionUnderPressure() {
-	// Fill cache to just under capacity first
-	for i := 0; i < maxCacheSize-10; i++ {
-		text := fmt.Sprintf("Cache test text %d", i)
-		targetLangs := []string{"es"}
-		cacheKey := suite.stage.generateCacheKey(text, "en", targetLangs)
-
-		translations := map[string]string{"es": fmt.Sprintf("Translation %d", i)}
-		suite.stage.cacheTranslation(cacheKey, translations)
-	}
-
-	// Add some expired entries manually
-	for i := 0; i < 50; i++ {
-		text := fmt.Sprintf("Expired text %d", i)
-		cacheKey := suite.stage.generateCacheKey(text, "en", []string{"es"})
-		suite.stage.cache[cacheKey] = &translationCacheEntry{
-			translations: map[string]string{"es": "expired"},
-			timestamp:    time.Now().Add(-2 * cacheTTL), // Expired
-		}
-	}
-
-	// Now add more entries which should trigger cleanup
-	for i := 0; i < 20; i++ {
-		text := fmt.Sprintf("New cache text %d", i)
-		targetLangs := []string{"es"}
-		cacheKey := suite.stage.generateCacheKey(text, "en", targetLangs)
-
-		translations := map[string]string{"es": fmt.Sprintf("New translation %d", i)}
-		suite.stage.cacheTranslation(cacheKey, translations)
-	}
-
-	// Verify cache size is reasonable (cleanup should have occurred)
-	suite.stage.cacheMu.RLock()
-	cacheSize := len(suite.stage.cache)
-	suite.stage.cacheMu.RUnlock()
-
-	suite.LessOrEqual(cacheSize, maxCacheSize+50, "Cache should have cleaned up expired entries")
-}
-
-// TestMemoryUsageUnderLoad tests memory consumption patterns.
-func (suite *TranslationLoadTestSuite) TestMemoryUsageUnderLoad() {
-	var m1, m2 runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&m1)
-
-	// Simulate high load
-	const iterations = 1000
-	for i := 0; i < iterations; i++ {
-		// Add cache entries
-		text := fmt.Sprintf("Load test text %d", i%100) // Some repetition
-		cacheKey := suite.stage.generateCacheKey(text, "en", []string{"es"})
-		translations := map[string]string{"es": fmt.Sprintf("Translation %d", i)}
-		suite.stage.cacheTranslation(cacheKey, translations)
-
-		// Update metrics
-		suite.stage.recordAPILatency(time.Duration(i%1000) * time.Millisecond)
-
-		// Simulate some API calls for metrics
-		if i%10 == 0 {
-			suite.stage.recordAPIFailure()
-		} else {
-			suite.stage.recordAPISuccess()
-		}
-	}
-
-	runtime.GC()
-	runtime.ReadMemStats(&m2)
-
-	var memoryGrowth uint64
-	if m2.Alloc > m1.Alloc {
-		memoryGrowth = m2.Alloc - m1.Alloc
-	} else {
-		memoryGrowth = 0 // Memory was freed by GC
-	}
-	suite.T().Logf("Memory growth after %d iterations: %d bytes", iterations, memoryGrowth)
-
-	// Memory growth should be reasonable (less than 10MB for this test)
-	suite.Less(memoryGrowth, uint64(10*1024*1024), "Memory growth should be bounded")
-}
-
 // TestMetricsAccuracyUnderLoad tests metrics tracking accuracy.
 func (suite *TranslationLoadTestSuite) TestMetricsAccuracyUnderLoad() {
 	const numOperations = 1000
@@ -362,41 +219,6 @@ func (suite *TranslationLoadTestSuite) TestStressTestCircuitBreakerRecovery() {
 	// Record success to close circuit
 	suite.stage.recordAPISuccess()
 	suite.True(suite.stage.canMakeAPICall(), "Circuit should be closed after success")
-}
-
-// TestCacheCleanupEfficiency tests cache cleanup performance.
-func (suite *TranslationLoadTestSuite) TestCacheCleanupEfficiency() {
-	// Fill cache with entries of varying ages
-	now := time.Now()
-
-	// Add old entries (should be cleaned)
-	for i := 0; i < 500; i++ {
-		text := fmt.Sprintf("old_text_%d", i)
-		cacheKey := suite.stage.generateCacheKey(text, "en", []string{"es"})
-		suite.stage.cache[cacheKey] = &translationCacheEntry{
-			translations: map[string]string{"es": "old translation"},
-			timestamp:    now.Add(-2 * cacheTTL), // Expired
-		}
-	}
-
-	// Add recent entries (should be kept)
-	for i := 0; i < 500; i++ {
-		text := fmt.Sprintf("new_text_%d", i)
-		cacheKey := suite.stage.generateCacheKey(text, "en", []string{"es"})
-		suite.stage.cache[cacheKey] = &translationCacheEntry{
-			translations: map[string]string{"es": "new translation"},
-			timestamp:    now.Add(-30 * time.Minute), // Valid
-		}
-	}
-
-	// Measure cleanup performance
-	start := time.Now()
-	suite.stage.cleanupStaleEntriesLocked()
-	cleanupDuration := time.Since(start)
-
-	// Verify cleanup effectiveness
-	suite.LessOrEqual(len(suite.stage.cache), 500, "Should have cleaned up expired entries")
-	suite.Less(cleanupDuration, 100*time.Millisecond, "Cleanup should be fast")
 }
 
 // TestRateLimiterUnderSustainedLoad tests rate limiting behavior.

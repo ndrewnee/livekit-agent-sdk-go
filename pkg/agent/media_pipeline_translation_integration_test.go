@@ -660,6 +660,103 @@ func (suite *TranslationIntegrationTestSuite) TestModelPerformanceComparison() {
 	}
 }
 
+// TestWarmupImpact tests the impact of warm-up on first translation latency.
+func (suite *TranslationIntegrationTestSuite) TestWarmupImpact() {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
+	}
+
+	fmt.Printf("\n=== Testing Warm-up Impact ===\n\n")
+
+	// Test WITHOUT warm-up (cold start)
+	fmt.Printf("Test 1: WITHOUT warm-up (cold start)\n")
+	stageNoWarmup := NewTranslationStage(&TranslationConfig{
+		Name:         "no-warmup-test",
+		Priority:     30,
+		APIKey:       apiKey,
+		EnableWarmup: false,
+	})
+	defer stageNoWarmup.Disconnect()
+
+	stageNoWarmup.AddBeforeTranslationCallback(func(data *MediaData) {
+		if data.Metadata == nil {
+			data.Metadata = make(map[string]interface{})
+		}
+		data.Metadata["target_languages"] = []string{"es"}
+	})
+
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel1()
+
+	input := MediaData{
+		Type:    MediaTypeAudio,
+		TrackID: "warmup-test",
+		Metadata: map[string]interface{}{
+			"transcription_event": TranscriptionEvent{
+				Type:     "final",
+				Text:     "Hello, this is a test message.",
+				Language: "en",
+				IsFinal:  true,
+			},
+		},
+	}
+
+	start1 := time.Now()
+	_, err1 := stageNoWarmup.Process(ctx1, input)
+	latency1 := time.Since(start1)
+
+	suite.NoError(err1)
+	fmt.Printf("  First translation latency: %dms\n\n", latency1.Milliseconds())
+
+	// Test WITH warm-up
+	fmt.Printf("Test 2: WITH warm-up (pre-warmed)\n")
+	stageWithWarmup := NewTranslationStage(&TranslationConfig{
+		Name:         "with-warmup-test",
+		Priority:     30,
+		APIKey:       apiKey,
+		EnableWarmup: true,
+	})
+	defer stageWithWarmup.Disconnect()
+
+	stageWithWarmup.AddBeforeTranslationCallback(func(data *MediaData) {
+		if data.Metadata == nil {
+			data.Metadata = make(map[string]interface{})
+		}
+		data.Metadata["target_languages"] = []string{"es"}
+	})
+
+	// Wait for warm-up to complete
+	fmt.Printf("  Waiting for warm-up to complete...\n")
+	time.Sleep(2 * time.Second)
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel2()
+
+	start2 := time.Now()
+	_, err2 := stageWithWarmup.Process(ctx2, input)
+	latency2 := time.Since(start2)
+
+	suite.NoError(err2)
+	fmt.Printf("  First translation latency: %dms\n\n", latency2.Milliseconds())
+
+	// Compare results
+	improvement := latency1 - latency2
+	improvementPct := float64(improvement) / float64(latency1) * 100
+
+	fmt.Printf("=== Warm-up Impact Summary ===\n")
+	fmt.Printf("Cold start (no warm-up):  %dms\n", latency1.Milliseconds())
+	fmt.Printf("Pre-warmed (with warm-up): %dms\n", latency2.Milliseconds())
+	fmt.Printf("Improvement: %dms (%.1f%% faster)\n", improvement.Milliseconds(), improvementPct)
+
+	// Warm-up should provide noticeable improvement
+	if improvement > 0 {
+		fmt.Printf("\n✅ Warm-up successfully reduced cold start latency!\n")
+	} else {
+		fmt.Printf("\n⚠️  Warm-up did not reduce latency (may already be warm from previous tests)\n")
+	}
+}
+
 func TestTranslationIntegration(t *testing.T) {
 	suite.Run(t, new(TranslationIntegrationTestSuite))
 }

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,10 +37,6 @@ const (
 	defaultRateLimit = rate.Limit(10) // 10 requests per second
 	defaultBurstSize = 20
 
-	// Caching Configuration
-	maxCacheSize = 1000
-	cacheTTL     = 1 * time.Hour
-
 	// Circuit Breaker Configuration
 	maxConsecutiveFailures = 5
 	circuitBreakerTimeout  = 30 * time.Second
@@ -55,13 +50,14 @@ const (
 
 // TranslationConfig configures the TranslationStage.
 type TranslationConfig struct {
-	Name        string        // Unique identifier for this stage
-	Priority    int           // Execution order (should be 30, after BroadcastStage)
-	APIKey      string        // OpenAI API key for authentication
-	Model       string        // Model to use (empty for default)
-	Temperature float64       // Temperature setting (empty for default)
-	Endpoint    string        // API endpoint (empty for default)
-	Timeout     time.Duration // Stream timeout (empty for default)
+	Name         string        // Unique identifier for this stage
+	Priority     int           // Execution order (should be 30, after BroadcastStage)
+	APIKey       string        // OpenAI API key for authentication
+	Model        string        // Model to use (empty for default)
+	Temperature  float64       // Temperature setting (empty for default)
+	Endpoint     string        // API endpoint (empty for default)
+	Timeout      time.Duration // Stream timeout (empty for default)
+	EnableWarmup bool          // If true, performs async warm-up call on initialization
 }
 
 // TranslationStage translates transcriptions to multiple participant languages using OpenAI Streaming API.
@@ -99,10 +95,6 @@ type TranslationStage struct {
 	// Rate limiting
 	rateLimiter *rate.Limiter
 
-	// Caching
-	cache   map[string]*translationCacheEntry
-	cacheMu sync.RWMutex
-
 	// Circuit breaker
 	breaker *circuitBreaker
 
@@ -119,12 +111,6 @@ type TranslationCallback func(event TranscriptionEvent)
 // BeforeTranslationCallback is called before translation processing starts.
 // It can modify the MediaData, particularly metadata, to inject target languages or other data.
 type BeforeTranslationCallback func(data *MediaData)
-
-// Translation cache entry
-type translationCacheEntry struct {
-	translations map[string]string
-	timestamp    time.Time
-}
 
 // Circuit breaker states
 type circuitState int
@@ -244,13 +230,12 @@ func NewTranslationStage(config *TranslationConfig) *TranslationStage {
 		config.Timeout = streamReadTimeout
 	}
 
-	return &TranslationStage{
+	stage := &TranslationStage{
 		config:                     config,
 		client:                     getSharedHTTPClient(),
 		translationCallbacks:       make([]TranslationCallback, 0),
 		beforeTranslationCallbacks: make([]BeforeTranslationCallback, 0),
 		rateLimiter:                rate.NewLimiter(defaultRateLimit, defaultBurstSize),
-		cache:                      make(map[string]*translationCacheEntry),
 		breaker: &circuitBreaker{
 			state: circuitClosed,
 		},
@@ -260,6 +245,13 @@ func NewTranslationStage(config *TranslationConfig) *TranslationStage {
 		},
 		stats: &TranslationStats{},
 	}
+
+	// Perform async warm-up to establish connection and eliminate cold start
+	if config.EnableWarmup {
+		go stage.warmUp()
+	}
+
+	return stage
 }
 
 // GetName implements MediaPipelineStage.
@@ -394,12 +386,6 @@ func (ts *TranslationStage) translateViaStreaming(ctx context.Context, text, sou
 		return make(map[string]string), nil
 	}
 
-	// Check cache first
-	cacheKey := ts.generateCacheKey(text, sourceLang, targetLangs)
-	if cached := ts.getCachedTranslation(cacheKey); cached != nil {
-		return cached, nil
-	}
-
 	// Create optimized multi-language translation prompt
 	targetLangList := strings.Join(targetLangs, ", ")
 	prompt := fmt.Sprintf(`Translate to %s: %s
@@ -444,9 +430,6 @@ JSON format with language codes.`, targetLangList, text)
 			filteredTranslations[lang] = translation
 		}
 	}
-
-	// Cache the result
-	ts.cacheTranslation(cacheKey, filteredTranslations)
 
 	return filteredTranslations, nil
 }
@@ -540,6 +523,35 @@ func (ts *TranslationStage) Disconnect() {
 	// No persistent connections to clean up with streaming API - each request creates its own connection
 }
 
+// warmUp performs a small translation to establish HTTP connection and warm up the API.
+// This eliminates the cold start delay (typically 500-1000ms) on the first real translation.
+// The warm-up translation is not counted in statistics.
+func (ts *TranslationStage) warmUp() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	getLogger := logger.GetLogger()
+	getLogger.Infow("Starting translation stage warm-up")
+
+	// Perform a small test translation to establish connection
+	_, err := ts.translateViaStreaming(ctx, "Hello", "en", []string{"es"})
+	if err != nil {
+		getLogger.Debugw("Translation stage warm-up failed (non-critical)", "error", err)
+	} else {
+		getLogger.Infow("Translation stage warm-up completed successfully")
+	}
+
+	// Reset statistics to exclude warm-up call from metrics
+	ts.stats.mu.Lock()
+	ts.stats.TotalTranslations = 0
+	ts.stats.SuccessfulTranslations = 0
+	ts.stats.FailedTranslations = 0
+	ts.stats.AverageLatencyMs = 0
+	ts.stats.AverageTimeToFirstToken = 0
+	ts.stats.BytesTranslated = 0
+	ts.stats.mu.Unlock()
+}
+
 // callOpenAIWithMetrics makes a streaming call to the OpenAI API with metrics tracking.
 func (ts *TranslationStage) callOpenAIWithMetrics(ctx context.Context, prompt string) (string, error) {
 	start := time.Now()
@@ -571,6 +583,10 @@ func (ts *TranslationStage) callOpenAIStreaming(ctx context.Context, prompt stri
 		Stream:      true, // Enable streaming
 		MaxTokens:   500,  // Limit response length for faster generation
 		Messages: []ChatMessage{
+			{
+				Role:    "system",
+				Content: "You are a translation engine. Output only JSON with language codes as keys. Be concise.",
+			},
 			{
 				Role:    "user",
 				Content: prompt,
@@ -612,6 +628,7 @@ func (ts *TranslationStage) readStreamingResponse(ctx context.Context, resp *htt
 	scanner.Buffer(make([]byte, streamBufferSize), streamBufferSize)
 
 	var result strings.Builder
+	result.Grow(1024) // Pre-allocate capacity for typical JSON response
 	firstToken := true
 	chunksReceived := 0
 
@@ -689,6 +706,11 @@ func (ts *TranslationStage) readStreamingResponse(ctx context.Context, resp *htt
 func (ts *TranslationStage) extractJSONFromResponse(responseText string) string {
 	responseText = strings.TrimSpace(responseText)
 
+	// Fast path: if response starts with {, it's already JSON
+	if strings.HasPrefix(responseText, "{") {
+		return responseText
+	}
+
 	// Check if response is wrapped in markdown code fences
 	if strings.HasPrefix(responseText, "```json") && strings.HasSuffix(responseText, "```") {
 		// Extract JSON from markdown code fences
@@ -709,57 +731,6 @@ func (ts *TranslationStage) extractJSONFromResponse(responseText string) string 
 
 	// Return as-is if no code fences
 	return responseText
-}
-
-// Cache management methods
-func (ts *TranslationStage) generateCacheKey(text, sourceLang string, targetLangs []string) string {
-	// Create a deterministic cache key
-	key := fmt.Sprintf("%s|%s|%s", text, sourceLang, strings.Join(targetLangs, ","))
-	hash := sha1.Sum([]byte(key))
-	return fmt.Sprintf("%x", hash)
-}
-
-func (ts *TranslationStage) getCachedTranslation(cacheKey string) map[string]string {
-	ts.cacheMu.RLock()
-	defer ts.cacheMu.RUnlock()
-
-	entry, exists := ts.cache[cacheKey]
-	if !exists {
-		return nil
-	}
-
-	// Check if cache entry is still valid
-	if time.Since(entry.timestamp) > cacheTTL {
-		// Entry is stale, will be cleaned up later
-		return nil
-	}
-
-	return entry.translations
-}
-
-func (ts *TranslationStage) cacheTranslation(cacheKey string, translations map[string]string) {
-	ts.cacheMu.Lock()
-	defer ts.cacheMu.Unlock()
-
-	// Clean up stale entries if cache is getting full
-	if len(ts.cache) >= maxCacheSize {
-		ts.cleanupStaleEntriesLocked()
-	}
-
-	// Add new entry
-	ts.cache[cacheKey] = &translationCacheEntry{
-		translations: translations,
-		timestamp:    time.Now(),
-	}
-}
-
-func (ts *TranslationStage) cleanupStaleEntriesLocked() {
-	now := time.Now()
-	for key, entry := range ts.cache {
-		if now.Sub(entry.timestamp) > cacheTTL {
-			delete(ts.cache, key)
-		}
-	}
 }
 
 // Circuit breaker methods
@@ -881,7 +852,6 @@ func (ts *TranslationStage) GetAPIMetrics() map[string]any {
 		"connection_errors":              ts.metrics.connectionErrors,
 		"circuit_breaker_trips":          ts.metrics.circuitBreakerTrips,
 		"rate_limit_exceeded":            ts.metrics.rateLimitExceeded,
-		"cache_entries":                  len(ts.cache),
 	}
 }
 
