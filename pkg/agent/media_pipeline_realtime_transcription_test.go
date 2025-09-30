@@ -534,37 +534,31 @@ func TestRealtimeStatistics(t *testing.T) {
 func TestRealtimeLatencyCalculation(t *testing.T) {
 	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
-	// Simulate sending a packet first using ring buffer
+	// Simulate audio streaming started 2000ms ago (like in real usage)
 	stage.stats.mu.Lock()
-	sendTime := time.Now().Add(-100 * time.Millisecond) // Simulate packet sent 100ms ago
-	stage.stats.packetSendTimes[stage.stats.packetSendTimesHead] = sendTime
-	stage.stats.packetSendTimesHead = (stage.stats.packetSendTimesHead + 1) % 1000
+	stage.stats.FirstPacketSentAt = time.Now().Add(-2000 * time.Millisecond)
 	stage.stats.mu.Unlock()
 
-	// Simulate receiving a transcription after the packet was sent
+	// Simulate receiving a transcription now (2000ms after audio started)
 	transcriptionTime := time.Now()
 
 	// Manually trigger stats update with latency calculation
 	stage.updateStats("partial", transcriptionTime, false)
 
-	// Check stats - should have calculated latency around 100ms
+	// Check stats - should have calculated latency around 2000ms (end-to-end latency)
 	stats := stage.GetStats()
-	assert.Greater(t, stats.AverageLatencyMs, float64(95)) // Allow for small timing variations
-	assert.Less(t, stats.AverageLatencyMs, float64(110))   // Allow for small timing variations
+	assert.Greater(t, stats.AverageLatencyMs, float64(1950)) // Allow for small timing variations
+	assert.Less(t, stats.AverageLatencyMs, float64(2050))    // Allow for small timing variations
 
 	// Test exponentially weighted moving average
-	// Add another packet and transcription using ring buffer
-	stage.stats.mu.Lock()
-	stage.stats.packetSendTimes[stage.stats.packetSendTimesHead] = time.Now().Add(-50 * time.Millisecond) // 50ms ago
-	stage.stats.packetSendTimesHead = (stage.stats.packetSendTimesHead + 1) % 1000
-	stage.stats.mu.Unlock()
-
+	// Simulate another transcription 100ms later
+	time.Sleep(100 * time.Millisecond)
 	stage.updateStats("final", time.Now(), false)
 
-	// The new average should be affected by the second measurement (around 50ms)
+	// The new average should be affected by the second measurement (~2100ms)
 	newStats := stage.GetStats()
-	assert.NotEqual(t, stats.AverageLatencyMs, newStats.AverageLatencyMs)
-	assert.Greater(t, newStats.AverageLatencyMs, float64(0))
+	assert.Greater(t, newStats.AverageLatencyMs, stats.AverageLatencyMs) // Should increase
+	assert.Greater(t, newStats.AverageLatencyMs, float64(1950))
 }
 
 // TestRealtimeDisconnection tests disconnection handling

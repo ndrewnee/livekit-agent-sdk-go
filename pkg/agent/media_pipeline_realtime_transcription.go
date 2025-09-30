@@ -220,9 +220,8 @@ type RealtimeTranscriptionStats struct {
 	LastTranscriptionAt time.Time
 	BytesTranscribed    uint64
 
-	// Latency tracking (ring buffer for O(1) access to recent packets)
-	packetSendTimes     [1000]time.Time // Circular buffer of send times
-	packetSendTimesHead int             // Current position in ring buffer (0-999)
+	// Latency tracking
+	FirstPacketSentAt time.Time // When audio streaming started (for proper latency calculation)
 }
 
 // NewRealtimeTranscriptionStage creates a new OpenAI Realtime transcription stage.
@@ -427,9 +426,10 @@ func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaD
 			dataLen := len(input.Data)
 			go func() {
 				rts.stats.mu.Lock()
-				// Store in ring buffer and advance head pointer (O(1) operation, no cleanup needed)
-				rts.stats.packetSendTimes[rts.stats.packetSendTimesHead] = sendTime
-				rts.stats.packetSendTimesHead = (rts.stats.packetSendTimesHead + 1) % 1000
+				// Track first packet time for accurate end-to-end latency measurement
+				if rts.stats.FirstPacketSentAt.IsZero() {
+					rts.stats.FirstPacketSentAt = sendTime
+				}
 				rts.stats.AudioPacketsSent++
 				rts.stats.BytesTranscribed += uint64(dataLen)
 				rts.stats.mu.Unlock()
@@ -1212,18 +1212,14 @@ func (rts *RealtimeTranscriptionStage) updateStats(transcriptionType string, tra
 	}
 }
 
-// updateAverageLatencyLocked calculates and updates the average latency based on packet send times.
+// updateAverageLatencyLocked calculates and updates the average latency based on first packet time.
 // This method assumes stats.mu is already locked.
-// Uses ring buffer for O(1) access to most recent packet time.
+// Measures end-to-end latency from when audio streaming started to when transcription arrives.
 func (rts *RealtimeTranscriptionStage) updateAverageLatencyLocked(transcriptionTime time.Time) {
-	// Get the most recent packet time from ring buffer (O(1) operation)
-	// Most recent entry is at position (head - 1 + 1000) % 1000
-	mostRecentIdx := (rts.stats.packetSendTimesHead - 1 + 1000) % 1000
-	latestPacketTime := rts.stats.packetSendTimes[mostRecentIdx]
-
-	// If we found a valid packet time, calculate latency
-	if !latestPacketTime.IsZero() && latestPacketTime.Before(transcriptionTime) {
-		latency := transcriptionTime.Sub(latestPacketTime)
+	// Calculate latency from when audio streaming started (FirstPacketSentAt)
+	// This gives us the real end-to-end latency that users experience
+	if !rts.stats.FirstPacketSentAt.IsZero() && rts.stats.FirstPacketSentAt.Before(transcriptionTime) {
+		latency := transcriptionTime.Sub(rts.stats.FirstPacketSentAt)
 		latencyMs := float64(latency.Milliseconds())
 
 		// Update average latency using exponentially weighted moving average
