@@ -486,9 +486,11 @@ func (suite *TranslationIntegrationTestSuite) TestModelPerformanceComparison() {
 		name        string
 		description string
 	}{
-		{"gpt-4o-mini", "Current default (baseline)"},
+		{"gpt-4o-mini", "Baseline (original default)"},
 		{"gpt-4.1-nano", "Fastest/cheapest GPT-4.1"},
 		{"gpt-4.1-mini", "Balanced GPT-4.1"},
+		{"gpt-5-nano", "Fastest GPT-5"},
+		{"gpt-5-mini", "Balanced GPT-5"},
 	}
 
 	// Test texts (unique to avoid cache)
@@ -755,6 +757,712 @@ func (suite *TranslationIntegrationTestSuite) TestWarmupImpact() {
 	} else {
 		fmt.Printf("\n⚠️  Warm-up did not reduce latency (may already be warm from previous tests)\n")
 	}
+}
+
+// TestTranslationQuality validates translation quality against ground truth.
+func (suite *TranslationIntegrationTestSuite) TestTranslationQuality() {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
+	}
+
+	// Define ground truth test cases with expected translations from speech
+	type qualityTestCase struct {
+		english         string
+		spanishKeywords []string // Keywords that must appear
+		frenchKeywords  []string
+		germanKeywords  []string
+		russianKeywords []string
+		validationType  string // "keywords" for speech recognition tolerance
+	}
+
+	testCases := []qualityTestCase{
+		{
+			english:         "um hello everyone can you hear me okay",
+			spanishKeywords: []string{"hola", "todos", "escuchar", "bien"},
+			frenchKeywords:  []string{"bonjour", "monde", "entendez"},
+			germanKeywords:  []string{"hallo", "alle", "hören"},
+			russianKeywords: []string{"привет", "всем", "слышите", "меня"},
+			validationType:  "keywords", // Speech includes filler words like "um"
+		},
+		{
+			english:         "yeah so the meeting is scheduled for next Tuesday at two pm",
+			spanishKeywords: []string{"reunión", "martes", "próximo", "dos"},
+			frenchKeywords:  []string{"réunion", "mardi", "prochain"},
+			germanKeywords:  []string{"meeting", "besprechung", "dienstag"},
+			russianKeywords: []string{"встреча", "вторник", "следующий"},
+			validationType:  "keywords",
+		},
+		{
+			english:         "I think we should uh probably discuss this later",
+			spanishKeywords: []string{"creo", "deberíamos", "discutir", "tarde"},
+			frenchKeywords:  []string{"pense", "devrions", "discuter", "tard"},
+			germanKeywords:  []string{"denke", "sollten", "später"},
+			russianKeywords: []string{"думаю", "должны", "обсудить", "позже"},
+			validationType:  "keywords",
+		},
+		{
+			english:         "okay great thanks for joining today's call",
+			spanishKeywords: []string{"gracias", "unirse", "llamada"},
+			frenchKeywords:  []string{"merci", "appel", "aujourd'hui"},
+			germanKeywords:  []string{"danke", "anruf"},
+			russianKeywords: []string{"спасибо", "звонок", "сегодня"},
+			validationType:  "keywords",
+		},
+		{
+			english:         "let me share my screen so everyone can see the presentation",
+			spanishKeywords: []string{"compartir", "pantalla", "presentación"},
+			frenchKeywords:  []string{"partager", "écran", "présentation"},
+			germanKeywords:  []string{"bildschirm", "teilen", "präsentation"},
+			russianKeywords: []string{"экран", "презентацию", "показать"},
+			validationType:  "keywords",
+		},
+	}
+
+	// Models to test
+	models := []string{
+		"gpt-4o-mini",
+		"gpt-4.1-nano",
+		"gpt-4.1-mini",
+		"gpt-5-nano",
+		"gpt-5-mini",
+	}
+
+	fmt.Printf("\n=== Translation Quality Validation ===\n")
+	fmt.Printf("Testing %d models with %d test cases\n\n", len(models), len(testCases))
+
+	type modelQualityResult struct {
+		model        string
+		correctES    int
+		correctFR    int
+		correctDE    int
+		correctRU    int
+		totalTests   int
+		qualityScore float64
+	}
+
+	results := make([]modelQualityResult, 0, len(models))
+
+	for _, modelName := range models {
+		fmt.Printf("Testing %s...\n", modelName)
+
+		stage := NewTranslationStage(&TranslationConfig{
+			Name:     "quality-test",
+			Priority: 30,
+			APIKey:   apiKey,
+			Model:    modelName,
+		})
+
+		result := modelQualityResult{
+			model:      modelName,
+			totalTests: len(testCases) * 4, // 4 languages per test case (es, fr, de, ru)
+		}
+
+		for i, tc := range testCases {
+			stage.AddBeforeTranslationCallback(func(data *MediaData) {
+				if data.Metadata == nil {
+					data.Metadata = make(map[string]interface{})
+				}
+				data.Metadata["target_languages"] = []string{"es", "fr", "de", "ru"}
+			})
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+			input := MediaData{
+				Type:    MediaTypeAudio,
+				TrackID: fmt.Sprintf("quality-test-%s-%d", modelName, i),
+				Metadata: map[string]interface{}{
+					"transcription_event": TranscriptionEvent{
+						Type:     "final",
+						Text:     tc.english,
+						Language: "en",
+						IsFinal:  true,
+					},
+				},
+			}
+
+			output, err := stage.Process(ctx, input)
+			cancel()
+
+			if err == nil {
+				transcriptionEvent, ok := output.Metadata["transcription_event"].(TranscriptionEvent)
+				if ok && len(transcriptionEvent.Translations) > 0 {
+					// Validate Spanish
+					if esTranslation, exists := transcriptionEvent.Translations["es"]; exists {
+						if validateWithKeywords(esTranslation, tc.spanishKeywords) {
+							result.correctES++
+						}
+					}
+
+					// Validate French
+					if frTranslation, exists := transcriptionEvent.Translations["fr"]; exists {
+						if validateWithKeywords(frTranslation, tc.frenchKeywords) {
+							result.correctFR++
+						}
+					}
+
+					// Validate German
+					if deTranslation, exists := transcriptionEvent.Translations["de"]; exists {
+						if validateWithKeywords(deTranslation, tc.germanKeywords) {
+							result.correctDE++
+						}
+					}
+
+					// Validate Russian
+					if ruTranslation, exists := transcriptionEvent.Translations["ru"]; exists {
+						if validateWithKeywords(ruTranslation, tc.russianKeywords) {
+							result.correctRU++
+						}
+					}
+				}
+			}
+
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		// Calculate quality score
+		totalCorrect := result.correctES + result.correctFR + result.correctDE + result.correctRU
+		result.qualityScore = float64(totalCorrect) / float64(result.totalTests) * 100
+
+		fmt.Printf("  Spanish: %d/%d correct\n", result.correctES, len(testCases))
+		fmt.Printf("  French:  %d/%d correct\n", result.correctFR, len(testCases))
+		fmt.Printf("  German:  %d/%d correct\n", result.correctDE, len(testCases))
+		fmt.Printf("  Russian: %d/%d correct\n", result.correctRU, len(testCases))
+		fmt.Printf("  Overall Quality Score: %.1f%%\n\n", result.qualityScore)
+
+		stage.Disconnect()
+		results = append(results, result)
+	}
+
+	// Print comparison summary
+	fmt.Printf("\n=== Quality Comparison Summary ===\n\n")
+	fmt.Printf("%-25s %-12s %-12s %-12s %-12s %-15s\n", "Model", "Spanish", "French", "German", "Russian", "Quality Score")
+	fmt.Printf("%s\n", strings.Repeat("-", 95))
+
+	for _, result := range results {
+		fmt.Printf("%-25s %-12s %-12s %-12s %-12s %.1f%%",
+			result.model,
+			fmt.Sprintf("%d/%d", result.correctES, len(testCases)),
+			fmt.Sprintf("%d/%d", result.correctFR, len(testCases)),
+			fmt.Sprintf("%d/%d", result.correctDE, len(testCases)),
+			fmt.Sprintf("%d/%d", result.correctRU, len(testCases)),
+			result.qualityScore)
+
+		// Show comparison to baseline (gpt-4o-mini)
+		if result.model == "gpt-4o-mini" {
+			fmt.Printf(" (baseline)")
+		} else if len(results) > 0 && results[0].model == "gpt-4o-mini" {
+			baseline := results[0].qualityScore
+			diff := result.qualityScore - baseline
+			if diff > 0 {
+				fmt.Printf(" (+%.1f%%)", diff)
+			} else if diff < 0 {
+				fmt.Printf(" (%.1f%%)", diff)
+			}
+		}
+		fmt.Println()
+
+		// Assert minimum quality threshold
+		suite.Greater(result.qualityScore, 70.0, fmt.Sprintf("%s quality score should be above 70%%", result.model))
+	}
+
+	fmt.Printf("\n✅ All models meet minimum quality threshold (70%%)\n")
+}
+
+// validateWithKeywords checks if translation contains required keywords.
+func validateWithKeywords(translation string, keywords []string) bool {
+	translation = strings.ToLower(translation)
+	// At least 50% of keywords must be present
+	matchCount := 0
+	for _, keyword := range keywords {
+		if strings.Contains(translation, strings.ToLower(keyword)) {
+			matchCount++
+		}
+	}
+	return float64(matchCount)/float64(len(keywords)) >= 0.5
+}
+
+// TestTranslationQualityRegression tests edge cases to ensure quality hasn't degraded.
+func (suite *TranslationIntegrationTestSuite) TestTranslationQualityRegression() {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
+	}
+
+	// Edge case test scenarios for speech transcription
+	type edgeCaseTest struct {
+		category      string
+		english       string
+		requiredTerms map[string][]string // language -> required terms
+		description   string
+	}
+
+	testCases := []edgeCaseTest{
+		{
+			category:    "Filler Words and Disfluencies",
+			english:     "um so like I was saying uh we need to you know complete this by Friday",
+			description: "Speech disfluencies should be handled gracefully",
+			requiredTerms: map[string][]string{
+				"es": {"necesitamos", "completar", "viernes"},
+				"fr": {"devons", "terminer", "vendredi"},
+				"ru": {"нужно", "завершить", "пятниц"},
+			},
+		},
+		{
+			category:    "Numbers in Speech",
+			english:     "the meeting is at three thirty pm on the fifteenth",
+			description: "Spoken numbers should be translated correctly",
+			requiredTerms: map[string][]string{
+				"es": {"reunión", "tres", "treinta", "quince"},
+				"fr": {"réunion", "trois", "trente", "quinze"},
+				"ru": {"встреча", "три", "тридцать", "пятнадцат"},
+			},
+		},
+		{
+			category:    "Incomplete Sentences",
+			english:     "so if we could just maybe I don't know start working on",
+			description: "Incomplete speech should be translated as-is",
+			requiredTerms: map[string][]string{
+				"es": {"podríamos", "trabajar"},
+				"fr": {"pourrions", "travailler"},
+				"ru": {"могли", "работать"},
+			},
+		},
+		{
+			category:    "Repetitions and False Starts",
+			english:     "we need to we need to schedule a call with the the client",
+			description: "Repetitions in speech should be handled",
+			requiredTerms: map[string][]string{
+				"es": {"necesitamos", "programar", "llamada", "cliente"},
+				"fr": {"devons", "planifier", "appel", "client"},
+				"ru": {"нужно", "запланировать", "звонок", "клиент"},
+			},
+		},
+		{
+			category:    "Casual Speech Contractions",
+			english:     "I'm gonna check that we're all set and we'll get back to you",
+			description: "Contractions and casual speech should translate naturally",
+			requiredTerms: map[string][]string{
+				"es": {"voy", "verificar", "comunicar"},
+				"fr": {"vais", "vérifier", "recontacterons"},
+				"ru": {"проверю", "связь"},
+			},
+		},
+		{
+			category:    "Questions with Filler Words",
+			english:     "so um can you hear me is everyone on the call",
+			description: "Questions with fillers should preserve meaning",
+			requiredTerms: map[string][]string{
+				"es": {"pueden", "escuchar", "todos", "llamada"},
+				"fr": {"pouvez", "entendre", "tout", "appel"},
+				"ru": {"слышите", "все", "звонок"},
+			},
+		},
+		{
+			category:    "Technical Terms in Speech",
+			english:     "let's deploy the API to production and monitor the uh the metrics",
+			description: "Technical terms in casual speech should be preserved",
+			requiredTerms: map[string][]string{
+				"es": {"api", "producción", "monitorear", "métric"},
+				"fr": {"api", "production", "surveiller", "métrique"},
+				"ru": {"api", "продакшн", "production", "метрик"},
+			},
+		},
+	}
+
+	// Test with baseline model (gpt-4o-mini) and newer models
+	models := []string{
+		"gpt-4o-mini",  // Baseline (original default)
+		"gpt-4.1-nano", // Current optimized model
+		"gpt-4.1-mini", // Current optimized model
+		"gpt-5-nano",   // Newest GPT-5 model
+		"gpt-5-mini",   // Newest GPT-5 model
+	}
+
+	fmt.Printf("\n=== Translation Quality Regression Testing ===\n")
+	fmt.Printf("Testing %d edge case categories with %d models\n\n", len(testCases), len(models))
+
+	type regressionResult struct {
+		model       string
+		passedTests int
+		totalTests  int
+		failedCases []string
+	}
+
+	results := make([]regressionResult, 0, len(models))
+
+	for _, modelName := range models {
+		fmt.Printf("Testing %s...\n", modelName)
+
+		stage := NewTranslationStage(&TranslationConfig{
+			Name:     "regression-test",
+			Priority: 30,
+			APIKey:   apiKey,
+			Model:    modelName,
+		})
+
+		result := regressionResult{
+			model:       modelName,
+			totalTests:  len(testCases),
+			failedCases: make([]string, 0),
+		}
+
+		for _, tc := range testCases {
+			targetLangs := []string{"es", "fr", "ru"}
+
+			stage.AddBeforeTranslationCallback(func(data *MediaData) {
+				if data.Metadata == nil {
+					data.Metadata = make(map[string]interface{})
+				}
+				data.Metadata["target_languages"] = targetLangs
+			})
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+			input := MediaData{
+				Type:    MediaTypeAudio,
+				TrackID: fmt.Sprintf("regression-%s", tc.category),
+				Metadata: map[string]interface{}{
+					"transcription_event": TranscriptionEvent{
+						Type:     "final",
+						Text:     tc.english,
+						Language: "en",
+						IsFinal:  true,
+					},
+				},
+			}
+
+			output, err := stage.Process(ctx, input)
+			cancel()
+
+			testPassed := false
+			if err == nil {
+				transcriptionEvent, ok := output.Metadata["transcription_event"].(TranscriptionEvent)
+				if ok && len(transcriptionEvent.Translations) > 0 {
+					// Check if all required terms are present for each language
+					allLanguagesPassed := true
+					for lang, requiredTerms := range tc.requiredTerms {
+						if translation, exists := transcriptionEvent.Translations[lang]; exists {
+							if !validateWithKeywords(translation, requiredTerms) {
+								allLanguagesPassed = false
+								break
+							}
+						} else {
+							allLanguagesPassed = false
+							break
+						}
+					}
+					testPassed = allLanguagesPassed
+				}
+			}
+
+			if testPassed {
+				result.passedTests++
+				fmt.Printf("  ✅ %s: PASS\n", tc.category)
+			} else {
+				result.failedCases = append(result.failedCases, tc.category)
+				fmt.Printf("  ❌ %s: FAIL - %s\n", tc.category, tc.description)
+			}
+
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		stage.Disconnect()
+		results = append(results, result)
+		fmt.Println()
+	}
+
+	// Print summary
+	fmt.Printf("\n=== Regression Test Summary ===\n\n")
+	fmt.Printf("%-30s %-15s %-15s\n", "Model", "Passed", "Pass Rate")
+	fmt.Printf("%s\n", strings.Repeat("-", 65))
+
+	for i, result := range results {
+		passRate := float64(result.passedTests) / float64(result.totalTests) * 100
+		fmt.Printf("%-30s %-15s %.1f%%",
+			result.model,
+			fmt.Sprintf("%d/%d", result.passedTests, result.totalTests),
+			passRate)
+
+		// Show comparison to baseline (gpt-4o-mini)
+		if result.model == "gpt-4o-mini" {
+			fmt.Printf(" (baseline)")
+		} else if i > 0 && results[0].model == "gpt-4o-mini" {
+			baselineRate := float64(results[0].passedTests) / float64(results[0].totalTests) * 100
+			diff := passRate - baselineRate
+			if diff > 0 {
+				fmt.Printf(" (+%.1f%%)", diff)
+			} else if diff < 0 {
+				fmt.Printf(" (%.1f%%)", diff)
+			}
+		}
+		fmt.Println()
+
+		if len(result.failedCases) > 0 {
+			fmt.Printf("  Failed: %s\n", strings.Join(result.failedCases, ", "))
+		}
+
+		// Assert minimum regression threshold (at least 80% pass rate)
+		suite.Greater(passRate, 80.0, fmt.Sprintf("%s should pass at least 80%% of regression tests", result.model))
+	}
+
+	fmt.Printf("\n✅ All models meet regression quality threshold\n")
+}
+
+// TestQualityVsLatencyTradeoff analyzes the quality/latency tradeoff across models.
+func (suite *TranslationIntegrationTestSuite) TestQualityVsLatencyTradeoff() {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
+	}
+
+	// Quality test cases from speech transcription (fewer for speed)
+	type qualityTest struct {
+		english         string
+		spanishKeywords []string
+		frenchKeywords  []string
+		russianKeywords []string
+	}
+
+	testCases := []qualityTest{
+		{
+			english:         "um hello everyone can you hear me",
+			spanishKeywords: []string{"hola", "todos", "escuchar"},
+			frenchKeywords:  []string{"bonjour", "monde", "entendre"},
+			russianKeywords: []string{"привет", "всем", "слышите"},
+		},
+		{
+			english:         "the meeting starts at three o'clock this afternoon",
+			spanishKeywords: []string{"reunión", "tres", "tarde"},
+			frenchKeywords:  []string{"réunion", "trois", "après-midi"},
+			russianKeywords: []string{"встреча", "три", "после"},
+		},
+		{
+			english:         "okay so let's uh review the quarterly results",
+			spanishKeywords: []string{"revisar", "resultados", "trimestre"},
+			frenchKeywords:  []string{"réviser", "résultats", "trimestre"},
+			russianKeywords: []string{"рассмотреть", "результат", "квартал"},
+		},
+	}
+
+	// All models to compare
+	models := []string{
+		"gpt-4o-mini",
+		"gpt-4.1-nano",
+		"gpt-4.1-mini",
+		"gpt-5-nano",
+		"gpt-5-mini",
+	}
+
+	fmt.Printf("\n=== Quality vs Latency Tradeoff Analysis ===\n")
+	fmt.Printf("Analyzing %d models with %d test cases\n\n", len(models), len(testCases))
+
+	type tradeoffResult struct {
+		model               string
+		avgLatencyMs        float64
+		avgTTFTMs           float64
+		qualityScore        float64
+		qualityPerMs        float64 // Quality score per millisecond (efficiency metric)
+		correctTranslations int
+		totalTranslations   int
+	}
+
+	results := make([]tradeoffResult, 0, len(models))
+
+	for _, modelName := range models {
+		fmt.Printf("Testing %s...\n", modelName)
+
+		stage := NewTranslationStage(&TranslationConfig{
+			Name:     "tradeoff-test",
+			Priority: 30,
+			APIKey:   apiKey,
+			Model:    modelName,
+		})
+
+		var totalLatency time.Duration
+		correctCount := 0
+		totalTranslations := len(testCases) * 3 // Spanish + French + Russian
+		testCount := 0
+
+		for i, tc := range testCases {
+			stage.AddBeforeTranslationCallback(func(data *MediaData) {
+				if data.Metadata == nil {
+					data.Metadata = make(map[string]interface{})
+				}
+				data.Metadata["target_languages"] = []string{"es", "fr", "ru"}
+			})
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+			input := MediaData{
+				Type:    MediaTypeAudio,
+				TrackID: fmt.Sprintf("tradeoff-%s-%d", modelName, i),
+				Metadata: map[string]interface{}{
+					"transcription_event": TranscriptionEvent{
+						Type:     "final",
+						Text:     tc.english,
+						Language: "en",
+						IsFinal:  true,
+					},
+				},
+			}
+
+			start := time.Now()
+			output, err := stage.Process(ctx, input)
+			latency := time.Since(start)
+			cancel()
+
+			if err == nil {
+				transcriptionEvent, ok := output.Metadata["transcription_event"].(TranscriptionEvent)
+				if ok && len(transcriptionEvent.Translations) > 0 {
+					testCount++
+					totalLatency += latency
+
+					// Check Spanish quality
+					if esTranslation, exists := transcriptionEvent.Translations["es"]; exists {
+						if validateWithKeywords(esTranslation, tc.spanishKeywords) {
+							correctCount++
+						}
+					}
+
+					// Check French quality
+					if frTranslation, exists := transcriptionEvent.Translations["fr"]; exists {
+						if validateWithKeywords(frTranslation, tc.frenchKeywords) {
+							correctCount++
+						}
+					}
+
+					// Check Russian quality
+					if ruTranslation, exists := transcriptionEvent.Translations["ru"]; exists {
+						if validateWithKeywords(ruTranslation, tc.russianKeywords) {
+							correctCount++
+						}
+					}
+				}
+			}
+
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		// Calculate metrics
+		avgLatency := float64(totalLatency.Milliseconds()) / float64(testCount)
+		qualityScore := float64(correctCount) / float64(totalTranslations) * 100
+
+		// Get TTFT from stage stats
+		stats := stage.GetStats()
+		avgTTFT := stats.AverageTimeToFirstToken
+
+		// Calculate efficiency: quality per millisecond
+		qualityPerMs := qualityScore / avgLatency
+
+		result := tradeoffResult{
+			model:               modelName,
+			avgLatencyMs:        avgLatency,
+			avgTTFTMs:           avgTTFT,
+			qualityScore:        qualityScore,
+			qualityPerMs:        qualityPerMs,
+			correctTranslations: correctCount,
+			totalTranslations:   totalTranslations,
+		}
+
+		fmt.Printf("  Latency: %.0fms | Quality: %.1f%% | Efficiency: %.3f\n",
+			avgLatency, qualityScore, qualityPerMs)
+
+		stage.Disconnect()
+		results = append(results, result)
+	}
+
+	// Sort by efficiency (quality per ms) to find optimal model
+	sortedResults := make([]tradeoffResult, len(results))
+	copy(sortedResults, results)
+
+	// Simple bubble sort by qualityPerMs (descending)
+	for i := 0; i < len(sortedResults)-1; i++ {
+		for j := 0; j < len(sortedResults)-i-1; j++ {
+			if sortedResults[j].qualityPerMs < sortedResults[j+1].qualityPerMs {
+				sortedResults[j], sortedResults[j+1] = sortedResults[j+1], sortedResults[j]
+			}
+		}
+	}
+
+	// Print comprehensive summary
+	fmt.Printf("\n=== Detailed Comparison ===\n\n")
+	fmt.Printf("%-15s %-12s %-12s %-12s %-12s %-15s\n",
+		"Model", "Latency", "TTFT", "Quality", "Accuracy", "Efficiency")
+	fmt.Printf("%s\n", strings.Repeat("-", 80))
+
+	for _, result := range results {
+		fmt.Printf("%-15s %-12s %-12s %-12s %-15s %.4f\n",
+			result.model,
+			fmt.Sprintf("%.0fms", result.avgLatencyMs),
+			fmt.Sprintf("%.0fms", result.avgTTFTMs),
+			fmt.Sprintf("%.1f%%", result.qualityScore),
+			fmt.Sprintf("%d/%d", result.correctTranslations, result.totalTranslations),
+			result.qualityPerMs)
+	}
+
+	// Print recommendations
+	fmt.Printf("\n=== Model Recommendations ===\n\n")
+
+	fastest := results[0]
+	bestQuality := results[0]
+	mostEfficient := sortedResults[0]
+
+	for _, r := range results {
+		if r.avgLatencyMs < fastest.avgLatencyMs {
+			fastest = r
+		}
+		if r.qualityScore > bestQuality.qualityScore {
+			bestQuality = r
+		}
+	}
+
+	fmt.Printf("⚡ Fastest Model:        %s (%.0fms avg latency)", fastest.model, fastest.avgLatencyMs)
+	if fastest.model != "gpt-4o-mini" && results[0].model == "gpt-4o-mini" {
+		improvement := (results[0].avgLatencyMs - fastest.avgLatencyMs) / results[0].avgLatencyMs * 100
+		fmt.Printf(" [%.1f%% faster than baseline]", improvement)
+	}
+	fmt.Println()
+
+	fmt.Printf("🎯 Best Quality:         %s (%.1f%% quality score)", bestQuality.model, bestQuality.qualityScore)
+	if bestQuality.model != "gpt-4o-mini" && results[0].model == "gpt-4o-mini" {
+		diff := bestQuality.qualityScore - results[0].qualityScore
+		if diff > 0 {
+			fmt.Printf(" [+%.1f%% vs baseline]", diff)
+		}
+	}
+	fmt.Println()
+
+	fmt.Printf("⭐ Most Efficient:       %s (%.4f quality/ms)", mostEfficient.model, mostEfficient.qualityPerMs)
+	if mostEfficient.model != "gpt-4o-mini" && results[0].model == "gpt-4o-mini" {
+		baselineEff := results[0].qualityPerMs
+		improvement := (mostEfficient.qualityPerMs - baselineEff) / baselineEff * 100
+		fmt.Printf(" [%.1f%% more efficient]", improvement)
+	}
+	fmt.Println()
+
+	// Provide production recommendation
+	fmt.Printf("\n💡 Production Recommendation:\n")
+	if mostEfficient.qualityScore >= 80.0 {
+		fmt.Printf("   Use %s - optimal balance of speed and quality\n", mostEfficient.model)
+	} else if fastest.qualityScore >= 80.0 {
+		fmt.Printf("   Use %s - prioritize speed while maintaining quality\n", fastest.model)
+	} else {
+		fmt.Printf("   Use %s - prioritize quality for production\n", bestQuality.model)
+	}
+
+	// Assertions
+	for _, result := range results {
+		// All models should meet minimum quality threshold
+		suite.Greater(result.qualityScore, 60.0,
+			fmt.Sprintf("%s should maintain at least 60%% quality", result.model))
+
+		// Efficiency should be reasonable (quality per ms should be positive)
+		suite.Greater(result.qualityPerMs, 0.0,
+			fmt.Sprintf("%s efficiency should be positive", result.model))
+	}
+
+	fmt.Printf("\n✅ All models meet minimum thresholds\n")
 }
 
 func TestTranslationIntegration(t *testing.T) {
