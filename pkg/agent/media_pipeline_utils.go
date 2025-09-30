@@ -14,7 +14,7 @@ import (
 // Constants for shared HTTP client configuration
 const (
 	// HTTP Client Configuration
-	sharedHTTPTimeout = 15 * time.Second
+	sharedHTTPTimeout = 5 * time.Second
 
 	// Shared connection pooling configuration for both translation and TTS
 	sharedMaxIdleConns        = 30 // Increased for both stages

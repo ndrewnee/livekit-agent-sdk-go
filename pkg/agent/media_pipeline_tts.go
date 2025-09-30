@@ -44,13 +44,14 @@ type TTSCallback func(roomID string, ttsAudioMap map[string][]byte)
 
 // TextToSpeechConfig configures the TextToSpeechStage.
 type TextToSpeechConfig struct {
-	Name     string  // Unique identifier for this stage
-	Priority int     // Execution order (should be 40, after TranslationStage)
-	APIKey   string  // OpenAI API key for authentication
-	Model    string  // TTS model to use (empty for default)
-	Voice    string  // Voice to use (empty for default)
-	Speed    float64 // Speaking speed (empty for default)
-	Endpoint string  // API endpoint (empty for default)
+	Name     string        // Unique identifier for this stage
+	Priority int           // Execution order (should be 40, after TranslationStage)
+	APIKey   string        // OpenAI API key for authentication
+	Model    string        // TTS model to use (empty for default)
+	Voice    string        // Voice to use (empty for default)
+	Speed    float64       // Speaking speed (empty for default)
+	Timeout  time.Duration // Timeout for API calls (empty for default 5s)
+	Endpoint string        // API endpoint (empty for default)
 }
 
 // TextToSpeechStage converts translated text chunks to speech using OpenAI TTS API.
@@ -170,6 +171,9 @@ func NewTextToSpeechStage(config *TextToSpeechConfig) *TextToSpeechStage {
 	}
 	if config.Speed == 0 {
 		config.Speed = defaultSpeed
+	}
+	if config.Timeout == 0 {
+		config.Timeout = sharedHTTPTimeout
 	}
 	if config.Endpoint == "" {
 		config.Endpoint = openAITTSEndpoint
@@ -365,6 +369,11 @@ func (tts *TextToSpeechStage) callOpenAITTS(ctx context.Context, text string) ([
 
 	req.Header.Set("Authorization", "Bearer "+tts.config.APIKey)
 	req.Header.Set("Content-Type", "application/json")
+
+	// Apply timeout to API call
+	timeoutCtx, cancel := context.WithTimeout(req.Context(), tts.config.Timeout)
+	defer cancel()
+	req = req.WithContext(timeoutCtx)
 
 	startTime := time.Now()
 	resp, err := tts.client.Do(req)

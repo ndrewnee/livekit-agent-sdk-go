@@ -106,6 +106,7 @@ type RealtimeTranscriptionConfig struct {
 	Language  string         // Language code (e.g., "en", "ru", "zh", "ar")
 	Prompt    string         // Context prompt for better transcription accuracy
 	Voice     string         // Voice to use (e.g., "alloy", "echo", "fable", "onyx", "nova", "shimmer")
+	Timeout   time.Duration  // Timeout for API calls (empty for default 5s)
 	VADConfig *TurnDetection // Optional VAD configuration (auto-configured if nil)
 }
 
@@ -238,6 +239,9 @@ func NewRealtimeTranscriptionStage(config *RealtimeTranscriptionConfig) *Realtim
 	}
 	if config.Voice == "" {
 		config.Voice = "alloy" // Default voice
+	}
+	if config.Timeout == 0 {
+		config.Timeout = sharedHTTPTimeout
 	}
 
 	// Create audio transcription config
@@ -644,8 +648,8 @@ func (rts *RealtimeTranscriptionStage) getEphemeralKey(ctx context.Context) (str
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("OpenAI-Beta", "realtime=v1")
 
-	// Use shared HTTP/2 client with connection pooling (5s timeout for faster failure detection)
-	ctx, cancel := context.WithTimeout(req.Context(), 5*time.Second)
+	// Use shared HTTP/2 client with connection pooling
+	ctx, cancel := context.WithTimeout(req.Context(), rts.config.Timeout)
 	defer cancel()
 	req = req.WithContext(ctx)
 
@@ -716,8 +720,8 @@ func (rts *RealtimeTranscriptionStage) exchangeSDPWithOpenAI(ctx context.Context
 	getLogger := logger.GetLogger()
 	getLogger.Debugw("Sending SDP offer", "url", url, "auth", "Bearer "+rts.ephemeralKey[:10]+"...")
 
-	// Use shared HTTP/2 client with connection pooling (5s timeout for faster failure detection)
-	sdpCtx, sdpCancel := context.WithTimeout(req.Context(), 5*time.Second)
+	// Use shared HTTP/2 client with connection pooling
+	sdpCtx, sdpCancel := context.WithTimeout(req.Context(), rts.config.Timeout)
 	defer sdpCancel()
 	req = req.WithContext(sdpCtx)
 

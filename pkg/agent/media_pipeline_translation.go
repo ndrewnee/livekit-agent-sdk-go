@@ -26,9 +26,8 @@ const (
 	defaultMaxTokens        = 500 // Default max tokens for response generation
 
 	// Streaming Configuration
-	streamReadTimeout = 15 * time.Second
-	streamBufferSize  = 8192
-	maxStreamChunks   = 1000
+	streamBufferSize = 8192
+	maxStreamChunks  = 1000
 
 	// Input Validation
 	maxInputTextSize   = 4000 // characters
@@ -57,7 +56,7 @@ type TranslationConfig struct {
 	Model        string        // Model to use (empty for default)
 	Temperature  float64       // Temperature setting (empty for default)
 	Endpoint     string        // API endpoint (empty for default)
-	Timeout      time.Duration // Stream timeout (empty for default)
+	Timeout      time.Duration // Timeout for translation API calls (empty for default 5s)
 	MaxTokens    int           // Maximum tokens for response (empty for default 500)
 	EnableWarmup bool          // If true, performs async warm-up call on initialization
 }
@@ -229,7 +228,7 @@ func NewTranslationStage(config *TranslationConfig) *TranslationStage {
 		config.Endpoint = openAIStreamingEndpoint
 	}
 	if config.Timeout == 0 {
-		config.Timeout = streamReadTimeout
+		config.Timeout = sharedHTTPTimeout
 	}
 	if config.MaxTokens == 0 {
 		config.MaxTokens = defaultMaxTokens
@@ -399,8 +398,12 @@ JSON format with language codes.`, targetLangList, text)
 		return nil, fmt.Errorf("rate limit exceeded, please try again later")
 	}
 
+	// Create context with timeout for API call
+	timeoutCtx, cancel := context.WithTimeout(ctx, ts.config.Timeout)
+	defer cancel()
+
 	// Call OpenAI Streaming API - single attempt for real-time performance
-	responseText, err := ts.callOpenAIWithMetrics(ctx, prompt)
+	responseText, err := ts.callOpenAIWithMetrics(timeoutCtx, prompt)
 	if err != nil {
 		ts.recordAPIFailure()
 		// Record specific streaming errors
@@ -524,7 +527,7 @@ func (ts *TranslationStage) Disconnect() {
 // This eliminates the cold start delay (typically 500-1000ms) on the first real translation.
 // The warm-up translation is not counted in statistics.
 func (ts *TranslationStage) warmUp() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), ts.config.Timeout)
 	defer cancel()
 
 	getLogger := logger.GetLogger()
