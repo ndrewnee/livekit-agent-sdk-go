@@ -9,32 +9,6 @@ import (
 	"testing"
 )
 
-// BenchmarkTranslationCacheHit benchmarks cache hit performance.
-func BenchmarkTranslationCacheHit(b *testing.B) {
-	stage := NewTranslationStage(&TranslationConfig{
-		Name:     "bench",
-		Priority: 30,
-		APIKey:   "test-key",
-	})
-	defer stage.Disconnect()
-
-	// Pre-populate cache
-	text := "Benchmark test text"
-	targetLangs := []string{"es", "fr"}
-	cacheKey := stage.generateCacheKey(text, "en", targetLangs)
-	translations := map[string]string{"es": "Texto de prueba", "fr": "Texte de test"}
-	stage.cacheTranslation(cacheKey, translations)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			_ = stage.getCachedTranslation(cacheKey)
-		}
-	})
-}
-
 // BenchmarkTranslationProcessing benchmarks translation processing performance.
 func BenchmarkTranslationProcessing(b *testing.B) {
 	// Setup mock OpenAI streaming server
