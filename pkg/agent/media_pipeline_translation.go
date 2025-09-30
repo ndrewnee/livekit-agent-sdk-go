@@ -400,11 +400,10 @@ func (ts *TranslationStage) translateViaStreaming(ctx context.Context, text, sou
 		return cached, nil
 	}
 
-	// Create multi-language translation prompt
+	// Create optimized multi-language translation prompt
 	targetLangList := strings.Join(targetLangs, ", ")
-	prompt := fmt.Sprintf(`Translate from %s to %s.
-Text: %s
-Return only JSON with language codes as keys.`, sourceLang, targetLangList, text)
+	prompt := fmt.Sprintf(`Translate to %s: %s
+JSON format with language codes.`, targetLangList, text)
 
 	// Check circuit breaker
 	if !ts.canMakeAPICall() {
@@ -570,6 +569,7 @@ func (ts *TranslationStage) callOpenAIStreaming(ctx context.Context, prompt stri
 		Model:       ts.config.Model,
 		Temperature: ts.config.Temperature,
 		Stream:      true, // Enable streaming
+		MaxTokens:   500,  // Limit response length for faster generation
 		Messages: []ChatMessage{
 			{
 				Role:    "user",
