@@ -220,8 +220,8 @@ type RealtimeTranscriptionStats struct {
 	LastTranscriptionAt time.Time
 	BytesTranscribed    uint64
 
-	// Latency tracking
-	FirstPacketSentAt time.Time // When audio streaming started (for proper latency calculation)
+	// Latency tracking (for per-transcription latency measurement)
+	CurrentSegmentStartTime time.Time // When the current audio segment started (reset after each transcription)
 }
 
 // NewRealtimeTranscriptionStage creates a new OpenAI Realtime transcription stage.
@@ -427,8 +427,8 @@ func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaD
 			go func() {
 				rts.stats.mu.Lock()
 				// Track first packet time for accurate end-to-end latency measurement
-				if rts.stats.FirstPacketSentAt.IsZero() {
-					rts.stats.FirstPacketSentAt = sendTime
+				if rts.stats.CurrentSegmentStartTime.IsZero() {
+					rts.stats.CurrentSegmentStartTime = sendTime
 				}
 				rts.stats.AudioPacketsSent++
 				rts.stats.BytesTranscribed += uint64(dataLen)
@@ -1212,14 +1212,14 @@ func (rts *RealtimeTranscriptionStage) updateStats(transcriptionType string, tra
 	}
 }
 
-// updateAverageLatencyLocked calculates and updates the average latency based on first packet time.
+// updateAverageLatencyLocked calculates and updates per-transcription latency.
 // This method assumes stats.mu is already locked.
-// Measures end-to-end latency from when audio streaming started to when transcription arrives.
+// Measures latency for each transcription segment independently (resets after each transcription).
 func (rts *RealtimeTranscriptionStage) updateAverageLatencyLocked(transcriptionTime time.Time) {
-	// Calculate latency from when audio streaming started (FirstPacketSentAt)
-	// This gives us the real end-to-end latency that users experience
-	if !rts.stats.FirstPacketSentAt.IsZero() && rts.stats.FirstPacketSentAt.Before(transcriptionTime) {
-		latency := transcriptionTime.Sub(rts.stats.FirstPacketSentAt)
+	// Calculate per-transcription latency from when current audio segment started
+	// Each transcription closes one segment and starts the next
+	if !rts.stats.CurrentSegmentStartTime.IsZero() && rts.stats.CurrentSegmentStartTime.Before(transcriptionTime) {
+		latency := transcriptionTime.Sub(rts.stats.CurrentSegmentStartTime)
 		latencyMs := float64(latency.Milliseconds())
 
 		// Update average latency using exponentially weighted moving average
@@ -1228,5 +1228,8 @@ func (rts *RealtimeTranscriptionStage) updateAverageLatencyLocked(transcriptionT
 		} else {
 			rts.stats.AverageLatencyMs = (rts.stats.AverageLatencyMs * 0.9) + (latencyMs * 0.1)
 		}
+
+		// Reset segment start time for next transcription (this makes it per-transcription, not cumulative)
+		rts.stats.CurrentSegmentStartTime = transcriptionTime
 	}
 }

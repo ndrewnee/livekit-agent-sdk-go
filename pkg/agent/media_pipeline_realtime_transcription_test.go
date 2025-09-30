@@ -534,31 +534,32 @@ func TestRealtimeStatistics(t *testing.T) {
 func TestRealtimeLatencyCalculation(t *testing.T) {
 	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
-	// Simulate audio streaming started 2000ms ago (like in real usage)
+	// Simulate audio segment started 2000ms ago
 	stage.stats.mu.Lock()
-	stage.stats.FirstPacketSentAt = time.Now().Add(-2000 * time.Millisecond)
+	stage.stats.CurrentSegmentStartTime = time.Now().Add(-2000 * time.Millisecond)
 	stage.stats.mu.Unlock()
 
-	// Simulate receiving a transcription now (2000ms after audio started)
+	// Simulate receiving first transcription now (2000ms after segment started)
 	transcriptionTime := time.Now()
-
-	// Manually trigger stats update with latency calculation
 	stage.updateStats("partial", transcriptionTime, false)
 
-	// Check stats - should have calculated latency around 2000ms (end-to-end latency)
+	// Check stats - should have calculated latency around 2000ms
 	stats := stage.GetStats()
 	assert.Greater(t, stats.AverageLatencyMs, float64(1950)) // Allow for small timing variations
 	assert.Less(t, stats.AverageLatencyMs, float64(2050))    // Allow for small timing variations
 
-	// Test exponentially weighted moving average
-	// Simulate another transcription 100ms later
+	// Simulate second transcription 1500ms later (new segment)
+	// This should measure latency for the second segment, not cumulative
 	time.Sleep(100 * time.Millisecond)
-	stage.updateStats("final", time.Now(), false)
+	secondTranscriptionTime := time.Now()
+	stage.updateStats("final", secondTranscriptionTime, false)
 
-	// The new average should be affected by the second measurement (~2100ms)
+	// The new average should reflect both measurements via EWMA
+	// First: 2000ms, Second: ~100ms, EWMA: 2000*0.9 + 100*0.1 = 1810ms
 	newStats := stage.GetStats()
-	assert.Greater(t, newStats.AverageLatencyMs, stats.AverageLatencyMs) // Should increase
-	assert.Greater(t, newStats.AverageLatencyMs, float64(1950))
+	assert.NotEqual(t, stats.AverageLatencyMs, newStats.AverageLatencyMs)
+	assert.Less(t, newStats.AverageLatencyMs, stats.AverageLatencyMs) // Should decrease due to shorter second segment
+	assert.Greater(t, newStats.AverageLatencyMs, float64(1700))       // Should be around 1800ms
 }
 
 // TestRealtimeDisconnection tests disconnection handling
