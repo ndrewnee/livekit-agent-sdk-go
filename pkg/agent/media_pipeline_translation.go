@@ -304,18 +304,10 @@ func (ts *TranslationStage) Process(ctx context.Context, input MediaData) (outpu
 		return input, nil
 	}
 
-	// For partial transcriptions, only process if text is substantial (>30 characters)
-	// This enables faster streaming while avoiding processing very short fragments
+	// Only process final transcriptions (TTS stage ignores partials anyway)
+	// Processing partials wastes API costs and adds latency with no user benefit
 	if !transcriptionEvent.IsFinal {
-		textLength := len(strings.TrimSpace(transcriptionEvent.Text))
-		if textLength < 30 {
-			return input, nil
-		}
-		// Mark as partial for downstream stages
-		if input.Metadata == nil {
-			input.Metadata = make(map[string]interface{})
-		}
-		input.Metadata["from_partial_transcription"] = true
+		return input, nil
 	}
 
 	// Get source language from transcription
