@@ -23,6 +23,7 @@ const (
 	openAIStreamingEndpoint = "https://api.openai.com/v1/chat/completions"
 	defaultModel            = "gpt-4.1-nano" // Fastest model for translation (35% faster than gpt-4o-mini)
 	defaultTemperature      = 0.0
+	defaultMaxTokens        = 500 // Default max tokens for response generation
 
 	// Streaming Configuration
 	streamReadTimeout = 15 * time.Second
@@ -57,6 +58,7 @@ type TranslationConfig struct {
 	Temperature  float64       // Temperature setting (empty for default)
 	Endpoint     string        // API endpoint (empty for default)
 	Timeout      time.Duration // Stream timeout (empty for default)
+	MaxTokens    int           // Maximum tokens for response (empty for default 500)
 	EnableWarmup bool          // If true, performs async warm-up call on initialization
 }
 
@@ -228,6 +230,9 @@ func NewTranslationStage(config *TranslationConfig) *TranslationStage {
 	}
 	if config.Timeout == 0 {
 		config.Timeout = streamReadTimeout
+	}
+	if config.MaxTokens == 0 {
+		config.MaxTokens = defaultMaxTokens
 	}
 
 	stage := &TranslationStage{
@@ -580,8 +585,8 @@ func (ts *TranslationStage) callOpenAIStreaming(ctx context.Context, prompt stri
 	request := OpenAIChatRequest{
 		Model:       ts.config.Model,
 		Temperature: ts.config.Temperature,
-		Stream:      true, // Enable streaming
-		MaxTokens:   500,  // Limit response length for faster generation
+		Stream:      true,                // Enable streaming
+		MaxTokens:   ts.config.MaxTokens, // Limit response length for faster generation
 		Messages: []ChatMessage{
 			{
 				Role:    "system",
