@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -471,6 +472,192 @@ func calculateStdDev(durations []time.Duration, avg time.Duration) time.Duration
 	}
 	variance := sumSquares / float64(len(durations))
 	return time.Duration(int64(variance)) * time.Millisecond
+}
+
+// TestModelPerformanceComparison compares latency across different OpenAI models.
+func (suite *TranslationIntegrationTestSuite) TestModelPerformanceComparison() {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
+	}
+
+	// Models to compare
+	models := []struct {
+		name        string
+		description string
+	}{
+		{"gpt-4o-mini", "Current default (baseline)"},
+		{"gpt-4.1-nano", "Fastest/cheapest GPT-4.1"},
+		{"gpt-4.1-mini", "Balanced GPT-4.1"},
+	}
+
+	// Test texts (unique to avoid cache)
+	testTexts := []string{
+		"The annual conference will take place next month in San Francisco.",
+		"Please review the attached document and provide your feedback by Friday.",
+		"Our team has successfully completed the project ahead of schedule.",
+		"Customer satisfaction is our top priority and we strive for excellence.",
+		"The new software update includes several important security improvements.",
+	}
+
+	type modelResult struct {
+		model              string
+		totalLatencies     []time.Duration
+		ttftLatencies      []time.Duration
+		successCount       int
+		failureCount       int
+		translationSamples []string
+	}
+
+	results := make([]modelResult, 0, len(models))
+
+	fmt.Printf("\n=== Model Performance Comparison ===\n")
+	fmt.Printf("Running %d translations per model\n\n", len(testTexts))
+
+	for _, modelInfo := range models {
+		fmt.Printf("Testing %s (%s)...\n", modelInfo.name, modelInfo.description)
+
+		stage := NewTranslationStage(&TranslationConfig{
+			Name:     "model-comparison-test",
+			Priority: 30,
+			APIKey:   apiKey,
+			Model:    modelInfo.name,
+		})
+
+		stage.AddBeforeTranslationCallback(func(data *MediaData) {
+			if data.Metadata == nil {
+				data.Metadata = make(map[string]interface{})
+			}
+			data.Metadata["target_languages"] = []string{"es", "fr"}
+		})
+
+		result := modelResult{
+			model:              modelInfo.name,
+			totalLatencies:     make([]time.Duration, 0),
+			ttftLatencies:      make([]time.Duration, 0),
+			translationSamples: make([]string, 0),
+		}
+
+		for i, text := range testTexts {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+			input := MediaData{
+				Type:    MediaTypeAudio,
+				TrackID: fmt.Sprintf("track_%s_%d", modelInfo.name, i),
+				Metadata: map[string]interface{}{
+					"transcription_event": TranscriptionEvent{
+						Type:     "final",
+						Text:     text,
+						Language: "en",
+						IsFinal:  true,
+					},
+				},
+			}
+
+			start := time.Now()
+			output, err := stage.Process(ctx, input)
+			latency := time.Since(start)
+			cancel()
+
+			if err == nil {
+				transcriptionEvent, ok := output.Metadata["transcription_event"].(TranscriptionEvent)
+				if ok && len(transcriptionEvent.Translations) > 0 {
+					result.successCount++
+					result.totalLatencies = append(result.totalLatencies, latency)
+
+					stats := stage.GetStats()
+					result.ttftLatencies = append(result.ttftLatencies, time.Duration(stats.AverageTimeToFirstToken)*time.Millisecond)
+
+					// Store first translation sample
+					if len(result.translationSamples) == 0 && len(transcriptionEvent.Translations["es"]) > 0 {
+						result.translationSamples = append(result.translationSamples, transcriptionEvent.Translations["es"])
+					}
+
+					fmt.Printf("  Run %d: %dms (TTFT: %.0fms)\n", i+1, latency.Milliseconds(), stats.AverageTimeToFirstToken)
+				} else {
+					result.failureCount++
+					fmt.Printf("  Run %d: FAILED - no translations\n", i+1)
+				}
+			} else {
+				result.failureCount++
+				fmt.Printf("  Run %d: FAILED - %v\n", i+1, err)
+			}
+
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		stage.Disconnect()
+		results = append(results, result)
+		fmt.Printf("\n")
+	}
+
+	// Print comparison summary
+	fmt.Printf("\n=== Performance Comparison Summary ===\n\n")
+	fmt.Printf("%-20s %-15s %-15s %-15s %-12s\n", "Model", "Avg Latency", "Min Latency", "Max Latency", "Success Rate")
+	fmt.Printf("%s\n", strings.Repeat("-", 80))
+
+	baselineAvg := int64(0)
+	for _, result := range results {
+		if len(result.totalLatencies) > 0 {
+			avgLatency := calculateAverage(result.totalLatencies)
+			minLatency := calculateMin(result.totalLatencies)
+			maxLatency := calculateMax(result.totalLatencies)
+			successRate := float64(result.successCount) / float64(result.successCount+result.failureCount) * 100
+
+			improvement := ""
+			if result.model == "gpt-4o-mini" {
+				baselineAvg = avgLatency.Milliseconds()
+			} else if baselineAvg > 0 {
+				pctChange := float64(baselineAvg-avgLatency.Milliseconds()) / float64(baselineAvg) * 100
+				if pctChange > 0 {
+					improvement = fmt.Sprintf(" (%.1f%% faster)", pctChange)
+				} else {
+					improvement = fmt.Sprintf(" (%.1f%% slower)", -pctChange)
+				}
+			}
+
+			fmt.Printf("%-20s %-15s %-15s %-15s %.1f%%%s\n",
+				result.model,
+				fmt.Sprintf("%dms", avgLatency.Milliseconds()),
+				fmt.Sprintf("%dms", minLatency.Milliseconds()),
+				fmt.Sprintf("%dms", maxLatency.Milliseconds()),
+				successRate,
+				improvement)
+		}
+	}
+
+	fmt.Printf("\n=== TTFT Comparison ===\n\n")
+	fmt.Printf("%-20s %-15s %-15s %-15s\n", "Model", "Avg TTFT", "Min TTFT", "Max TTFT")
+	fmt.Printf("%s\n", strings.Repeat("-", 65))
+
+	for _, result := range results {
+		if len(result.ttftLatencies) > 0 {
+			avgTTFT := calculateAverage(result.ttftLatencies)
+			minTTFT := calculateMin(result.ttftLatencies)
+			maxTTFT := calculateMax(result.ttftLatencies)
+
+			fmt.Printf("%-20s %-15s %-15s %-15s\n",
+				result.model,
+				fmt.Sprintf("%dms", avgTTFT.Milliseconds()),
+				fmt.Sprintf("%dms", minTTFT.Milliseconds()),
+				fmt.Sprintf("%dms", maxTTFT.Milliseconds()))
+		}
+	}
+
+	// Print translation quality samples
+	fmt.Printf("\n=== Translation Quality Samples ===\n")
+	fmt.Printf("English: \"%s\"\n\n", testTexts[0])
+	for _, result := range results {
+		if len(result.translationSamples) > 0 {
+			fmt.Printf("%-20s: \"%s\"\n", result.model, result.translationSamples[0])
+		}
+	}
+
+	// Assertions
+	suite.True(len(results) > 0, "Should have test results")
+	for _, result := range results {
+		suite.Greater(result.successCount, 0, fmt.Sprintf("%s should have at least one successful translation", result.model))
+	}
 }
 
 func TestTranslationIntegration(t *testing.T) {

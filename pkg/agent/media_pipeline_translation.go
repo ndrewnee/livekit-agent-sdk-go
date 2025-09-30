@@ -22,7 +22,7 @@ import (
 const (
 	// OpenAI Streaming API Configuration
 	openAIStreamingEndpoint = "https://api.openai.com/v1/chat/completions"
-	defaultModel            = "gpt-4o-mini"
+	defaultModel            = "gpt-4.1-nano" // Fastest model for translation (35% faster than gpt-4o-mini)
 	defaultTemperature      = 0.0
 
 	// Streaming Configuration
@@ -68,13 +68,13 @@ type TranslationConfig struct {
 //
 // This stage runs AFTER BroadcastStage and translates already-broadcast transcriptions
 // to all unique participant translation languages. It uses OpenAI's Streaming API
-// with gpt-4o-mini model for real-time translation responses via Server-Sent Events.
+// with gpt-4.1-nano model for real-time translation responses via Server-Sent Events.
 //
 // Key features:
 //   - Dynamic participant language tracking
 //   - Multi-language single-call streaming translation
 //   - Smart filtering to avoid unnecessary translations
-//   - Streaming API integration with gpt-4o-mini for faster responses
+//   - Streaming API integration with gpt-4.1-nano for fastest responses
 //   - Real-time single-attempt translation for immediate responses
 //   - No retry logic to maintain real-time performance
 //   - Automatic translation broadcasting
@@ -228,7 +228,7 @@ type TranslationStats struct {
 //   - name: Unique identifier for this stage
 //   - priority: Execution order (should be 30, after BroadcastStage)
 //   - apiKey: OpenAI API key for authentication
-//   - model: OpenAI model to use (empty for default "gpt-4o-mini")
+//   - model: OpenAI model to use (empty for default "gpt-4.1-nano")
 func NewTranslationStage(config *TranslationConfig) *TranslationStage {
 	// Apply defaults
 	if config.Model == "" {
