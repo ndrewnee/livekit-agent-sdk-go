@@ -254,34 +254,42 @@ func (suite *RealtimeTranscriptionIntegrationTestSuite) runSingleTranscription(a
 	suite.Require().NoError(err, "Failed to connect to OpenAI")
 	defer stage.Disconnect()
 
-	// Connect agent to room
+	// Connect agent to room with event-driven track subscription
 	agentToken, err := createToken(suite.livekitKey, suite.livekitSecret, roomName, "agent")
 	suite.Require().NoError(err, "Failed to create agent token")
 
-	agentRoom, err := lksdk.ConnectToRoomWithToken(suite.livekitURL, agentToken, &lksdk.RoomCallback{})
+	// Use channel to wait for audio track subscription (prevents race condition)
+	trackSubscribed := make(chan bool, 1)
+
+	// Set up callback to subscribe when track is available
+	callbacks := &lksdk.RoomCallback{}
+	callbacks.OnParticipantConnected = func(participant *lksdk.RemoteParticipant) {
+		fmt.Printf("  ✓ Participant connected: %s\n", participant.Identity())
+	}
+	callbacks.OnTrackSubscribed = func(track *webrtc.TrackRemote, publication *lksdk.RemoteTrackPublication, participant *lksdk.RemoteParticipant) {
+		if track.Kind() == webrtc.RTPCodecTypeAudio {
+			fmt.Printf("  ✓ Subscribed to audio from %s\n", participant.Identity())
+			go processAudioTrack(ctx, stage, track)
+			select {
+			case trackSubscribed <- true:
+			default:
+			}
+		}
+	}
+
+	agentRoom, err := lksdk.ConnectToRoomWithToken(suite.livekitURL, agentToken, callbacks)
 	suite.Require().NoError(err, "Failed to connect agent")
 	defer agentRoom.Disconnect()
 
 	fmt.Println("  ✓ Agent connected")
 
-	// Wait for publisher to be available
-	time.Sleep(2 * time.Second)
-
-	// Subscribe to audio tracks
-	subscribed := false
-	for _, participant := range agentRoom.GetRemoteParticipants() {
-		for _, track := range participant.TrackPublications() {
-			if track.Kind() == lksdk.TrackKindAudio {
-				fmt.Printf("  ✓ Subscribed to audio from %s\n", participant.Identity())
-				if remoteTrack := track.Track(); remoteTrack != nil {
-					go processAudioTrack(ctx, stage, remoteTrack.(*webrtc.TrackRemote))
-					subscribed = true
-				}
-			}
-		}
+	// Wait for track subscription with timeout (event-driven, no race condition)
+	select {
+	case <-trackSubscribed:
+		// Track subscribed successfully
+	case <-time.After(10 * time.Second):
+		suite.Require().Fail("Timeout waiting for audio track subscription")
 	}
-
-	suite.Require().True(subscribed, "Failed to subscribe to audio track")
 
 	// Start streaming
 	err = publisher.StartStreaming()

@@ -268,7 +268,7 @@ func NewRealtimeTranscriptionStage(config *RealtimeTranscriptionConfig) *Realtim
 		turnDetection:                vadConfig,
 		transcriptionCallbacks:       make([]TranscriptionCallback, 0),
 		beforeTranscriptionCallbacks: make([]BeforeTranscriptionCallback, 0),
-		eventChan:                    make(chan RealtimeEvent, 1000), // Increased from 100 to 1000
+		eventChan:                    make(chan RealtimeEvent, 100),
 		closeChan:                    make(chan struct{}),
 		stats:                        &RealtimeTranscriptionStats{},
 		// RTP packet tracking
@@ -656,7 +656,7 @@ func (rts *RealtimeTranscriptionStage) getEphemeralKey(ctx context.Context) (str
 	client := getSharedHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("ephemeral key request failed: %w", err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
@@ -728,7 +728,7 @@ func (rts *RealtimeTranscriptionStage) exchangeSDPWithOpenAI(ctx context.Context
 	client := getSharedHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sdp exchange request failed: %w", err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
@@ -851,6 +851,7 @@ func (rts *RealtimeTranscriptionStage) handleDataChannelMessage(data []byte) {
 			Type: msgType,
 			Data: msg,
 		}
+
 		select {
 		case rts.eventChan <- event:
 		default:
