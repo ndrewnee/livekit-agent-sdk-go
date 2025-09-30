@@ -192,7 +192,7 @@ func TestRealtimeTranscriptionStageCreation(t *testing.T) {
 	assert.Equal(t, 20, stage.GetPriority())
 	assert.True(t, stage.CanProcess(MediaTypeAudio))
 	assert.False(t, stage.CanProcess(MediaTypeVideo))
-	assert.Equal(t, "gpt-4o-transcribe", stage.config.Model)
+	assert.Equal(t, "gpt-4o-mini-transcribe", stage.config.Model)
 	assert.Equal(t, "alloy", stage.config.Voice)
 	assert.NotNil(t, stage.stats)
 	assert.False(t, stage.IsConnected())
@@ -534,10 +534,11 @@ func TestRealtimeStatistics(t *testing.T) {
 func TestRealtimeLatencyCalculation(t *testing.T) {
 	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
-	// Simulate sending a packet first
+	// Simulate sending a packet first using ring buffer
 	stage.stats.mu.Lock()
 	sendTime := time.Now().Add(-100 * time.Millisecond) // Simulate packet sent 100ms ago
-	stage.stats.packetSendTimes[1] = sendTime
+	stage.stats.packetSendTimes[stage.stats.packetSendTimesHead] = sendTime
+	stage.stats.packetSendTimesHead = (stage.stats.packetSendTimesHead + 1) % 1000
 	stage.stats.mu.Unlock()
 
 	// Simulate receiving a transcription after the packet was sent
@@ -552,9 +553,10 @@ func TestRealtimeLatencyCalculation(t *testing.T) {
 	assert.Less(t, stats.AverageLatencyMs, float64(110))   // Allow for small timing variations
 
 	// Test exponentially weighted moving average
-	// Add another packet and transcription
+	// Add another packet and transcription using ring buffer
 	stage.stats.mu.Lock()
-	stage.stats.packetSendTimes[2] = time.Now().Add(-50 * time.Millisecond) // 50ms ago
+	stage.stats.packetSendTimes[stage.stats.packetSendTimesHead] = time.Now().Add(-50 * time.Millisecond) // 50ms ago
+	stage.stats.packetSendTimesHead = (stage.stats.packetSendTimesHead + 1) % 1000
 	stage.stats.mu.Unlock()
 
 	stage.updateStats("final", time.Now(), false)

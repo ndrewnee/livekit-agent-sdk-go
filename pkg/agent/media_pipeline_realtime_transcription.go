@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/livekit/protocol/logger"
@@ -71,8 +72,8 @@ type RealtimeTranscriptionStage struct {
 	// Latest transcription for pipeline output
 	latestTranscription *TranscriptionEvent
 
-	// RTP packet tracking
-	sequenceNumber uint16
+	// RTP packet tracking (using atomic for lock-free access)
+	sequenceNumber atomic.Uint32 // Using uint32 to store uint16 atomically
 	timestampBase  uint32
 	ssrc           uint32
 }
@@ -219,8 +220,9 @@ type RealtimeTranscriptionStats struct {
 	LastTranscriptionAt time.Time
 	BytesTranscribed    uint64
 
-	// Latency tracking
-	packetSendTimes map[uint16]time.Time // sequence number -> send time
+	// Latency tracking (ring buffer for O(1) access to recent packets)
+	packetSendTimes     [1000]time.Time // Circular buffer of send times
+	packetSendTimesHead int             // Current position in ring buffer (0-999)
 }
 
 // NewRealtimeTranscriptionStage creates a new OpenAI Realtime transcription stage.
@@ -256,7 +258,7 @@ func NewRealtimeTranscriptionStage(config *RealtimeTranscriptionConfig) *Realtim
 	// Generate unique SSRC for this session
 	ssrc := uint32(time.Now().UnixNano() & 0xFFFFFFFF)
 
-	return &RealtimeTranscriptionStage{
+	stage := &RealtimeTranscriptionStage{
 		name:                         config.Name,
 		priority:                     config.Priority,
 		config:                       config,
@@ -264,16 +266,15 @@ func NewRealtimeTranscriptionStage(config *RealtimeTranscriptionConfig) *Realtim
 		turnDetection:                vadConfig,
 		transcriptionCallbacks:       make([]TranscriptionCallback, 0),
 		beforeTranscriptionCallbacks: make([]BeforeTranscriptionCallback, 0),
-		eventChan:                    make(chan RealtimeEvent, 100),
+		eventChan:                    make(chan RealtimeEvent, 1000), // Increased from 100 to 1000
 		closeChan:                    make(chan struct{}),
-		stats: &RealtimeTranscriptionStats{
-			packetSendTimes: make(map[uint16]time.Time),
-		},
+		stats:                        &RealtimeTranscriptionStats{},
 		// RTP packet tracking
-		sequenceNumber: 0,
-		timestampBase:  uint32(time.Now().UnixNano() / 1000000), // Start with current time in ms
-		ssrc:           ssrc,
+		timestampBase: uint32(time.Now().UnixNano() / 1000000), // Start with current time in ms
+		ssrc:          ssrc,
 	}
+	stage.sequenceNumber.Store(0) // Initialize atomic
+	return stage
 }
 
 // getDefaultVADConfig returns language-optimized voice activity detection settings
@@ -397,15 +398,13 @@ func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaD
 		// The audio data from LiveKit is already in Opus format
 		// WebRTC accepts Opus directly
 
-		// Create RTP packet from Opus audio with proper timestamps
-		rts.mu.Lock()
-		rts.sequenceNumber++
-		seqNum := rts.sequenceNumber
+		// Create RTP packet from Opus audio with proper timestamps (lock-free)
+		seqNum32 := rts.sequenceNumber.Add(1)
+		seqNum := uint16(seqNum32 & 0xFFFF)
 		ssrc := rts.ssrc
 		// Calculate timestamp: Opus typically uses 48kHz sample rate
 		// For 20ms frames (typical), increment by 960 samples (48000 * 0.02)
 		timestamp := rts.timestampBase + uint32(seqNum)*960
-		rts.mu.Unlock()
 
 		rtpPacket := &rtp.Packet{
 			Header: rtp.Header{
@@ -423,22 +422,18 @@ func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaD
 			getLogger := logger.GetLogger()
 			getLogger.Debugw("failed to write audio to WebRTC track", "error", err)
 		} else {
-			// Record packet send time for latency calculation and update stats
+			// Record packet send time asynchronously to avoid blocking audio path
 			sendTime := time.Now()
-			rts.stats.mu.Lock()
-			rts.stats.packetSendTimes[seqNum] = sendTime
-			// Keep only recent packets (last 1000) to prevent memory leak
-			if len(rts.stats.packetSendTimes) > 1000 {
-				// Remove oldest entries
-				for seq := range rts.stats.packetSendTimes {
-					if seq < seqNum-1000 {
-						delete(rts.stats.packetSendTimes, seq)
-					}
-				}
-			}
-			rts.stats.AudioPacketsSent++
-			rts.stats.BytesTranscribed += uint64(len(input.Data))
-			rts.stats.mu.Unlock()
+			dataLen := len(input.Data)
+			go func() {
+				rts.stats.mu.Lock()
+				// Store in ring buffer and advance head pointer (O(1) operation, no cleanup needed)
+				rts.stats.packetSendTimes[rts.stats.packetSendTimesHead] = sendTime
+				rts.stats.packetSendTimesHead = (rts.stats.packetSendTimesHead + 1) % 1000
+				rts.stats.AudioPacketsSent++
+				rts.stats.BytesTranscribed += uint64(dataLen)
+				rts.stats.mu.Unlock()
+			}()
 		}
 	}
 
@@ -654,7 +649,12 @@ func (rts *RealtimeTranscriptionStage) getEphemeralKey(ctx context.Context) (str
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("OpenAI-Beta", "realtime=v1")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	// Use shared HTTP/2 client with connection pooling (5s timeout for faster failure detection)
+	ctx, cancel := context.WithTimeout(req.Context(), 5*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	client := getSharedHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -721,7 +721,12 @@ func (rts *RealtimeTranscriptionStage) exchangeSDPWithOpenAI(ctx context.Context
 	getLogger := logger.GetLogger()
 	getLogger.Debugw("Sending SDP offer", "url", url, "auth", "Bearer "+rts.ephemeralKey[:10]+"...")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	// Use shared HTTP/2 client with connection pooling (5s timeout for faster failure detection)
+	sdpCtx, sdpCancel := context.WithTimeout(req.Context(), 5*time.Second)
+	defer sdpCancel()
+	req = req.WithContext(sdpCtx)
+
+	client := getSharedHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -989,18 +994,6 @@ func (rts *RealtimeTranscriptionStage) processEvents() {
 // processRealtimeEvent processes a single Realtime API event.
 func (rts *RealtimeTranscriptionStage) processRealtimeEvent(event RealtimeEvent) {
 	switch event.Type {
-	case "conversation.item.input_audio_transcription.delta":
-		//// Handle partial transcriptions from input audio
-		//if delta, ok := event.Data["delta"].(string); ok && delta != "" {
-		//	rts.notifyTranscription(TranscriptionEvent{
-		//		Type:      "partial",
-		//		Text:      delta,
-		//		Timestamp: time.Now(),
-		//		IsFinal:   false,
-		//	})
-		//	rts.stats.PartialTranscriptions++
-		//}
-
 	case "conversation.item.input_audio_transcription.completed":
 		// Handle final transcriptions from input audio
 		if transcript, ok := event.Data["transcript"].(string); ok && transcript != "" {
@@ -1221,18 +1214,15 @@ func (rts *RealtimeTranscriptionStage) updateStats(transcriptionType string, tra
 
 // updateAverageLatencyLocked calculates and updates the average latency based on packet send times.
 // This method assumes stats.mu is already locked.
+// Uses ring buffer for O(1) access to most recent packet time.
 func (rts *RealtimeTranscriptionStage) updateAverageLatencyLocked(transcriptionTime time.Time) {
-	// Find the most recent packet that could correspond to this transcription
-	// We'll use a simple heuristic: find the packet sent closest to but before the transcription
-	var latestPacketTime time.Time
-	for _, sendTime := range rts.stats.packetSendTimes {
-		if sendTime.Before(transcriptionTime) && sendTime.After(latestPacketTime) {
-			latestPacketTime = sendTime
-		}
-	}
+	// Get the most recent packet time from ring buffer (O(1) operation)
+	// Most recent entry is at position (head - 1 + 1000) % 1000
+	mostRecentIdx := (rts.stats.packetSendTimesHead - 1 + 1000) % 1000
+	latestPacketTime := rts.stats.packetSendTimes[mostRecentIdx]
 
-	// If we found a packet time, calculate latency
-	if !latestPacketTime.IsZero() {
+	// If we found a valid packet time, calculate latency
+	if !latestPacketTime.IsZero() && latestPacketTime.Before(transcriptionTime) {
 		latency := transcriptionTime.Sub(latestPacketTime)
 		latencyMs := float64(latency.Milliseconds())
 
