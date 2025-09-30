@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/livekit/protocol/logger"
@@ -72,8 +71,8 @@ type RealtimeTranscriptionStage struct {
 	// Latest transcription for pipeline output
 	latestTranscription *TranscriptionEvent
 
-	// RTP packet tracking (using atomic for lock-free access)
-	sequenceNumber atomic.Uint32 // Using uint32 to store uint16 atomically
+	// RTP packet tracking
+	sequenceNumber uint16
 	timestampBase  uint32
 	ssrc           uint32
 }
@@ -257,7 +256,7 @@ func NewRealtimeTranscriptionStage(config *RealtimeTranscriptionConfig) *Realtim
 	// Generate unique SSRC for this session
 	ssrc := uint32(time.Now().UnixNano() & 0xFFFFFFFF)
 
-	stage := &RealtimeTranscriptionStage{
+	return &RealtimeTranscriptionStage{
 		name:                         config.Name,
 		priority:                     config.Priority,
 		config:                       config,
@@ -269,11 +268,10 @@ func NewRealtimeTranscriptionStage(config *RealtimeTranscriptionConfig) *Realtim
 		closeChan:                    make(chan struct{}),
 		stats:                        &RealtimeTranscriptionStats{},
 		// RTP packet tracking
-		timestampBase: uint32(time.Now().UnixNano() / 1000000), // Start with current time in ms
-		ssrc:          ssrc,
+		sequenceNumber: 0,
+		timestampBase:  uint32(time.Now().UnixNano() / 1000000), // Start with current time in ms
+		ssrc:           ssrc,
 	}
-	stage.sequenceNumber.Store(0) // Initialize atomic
-	return stage
 }
 
 // getDefaultVADConfig returns language-optimized voice activity detection settings
@@ -397,13 +395,15 @@ func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaD
 		// The audio data from LiveKit is already in Opus format
 		// WebRTC accepts Opus directly
 
-		// Create RTP packet from Opus audio with proper timestamps (lock-free)
-		seqNum32 := rts.sequenceNumber.Add(1)
-		seqNum := uint16(seqNum32 & 0xFFFF)
+		// Create RTP packet from Opus audio with proper timestamps
+		rts.mu.Lock()
+		rts.sequenceNumber++
+		seqNum := rts.sequenceNumber
 		ssrc := rts.ssrc
 		// Calculate timestamp: Opus typically uses 48kHz sample rate
 		// For 20ms frames (typical), increment by 960 samples (48000 * 0.02)
 		timestamp := rts.timestampBase + uint32(seqNum)*960
+		rts.mu.Unlock()
 
 		rtpPacket := &rtp.Packet{
 			Header: rtp.Header{
@@ -421,19 +421,14 @@ func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaD
 			getLogger := logger.GetLogger()
 			getLogger.Debugw("failed to write audio to WebRTC track", "error", err)
 		} else {
-			// Record packet send time asynchronously to avoid blocking audio path
-			sendTime := time.Now()
-			dataLen := len(input.Data)
-			go func() {
-				rts.stats.mu.Lock()
-				// Track first packet time for accurate end-to-end latency measurement
-				if rts.stats.CurrentSegmentStartTime.IsZero() {
-					rts.stats.CurrentSegmentStartTime = sendTime
-				}
-				rts.stats.AudioPacketsSent++
-				rts.stats.BytesTranscribed += uint64(dataLen)
-				rts.stats.mu.Unlock()
-			}()
+			// Update stats
+			rts.stats.mu.Lock()
+			if rts.stats.CurrentSegmentStartTime.IsZero() {
+				rts.stats.CurrentSegmentStartTime = time.Now()
+			}
+			rts.stats.AudioPacketsSent++
+			rts.stats.BytesTranscribed += uint64(len(input.Data))
+			rts.stats.mu.Unlock()
 		}
 	}
 
