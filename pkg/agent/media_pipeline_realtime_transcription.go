@@ -1229,7 +1229,8 @@ func (rts *RealtimeTranscriptionStage) updateAverageLatencyLocked(transcriptionT
 			rts.stats.AverageLatencyMs = (rts.stats.AverageLatencyMs * 0.9) + (latencyMs * 0.1)
 		}
 
-		// Reset segment start time for next transcription (this makes it per-transcription, not cumulative)
-		rts.stats.CurrentSegmentStartTime = transcriptionTime
+		// Reset to zero time - will be set by next audio packet arrival
+		// This ensures we measure from when new audio actually starts, not from transcription time
+		rts.stats.CurrentSegmentStartTime = time.Time{}
 	}
 }
