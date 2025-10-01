@@ -246,11 +246,16 @@
             </div>
 
             <div class="preset-urls">
-                <h3>Quick Links (MinIO)</h3>
+                <h3>Quick Links</h3>
+                <div class="preset-link" onclick="loadLocalFile()">
+                    📁 Browse Local Files (from test output)
+                </div>
                 <div class="preset-link" onclick="loadPreset('http://localhost:9000/egress-test/')">
-                    Local MinIO - Browse Bucket
+                    🗄️ MinIO - Browse Bucket (http://localhost:9000)
                 </div>
             </div>
+
+            <input type="file" id="fileInput" accept=".m3u8" style="display: none;" onchange="handleFileSelect(event)">
 
             <div class="loading" id="loading">
                 <div class="spinner"></div>
@@ -329,6 +334,34 @@
             } else {
                 loadStream();
             }
+        }
+
+        function loadLocalFile() {
+            document.getElementById('fileInput').click();
+        }
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            clearMessages();
+            showSuccess(`Selected: ${file.name}. Loading local playlist...`);
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const content = e.target.result;
+                const blob = new Blob([content], { type: 'application/vnd.apple.mpegurl' });
+                const url = URL.createObjectURL(blob);
+
+                // For local files, we need to load segments from the same directory
+                // This requires the segments to be served via a local server
+                showError('Local file playback requires a local HTTP server. Please use one of these options:\n\n' +
+                    '1. Python: python3 -m http.server 8000\n' +
+                    '2. Node: npx http-server -p 8000\n' +
+                    '3. Go: go run tools/hls-player/server.go\n\n' +
+                    'Then navigate to: http://localhost:8000/tools/hls-player/player.html?url=../../path/to/playlist.m3u8');
+            };
+            reader.readAsText(file);
         }
 
         function loadStream() {
