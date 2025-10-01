@@ -32,9 +32,34 @@ echo "Running full E2E test (138 packets = ~3 seconds)..."
 echo "This includes real audio for quality verification"
 echo ""
 
-# Run test and capture output
+# Create a modified test that copies files before cleanup
+# We'll watch for the output directory and copy files immediately
+
+# Start monitoring for new directories in background
+MONITOR_PID=""
+(
+    # Wait for test to create output directory
+    for i in {1..30}; do
+        LATEST=$(find /var/folders /tmp -type d -name "e2e-session-*" -mmin -1 2>/dev/null | head -1)
+        if [ -n "$LATEST" ] && [ -f "$LATEST/playlist.m3u8" ]; then
+            # Found it! Copy immediately
+            cp -r "$LATEST"/* "$SESSION_DIR/" 2>/dev/null && exit 0
+        fi
+        sleep 1
+    done
+) &
+MONITOR_PID=$!
+
+# Run test
 TEST_OUTPUT=$(go test -v -tags=e2e ./pkg/egress -run TestE2EPipelineHLSGeneration -timeout 30s 2>&1)
 TEST_EXIT_CODE=$?
+
+# Give monitor a moment to copy files
+sleep 2
+
+# Kill monitor if still running
+kill $MONITOR_PID 2>/dev/null
+wait $MONITOR_PID 2>/dev/null
 
 # Show test result
 echo "$TEST_OUTPUT" | tail -10
@@ -46,51 +71,6 @@ if [ $TEST_EXIT_CODE -ne 0 ]; then
     echo "Full output:"
     echo "$TEST_OUTPUT"
     exit 1
-fi
-
-# Extract output directory from test logs
-TEMP_DIR=$(echo "$TEST_OUTPUT" | grep "Output directory:" | sed 's/.*Output directory: //')
-TEMP_SESSION=$(echo "$TEST_OUTPUT" | grep "Session ID:" | sed 's/.*Session ID: //')
-
-if [ -z "$TEMP_DIR" ] || [ -z "$TEMP_SESSION" ]; then
-    echo "❌ Could not find test output in logs"
-    echo ""
-    echo "Searching for recent HLS output..."
-
-    # Try to find most recent output
-    LATEST_OUTPUT=$(find /var/folders /tmp -type d -name "e2e-session-*" -mmin -2 2>/dev/null | head -1)
-
-    if [ -z "$LATEST_OUTPUT" ]; then
-        echo "❌ No recent HLS output found"
-        echo ""
-        echo "The test may have cleaned up files too quickly."
-        echo "Try running manually:"
-        echo "  go test -v -tags=e2e ./pkg/egress -run TestE2EPipelineHLSGeneration"
-        exit 1
-    fi
-
-    echo "✓ Found: $LATEST_OUTPUT"
-    cp -r "$LATEST_OUTPUT"/* "$SESSION_DIR/"
-else
-    # Copy from temp location
-    FULL_PATH="$TEMP_DIR/$TEMP_SESSION"
-
-    if [ ! -d "$FULL_PATH" ]; then
-        echo "⚠️  Directory not found: $FULL_PATH"
-        echo "Searching for most recent output..."
-
-        LATEST_OUTPUT=$(find /var/folders /tmp -type d -name "e2e-session-*" -mmin -2 2>/dev/null | head -1)
-        if [ -n "$LATEST_OUTPUT" ]; then
-            echo "✓ Found: $LATEST_OUTPUT"
-            cp -r "$LATEST_OUTPUT"/* "$SESSION_DIR/"
-        else
-            echo "❌ Could not find HLS output"
-            exit 1
-        fi
-    else
-        echo "Copying files from: $FULL_PATH"
-        cp -r "$FULL_PATH"/* "$SESSION_DIR/"
-    fi
 fi
 
 # Verify files were copied
