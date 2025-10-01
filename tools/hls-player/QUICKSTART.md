@@ -2,27 +2,46 @@
 
 A 5-minute guide to verify your HLS egress output works correctly.
 
-## Step 1: Run a Test
+## Step 1: Generate HLS Test Output
+
+### Option A: Use Manual Test Script (Recommended)
 
 ```bash
 cd /Users/alexeysokolov/GolandProjects/livekit-agent-sdk-go
 
+# Run manual test script
+./tools/hls-player/manual-test.sh
+```
+
+This script:
+- Generates high-quality HLS output (138 packets = ~3 seconds)
+- Saves to `/tmp/hls-manual-test/` (persists after test)
+- Shows file locations
+- Offers to start player automatically
+
+**You'll see:**
+```
+✅ HLS files generated successfully!
+
+📁 Output Directory:
+   /tmp/hls-manual-test/manual-test-1759338166
+
+📝 Files Created:
+   playlist.m3u8
+   segment00000.ts
+   segment00001.ts
+
+Start HLS player now? [y/N]
+```
+
+### Option B: Run Test Manually
+
+```bash
 # Run E2E test (creates HLS files in temp directory)
 go test -v -tags=e2e ./pkg/egress -run TestE2EPipelineHLSGeneration
-```
 
-**Look for this in the output:**
-```
-Output directory: /var/folders/jt/w9x2t6tn4vv_t2r_y00424nh0000gn/T/TestE2EPipelineHLSGeneration3682446227/001
-Session ID: e2e-session-1759319817
-✓ HLS output VERIFIED successfully:
-  - Playlist: playlist.m3u8
-  - Segments: 2
-```
-
-**Copy the full path to your playlist:**
-```
-/var/folders/jt/.../001/e2e-session-1759319817/playlist.m3u8
+# Look for output directory in logs
+# Copy path immediately (files get cleaned up quickly)
 ```
 
 ## Step 2: Start the Player Server
@@ -171,6 +190,15 @@ find /var/folders -name "playlist.m3u8" -mmin -10 2>/dev/null
 ## Example Complete Workflow
 
 ```bash
+# Quick way - use manual test script
+./tools/hls-player/manual-test.sh
+# Press 'y' when asked to start player
+# Paste the path shown and verify playback! ✅
+```
+
+**Or step-by-step:**
+
+```bash
 # 1. Run test
 go test -v -tags=e2e ./pkg/egress -run TestE2EPipelineHLSGeneration
 
@@ -187,6 +215,20 @@ open http://localhost:8080/tools/hls-player/player.html
 
 # 5. Verify playback! ✅
 ```
+
+## Understanding Test Differences
+
+Different tests generate different quality/duration output:
+
+| Test | Packets | Duration | Audio Quality | Purpose |
+|------|---------|----------|---------------|---------|
+| `TestE2EPipelineHLSGeneration` | 138 | ~3 sec | ✅ Good | Full HLS verification |
+| `TestE2ECompletePipeline` | 50 | ~1 sec | ⚠️ Limited | Quick MinIO upload test |
+| `TestRealPipelineWithHLSOutput` | 138 | ~3 sec | ✅ Good | Integration test |
+
+**For audio quality verification, use the manual test script or TestE2EPipelineHLSGeneration** (138 packets).
+
+The 1-second test (TestE2ECompletePipeline) is too short for meaningful audio assessment and may sound garbled due to AAC encoder initialization overhead.
 
 ## Next Steps
 
