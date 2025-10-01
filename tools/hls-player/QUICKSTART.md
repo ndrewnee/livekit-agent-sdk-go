@@ -86,15 +86,19 @@ If you want to test MinIO upload:
 
 ```bash
 # Terminal 1: Start MinIO
-docker run -p 9000:9000 -p 9001:9001 \
+docker run -d -p 9000:9000 -p 9001:9001 \
+  --name minio \
   -e MINIO_ROOT_USER=minioadmin \
   -e MINIO_ROOT_PASSWORD=minioadmin \
   quay.io/minio/minio server /data --console-address ":9001"
 
-# Terminal 2: Run test
+# Terminal 2: Setup MinIO bucket and permissions
+./tools/hls-player/setup-minio.sh
+
+# Terminal 3: Run test
 go test -v -tags=e2e ./pkg/egress -run TestE2ECompletePipeline
 
-# Terminal 3: Start player
+# Terminal 4: Start player
 ./tools/hls-player/play.sh
 ```
 
@@ -103,7 +107,18 @@ go test -v -tags=e2e ./pkg/egress -run TestE2ECompletePipeline
 http://localhost:9000/egress-test/complete-e2e-1759328065/playlist.m3u8
 ```
 
+**If you get "Access Denied":**
+```bash
+# Run the setup script to fix permissions
+./tools/hls-player/setup-minio.sh
+```
+
 ## Troubleshooting
+
+### "Access Denied" (MinIO)
+- **Cause**: Bucket doesn't exist or lacks public read permissions
+- **Fix**: Run `./tools/hls-player/setup-minio.sh` to configure MinIO
+- **Alternative**: Use MinIO Console (http://localhost:9001) to set bucket policy to "public"
 
 ### "404 Not Found"
 - **Cause**: Path is wrong or test temp files were cleaned up
