@@ -28,41 +28,38 @@ mkdir -p "$SESSION_DIR"
 # Go to project root
 cd "$(dirname "$0")/../.."
 
-echo "Running full E2E test (138 packets = ~3 seconds)..."
-echo "This includes real audio for quality verification"
+echo "Running REAL E2E test with LiveKit room..."
+echo "This test:"
+echo "  • Creates real LiveKit room"
+echo "  • Publishes from test.mp4 (10 seconds, 720p)"
+echo "  • Captures with egress agent"
+echo "  • Generates HLS output"
+echo ""
+echo "NOTE: This requires LiveKit server running on ws://localhost:7880"
+echo "      Start with: docker run -p 7880:7880 -p 7881:7881 livekit/livekit-server"
 echo ""
 
-# Create a modified test that copies files before cleanup
-# We'll watch for the output directory and copy files immediately
+# Check if LiveKit server is running
+if ! curl -s "http://localhost:7881/validate" > /dev/null 2>&1; then
+    echo "⚠️  LiveKit server not detected on localhost:7880"
+    echo ""
+    read -p "Continue anyway? [y/N] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Aborted. Start LiveKit server first."
+        exit 1
+    fi
+fi
 
-# Start monitoring for new directories in background
-MONITOR_PID=""
-(
-    # Wait for test to create output directory
-    for i in {1..30}; do
-        LATEST=$(find /var/folders /tmp -type d -name "e2e-session-*" -mmin -1 2>/dev/null | head -1)
-        if [ -n "$LATEST" ] && [ -f "$LATEST/playlist.m3u8" ]; then
-            # Found it! Copy immediately
-            cp -r "$LATEST"/* "$SESSION_DIR/" 2>/dev/null && exit 0
-        fi
-        sleep 1
-    done
-) &
-MONITOR_PID=$!
+# Set output directory for test
+export TEST_OUTPUT_DIR="$OUTPUT_DIR"
 
-# Run test
-TEST_OUTPUT=$(go test -v -tags=e2e ./pkg/egress -run TestE2EPipelineHLSGeneration -timeout 30s 2>&1)
+# Run real E2E test
+TEST_OUTPUT=$(go test -v -tags=e2e ./pkg/egress -run TestE2EManualVerification -timeout 60s 2>&1)
 TEST_EXIT_CODE=$?
 
-# Give monitor a moment to copy files
-sleep 2
-
-# Kill monitor if still running
-kill $MONITOR_PID 2>/dev/null
-wait $MONITOR_PID 2>/dev/null
-
 # Show test result
-echo "$TEST_OUTPUT" | tail -10
+echo "$TEST_OUTPUT" | tail -30
 echo ""
 
 if [ $TEST_EXIT_CODE -ne 0 ]; then
@@ -71,6 +68,17 @@ if [ $TEST_EXIT_CODE -ne 0 ]; then
     echo "Full output:"
     echo "$TEST_OUTPUT"
     exit 1
+fi
+
+# The test creates output directly in $OUTPUT_DIR/$SESSION_ID
+# Find the session directory
+ACTUAL_SESSION=$(find "$OUTPUT_DIR" -maxdepth 1 -type d -name "manual-test-*" -mmin -2 2>/dev/null | sort | tail -1)
+
+if [ -n "$ACTUAL_SESSION" ]; then
+    SESSION_DIR="$ACTUAL_SESSION"
+    echo "Found session output: $SESSION_DIR"
+else
+    echo "⚠️  Could not find session output, using: $SESSION_DIR"
 fi
 
 # Verify files were copied
