@@ -124,11 +124,11 @@ func TestE2EPipelineHLSGeneration(t *testing.T) {
 		t.Logf("Successfully injected %d/%d video packets and %d/%d audio packets",
 			videoSuccessCount, len(videoPackets), audioSuccessCount, len(videoPackets))
 
-		// STRICT REQUIREMENT - Must inject at least 90% of packets
-		require.Greater(t, videoSuccessCount, int(float64(len(videoPackets))*0.9),
-			"Must successfully inject at least 90%% of video packets")
-		require.Greater(t, audioSuccessCount, int(float64(len(videoPackets))*0.9),
-			"Must successfully inject at least 90%% of audio packets")
+		// STRICT REQUIREMENT - Must inject 100% of packets (no artificial packet loss)
+		require.Equal(t, videoSuccessCount, len(videoPackets),
+			"Must successfully inject ALL video packets (got %d/%d)", videoSuccessCount, len(videoPackets))
+		require.Equal(t, audioSuccessCount, len(videoPackets),
+			"Must successfully inject ALL audio packets (got %d/%d)", audioSuccessCount, len(videoPackets))
 	})
 
 	// Wait for HLS generation
@@ -269,11 +269,11 @@ func TestE2ECompletePipeline(t *testing.T) {
 
 	t.Logf("Injected %d video and %d audio packets", videoSuccessCount, audioSuccessCount)
 
-	// STRICT REQUIREMENT - Must inject at least 90% of packets
-	require.Greater(t, videoSuccessCount, int(float64(50)*0.9),
-		"Must successfully inject at least 90%% of video packets")
-	require.Greater(t, audioSuccessCount, int(float64(50)*0.9),
-		"Must successfully inject at least 90%% of audio packets")
+	// STRICT REQUIREMENT - Must inject 100% of packets (no artificial packet loss)
+	require.Equal(t, videoSuccessCount, 50,
+		"Must successfully inject ALL video packets (got %d/50)", videoSuccessCount)
+	require.Equal(t, audioSuccessCount, 50,
+		"Must successfully inject ALL audio packets (got %d/50)", audioSuccessCount)
 
 	time.Sleep(3 * time.Second)
 

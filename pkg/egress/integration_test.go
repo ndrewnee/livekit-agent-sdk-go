@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,8 +57,11 @@ func TestRealPipelineWithHLSOutput(t *testing.T) {
 	// Generate and inject test RTP packets
 	packetsSent := 0
 	packetsSuccessful := 0
+	var wg sync.WaitGroup
+	wg.Add(1)
 
 	go func() {
+		defer wg.Done()
 		// Create RTP packets from NAL units
 		videoPackets := CreateRTPPacketsFromNALUnits(nalUnits, 12345)
 
@@ -68,7 +72,7 @@ func TestRealPipelineWithHLSOutput(t *testing.T) {
 		// Send video packets at proper timing
 		for i, videoPacket := range videoPackets {
 			if i >= 150 {
-				break // Send more packets to account for recovery
+				break // Send 150 packets total
 			}
 
 			// Send video packet
@@ -107,16 +111,20 @@ func TestRealPipelineWithHLSOutput(t *testing.T) {
 		t.Logf("Sent %d packets total, %d successful", packetsSent, packetsSuccessful)
 	}()
 
-	// Wait for packets to be processed
-	time.Sleep(4 * time.Second)
+	// Wait for all packets to be sent
+	wg.Wait()
+
+	// Wait additional time for packets to be processed
+	time.Sleep(1 * time.Second)
 
 	// Check statistics reflect packet processing
 	stats := p.GetStats()
 	t.Logf("Final stats: Video=%d, Audio=%d", stats.VideoPacketsReceived, stats.AudioPacketsReceived)
 
-	// Be more lenient with packet counts due to recovery
-	assert.Greater(t, stats.VideoPacketsReceived, uint64(30), "Should have processed at least some video packets")
-	assert.Greater(t, stats.AudioPacketsReceived, uint64(30), "Should have processed at least some audio packets")
+	// STRICT REQUIREMENT - Should process 100% of packets (no artificial failures)
+	// Note: packetsSent tracks actual packets sent (limited by available NAL units)
+	assert.Equal(t, stats.VideoPacketsReceived, uint64(packetsSent), "Should process ALL video packets (got %d/%d)", stats.VideoPacketsReceived, packetsSent)
+	assert.Equal(t, stats.AudioPacketsReceived, uint64(packetsSent), "Should process ALL audio packets (got %d/%d)", stats.AudioPacketsReceived, packetsSent)
 
 	// Check for HLS output files
 	outputDir := filepath.Join(tmpDir, sessionID)
