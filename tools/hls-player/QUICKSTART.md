@@ -4,17 +4,28 @@ A 5-minute guide to verify your HLS egress output works correctly.
 
 ## Step 1: Generate HLS Test Output
 
+### Prerequisites
+
+**LiveKit server must be running:**
+```bash
+# Verify server is running
+curl http://localhost:7881/validate
+
+# If not running, start it (see tools/hls-player/LIVEKIT_SETUP.md)
+```
+
 ### Option A: Use Manual Test Script (Recommended)
 
 ```bash
 cd /Users/alexeysokolov/GolandProjects/livekit-agent-sdk-go
 
-# Run manual test script
+# Run manual test script (uses local LiveKit on ws://localhost:7880)
 ./tools/hls-player/manual-test.sh
 ```
 
 This script:
-- Generates high-quality HLS output (138 packets = ~3 seconds)
+- Uses REAL LiveKit room with actual media from test.mp4
+- Generates high-quality HLS output (10 seconds, 720p)
 - Saves to `/tmp/hls-manual-test/` (persists after test)
 - Shows file locations
 - Offers to start player automatically

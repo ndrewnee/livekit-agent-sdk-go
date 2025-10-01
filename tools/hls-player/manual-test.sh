@@ -35,8 +35,9 @@ echo "  • Publishes from test.mp4 (10 seconds, 720p)"
 echo "  • Captures with egress agent"
 echo "  • Generates HLS output"
 echo ""
-echo "NOTE: This requires LiveKit server running on ws://localhost:7880"
-echo "      Start with: docker run -p 7880:7880 -p 7881:7881 livekit/livekit-server"
+echo "Prerequisites:"
+echo "  • LiveKit server running on ${LIVEKIT_URL:-ws://localhost:7880}"
+echo "  • Default credentials: devkey/secret (--dev mode)"
 echo ""
 
 # Check if LiveKit server is running

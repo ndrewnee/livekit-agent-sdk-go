@@ -1,11 +1,23 @@
 # LiveKit Server Setup for Manual Testing
 
-Quick guide to set up LiveKit server for running the real E2E manual test.
+Quick guide to verify LiveKit server and run the real E2E manual test.
 
 ## Quick Start
 
+### If You Already Have LiveKit Running
+
 ```bash
-# Start LiveKit server
+# Verify server is running
+curl http://localhost:7881/validate
+
+# Run manual test (uses default ws://localhost:7880)
+./tools/hls-player/manual-test.sh
+```
+
+### If You Need To Start LiveKit
+
+**Option 1: Docker**
+```bash
 docker run -d \
   -p 7880:7880 \
   -p 7881:7881 \
@@ -13,12 +25,11 @@ docker run -d \
   --name livekit \
   livekit/livekit-server \
   --dev
+```
 
-# Verify it's running
-curl http://localhost:7881/validate
-
-# Run manual test
-./tools/hls-player/manual-test.sh
+**Option 2: Local Binary (if already installed)**
+```bash
+livekit-server --dev
 ```
 
 ## What You Get
@@ -32,6 +43,7 @@ The manual test now:
 
 ## Stop/Restart
 
+**If using Docker:**
 ```bash
 # Stop server
 docker stop livekit
@@ -41,6 +53,12 @@ docker start livekit
 
 # Remove
 docker rm livekit
+```
+
+**If using local binary:**
+```bash
+# Stop with Ctrl+C or:
+pkill livekit-server
 ```
 
 ## Default Credentials
@@ -71,23 +89,32 @@ docker logs -f livekit
 Server isn't running. Start with the docker command above.
 
 ### "Port already in use"
-Another service is using the ports. Stop it or use different ports:
-```bash
-docker run -d \
-  -p 8880:7880 \
-  -p 8881:7881 \
-  --name livekit \
-  livekit/livekit-server --dev
+Another service is using the ports.
 
-# Update manual test
-export LIVEKIT_URL="ws://localhost:8880"
+**If your local LiveKit uses different ports:**
+```bash
+# Set environment variables for the test
+export LIVEKIT_URL="ws://localhost:YOUR_PORT"
+export LIVEKIT_API_KEY="your_api_key"
+export LIVEKIT_API_SECRET="your_api_secret"
+
+# Run test
 ./tools/hls-player/manual-test.sh
 ```
 
 ### Test still fails
-Check logs:
+
+**Check server logs:**
+
+If using Docker:
 ```bash
 docker logs livekit
+```
+
+If using local binary:
+```bash
+# Logs usually go to stdout or check:
+tail -f /var/log/livekit/livekit.log
 ```
 
 Look for:
@@ -137,8 +164,8 @@ chmod +x livekit_linux_amd64
 ## Complete Test Workflow
 
 ```bash
-# 1. Start LiveKit (if not running)
-docker run -d -p 7880:7880 -p 7881:7881 --name livekit livekit/livekit-server --dev
+# 1. Verify LiveKit is running
+curl http://localhost:7881/validate
 
 # 2. Run manual test
 ./tools/hls-player/manual-test.sh
