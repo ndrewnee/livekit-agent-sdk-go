@@ -6,9 +6,9 @@ import (
 	"log"
 	"sync"
 
-	"github.com/livekit/agent-sdk-go/pkg/agent"
-	"github.com/livekit/agent-sdk-go/pkg/egress/pipeline"
-	"github.com/livekit/agent-sdk-go/pkg/egress/router"
+	"github.com/am-sokolov/livekit-agent-sdk-go/pkg/agent"
+	"github.com/am-sokolov/livekit-agent-sdk-go/pkg/egress/pipeline"
+	"github.com/am-sokolov/livekit-agent-sdk-go/pkg/egress/router"
 	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/pion/webrtc/v4"

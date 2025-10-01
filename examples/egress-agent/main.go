@@ -9,9 +9,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/am-sokolov/livekit-agent-sdk-go/pkg/agent"
+	"github.com/am-sokolov/livekit-agent-sdk-go/pkg/egress/pipeline"
 	"github.com/go-gst/go-gst/gst"
-	"github.com/livekit/agent-sdk-go/pkg/agent"
-	"github.com/livekit/agent-sdk-go/pkg/egress/pipeline"
 	"github.com/livekit/protocol/livekit"
 )
 

@@ -2,7 +2,6 @@ package egress
 
 import (
 	"fmt"
-	"runtime"
 	"sync"
 	"time"
 )
@@ -24,10 +23,9 @@ type PerformanceMonitor struct {
 	mu             sync.RWMutex
 	metrics        PerformanceMetrics
 	startTime      time.Time
-	lastCPUTime    time.Time
-	lastCPUUsage   float64
 	streamCount    int
 	stopChan       chan struct{}
+	sysMonitor     *SystemMonitor // Real system monitor
 }
 
 // NewPerformanceMonitor creates a new performance monitor
@@ -40,6 +38,7 @@ func NewPerformanceMonitor(streamCount int) *PerformanceMonitor {
 		startTime:   time.Now(),
 		streamCount: streamCount,
 		stopChan:    make(chan struct{}),
+		sysMonitor:  NewSystemMonitor(), // Create real system monitor
 		metrics: PerformanceMetrics{
 			CPUThreshold:    3.0 * float64(streamCount),  // 3% per stream
 			MemoryThreshold: 100 * uint64(streamCount),   // 100MB per stream
@@ -77,54 +76,20 @@ func (pm *PerformanceMonitor) updateMetrics() {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	// Get memory stats
-	var memStats runtime.MemStats
-	runtime.ReadMemStats(&memStats)
+	// Get real system stats from the system monitor
+	sysStats := pm.sysMonitor.GetSystemStats()
 
-	// Calculate CPU usage (simplified - in production, use proper CPU profiling)
-	cpuPercent := pm.calculateCPUUsage()
-
-	// Update metrics
+	// Update metrics with real data
 	pm.metrics = PerformanceMetrics{
-		CPUPercent:      cpuPercent,
-		MemoryMB:        memStats.Alloc / 1024 / 1024,
-		GoroutineCount:  runtime.NumGoroutine(),
-		LastUpdated:     time.Now(),
+		CPUPercent:      sysStats.CPUPercent,
+		MemoryMB:        sysStats.MemoryMB,
+		GoroutineCount:  sysStats.GoroutineCount,
+		LastUpdated:     sysStats.Timestamp,
 		CPUThreshold:    3.0 * float64(pm.streamCount),
 		MemoryThreshold: 100 * uint64(pm.streamCount),
 	}
 }
 
-// calculateCPUUsage calculates approximate CPU usage
-func (pm *PerformanceMonitor) calculateCPUUsage() float64 {
-	// This is a simplified CPU calculation
-	// In production, use proper CPU profiling tools
-	now := time.Now()
-	if pm.lastCPUTime.IsZero() {
-		pm.lastCPUTime = now
-		return 0
-	}
-
-	// Get current process CPU time
-	var rusage runtime.MemStats
-	runtime.ReadMemStats(&rusage)
-
-	// Simple estimation based on GC stats
-	// In real implementation, use syscall.Getrusage or similar
-	elapsed := now.Sub(pm.lastCPUTime).Seconds()
-	if elapsed > 0 {
-		// Estimate based on GC activity and goroutines
-		cpuEstimate := float64(runtime.NumGoroutine()) * 0.1
-		if cpuEstimate > 100 {
-			cpuEstimate = 100
-		}
-		pm.lastCPUUsage = cpuEstimate
-		pm.lastCPUTime = now
-		return cpuEstimate
-	}
-
-	return pm.lastCPUUsage
-}
 
 // GetMetrics returns current performance metrics
 func (pm *PerformanceMonitor) GetMetrics() PerformanceMetrics {

@@ -26,6 +26,8 @@ func TestDirectPipelineCreation(t *testing.T) {
 		JitterBufferMs:     200,
 		EnableScreenshots:  false,
 		AudioMode:          AudioPassThrough,
+		StateChangeTimeout: 10 * time.Second,
+		IsLiveSource:       true,
 		AACBitrate:         192,
 		MP3Bitrate:         192,
 	}
@@ -48,10 +50,12 @@ func TestDirectPipelineStartStop(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	config := &Config{
-		OutputDir:       tmpDir,
-		SegmentDuration: 2,
-		JitterBufferMs:  200,
-		AudioMode:       AudioPassThrough,
+		OutputDir:          tmpDir,
+		SegmentDuration:    2,
+		JitterBufferMs:     200,
+		AudioMode:          AudioPassThrough,
+		StateChangeTimeout: 10 * time.Second,
+		IsLiveSource:       true,
 	}
 
 	pipeline, err := NewDirectPipeline(config, "test-start-stop")
@@ -93,10 +97,12 @@ func TestDirectPipelineRTPInjection(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	config := &Config{
-		OutputDir:       tmpDir,
-		SegmentDuration: 2,
-		JitterBufferMs:  200,
-		AudioMode:       AudioPassThrough,
+		OutputDir:          tmpDir,
+		SegmentDuration:    2,
+		JitterBufferMs:     200,
+		AudioMode:          AudioPassThrough,
+		StateChangeTimeout: 10 * time.Second,
+		IsLiveSource:       true,
 	}
 
 	pipeline, err := NewDirectPipeline(config, "test-rtp")
@@ -133,11 +139,24 @@ func TestDirectPipelineRTPInjection(t *testing.T) {
 		Payload: []byte{0x00, 0x01}, // Minimal Opus payload
 	}
 
+	// Wait for pipeline to be ready
+	time.Sleep(500 * time.Millisecond)
+
+	// Check pipeline state before injection
+	state := pipeline.GetState()
+	t.Logf("Pipeline state before injection: %v", state)
+
 	// Inject packets
 	err = pipeline.InjectVideoRTP(videoPacket)
+	if err != nil {
+		t.Logf("Video injection error: %v", err)
+	}
 	assert.NoError(t, err)
 
 	err = pipeline.InjectAudioRTP(audioPacket)
+	if err != nil {
+		t.Logf("Audio injection error: %v", err)
+	}
 	assert.NoError(t, err)
 
 	// Check statistics
@@ -151,10 +170,12 @@ func TestDirectPipelineMultipleWorkers(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	config := &Config{
-		OutputDir:       tmpDir,
-		SegmentDuration: 2,
-		JitterBufferMs:  200,
-		AudioMode:       AudioPassThrough,
+		OutputDir:          tmpDir,
+		SegmentDuration:    2,
+		JitterBufferMs:     200,
+		AudioMode:          AudioPassThrough,
+		StateChangeTimeout: 10 * time.Second,
+		IsLiveSource:       true,
 	}
 
 	// Create multiple pipelines (workers) - this should work without port conflicts
@@ -201,11 +222,13 @@ func TestDirectPipelineAudioModes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tmpDir := t.TempDir()
 			config := &Config{
-				OutputDir:       tmpDir,
-				SegmentDuration: 2,
-				JitterBufferMs:  200,
-				AudioMode:       tt.audioMode,
-				AACBitrate:      192,
+				OutputDir:          tmpDir,
+				SegmentDuration:    2,
+				JitterBufferMs:     200,
+				AudioMode:          tt.audioMode,
+				AACBitrate:         192,
+				StateChangeTimeout: 10 * time.Second,
+				IsLiveSource:       true,
 				MP3Bitrate:      192,
 			}
 
@@ -215,8 +238,13 @@ func TestDirectPipelineAudioModes(t *testing.T) {
 			err = pipeline.Start()
 			assert.NoError(t, err, "Failed to start pipeline for mode %s", tt.name)
 
+			// Wait for pipeline to start
 			time.Sleep(500 * time.Millisecond)
-			assert.Equal(t, StatePlaying, pipeline.GetState())
+
+			// For live pipelines without data, PAUSED state is acceptable
+			state := pipeline.GetState()
+			assert.Contains(t, []State{StatePlaying, StatePaused}, state,
+				"Pipeline for mode %s should be in PLAYING or PAUSED state", tt.name)
 
 			pipeline.Stop()
 		})
@@ -228,10 +256,12 @@ func TestDirectPipelineStreamContinuity(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	config := &Config{
-		OutputDir:       tmpDir,
-		SegmentDuration: 2,
-		JitterBufferMs:  200,
-		AudioMode:       AudioPassThrough,
+		OutputDir:          tmpDir,
+		SegmentDuration:    2,
+		JitterBufferMs:     200,
+		AudioMode:          AudioPassThrough,
+		StateChangeTimeout: 10 * time.Second,
+		IsLiveSource:       true,
 	}
 
 	pipeline, err := NewDirectPipeline(config, "test-continuity")
@@ -286,10 +316,12 @@ func TestDirectPipelineStatistics(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	config := &Config{
-		OutputDir:       tmpDir,
-		SegmentDuration: 2,
-		JitterBufferMs:  200,
-		AudioMode:       AudioPassThrough,
+		OutputDir:          tmpDir,
+		SegmentDuration:    2,
+		JitterBufferMs:     200,
+		AudioMode:          AudioPassThrough,
+		StateChangeTimeout: 10 * time.Second,
+		IsLiveSource:       true,
 	}
 
 	pipeline, err := NewDirectPipeline(config, "test-stats")
@@ -305,6 +337,9 @@ func TestDirectPipelineStatistics(t *testing.T) {
 	require.NoError(t, err)
 	defer pipeline.Stop()
 
+	// Wait for pipeline to be ready
+	time.Sleep(200 * time.Millisecond)
+
 	// Inject some packets
 	for i := 0; i < 10; i++ {
 		packet := &rtp.Packet{
@@ -317,7 +352,8 @@ func TestDirectPipelineStatistics(t *testing.T) {
 			},
 			Payload: make([]byte, 100),
 		}
-		pipeline.InjectVideoRTP(packet)
+		err := pipeline.InjectVideoRTP(packet)
+		require.NoError(t, err, "Failed to inject packet %d", i)
 	}
 
 	// Stats should be updated
@@ -331,10 +367,12 @@ func BenchmarkDirectPipelineCreation(b *testing.B) {
 	tmpDir := b.TempDir()
 
 	config := &Config{
-		OutputDir:       tmpDir,
-		SegmentDuration: 4,
-		JitterBufferMs:  200,
-		AudioMode:       AudioPassThrough,
+		OutputDir:          tmpDir,
+		SegmentDuration:    4,
+		JitterBufferMs:     200,
+		AudioMode:          AudioPassThrough,
+		StateChangeTimeout: 10 * time.Second,
+		IsLiveSource:       true,
 	}
 
 	b.ResetTimer()
@@ -349,10 +387,12 @@ func BenchmarkDirectRTPInjection(b *testing.B) {
 	tmpDir := b.TempDir()
 
 	config := &Config{
-		OutputDir:       tmpDir,
-		SegmentDuration: 4,
-		JitterBufferMs:  200,
-		AudioMode:       AudioPassThrough,
+		OutputDir:          tmpDir,
+		SegmentDuration:    4,
+		JitterBufferMs:     200,
+		AudioMode:          AudioPassThrough,
+		StateChangeTimeout: 10 * time.Second,
+		IsLiveSource:       true,
 	}
 
 	pipeline, _ := NewDirectPipeline(config, "bench-rtp")

@@ -1,0 +1,88 @@
+# Egress Worker Configuration
+# This configuration controls the LiveKit egress recording worker
+
+# Maximum number of concurrent recording sessions
+max_concurrent_sessions: 10
+
+# Default video quality (0=LOW, 1=MEDIUM, 2=HIGH)
+video_quality: 2
+
+# Storage configuration
+storage:
+  # Storage type: local, s3, gcs, or hybrid
+  type: local
+
+  # Local storage settings
+  local:
+    path: ./recordings
+    max_size: 0  # 0 = unlimited
+    buffer_on_failure: true
+    buffer_path: ./buffer
+    max_buffer_size: 10737418240  # 10GB
+
+  # S3 configuration (if using S3)
+  s3:
+    endpoint: s3.amazonaws.com
+    region: us-west-2
+    bucket: my-recordings
+    access_key_id: ${AWS_ACCESS_KEY_ID}  # Use environment variable
+    secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+    use_ssl: true
+
+  # Upload settings
+  enable_upload: false
+  upload_interval: 60s
+  retry_attempts: 3
+  retry_delay: 5s
+
+# Recording configuration
+recording:
+  record_video: true
+  record_audio: true
+  record_screen_share: true
+  auto_start: true
+  min_participants: 0
+  wait_for_participants: false
+  max_idle_duration: 5m
+  preferred_video_track: ""  # Empty for auto-select
+  preferred_audio_track: ""  # Empty for auto-select
+
+# Pipeline configuration
+pipeline:
+  output_dir: ./recordings
+  segment_duration: 4
+  playlist_type: event  # event or vod
+  enable_transcode: false
+  transcode_preset: medium
+  enable_screenshots: true
+  screenshot_interval: 10
+  screenshot_format: jpeg
+  screenshot_quality: 85
+
+# Network configuration
+network:
+  bind_address: 127.0.0.1
+  video_rtp_port: 5004
+  audio_rtp_port: 5006
+  use_direct_injection: true  # Recommended
+  reconnect_attempts: 5
+  reconnect_delay: 2s
+  adaptive_bitrate: true
+  max_bitrate: 5000  # kbps
+  min_bitrate: 1000  # kbps
+
+# Advanced settings
+monitoring:
+  enable_metrics: true
+  metrics_port: 9090
+  health_check_interval: 30s
+
+performance:
+  cpu_limit: 80  # Percentage
+  memory_limit: 80  # Percentage
+  io_priority: normal  # low, normal, high
+
+logging:
+  level: info  # debug, info, warn, error
+  format: json  # json or text
+  output: stdout  # stdout, stderr, or file path

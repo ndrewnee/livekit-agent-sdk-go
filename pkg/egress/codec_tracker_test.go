@@ -81,16 +81,26 @@ func TestCodecTracker(t *testing.T) {
 	t.Run("rejects unsupported codecs", func(t *testing.T) {
 		tracker := NewCodecTracker("test-session")
 
-		// VP9 is not supported for zero-transcode
+		// Test unsupported codec (AV1) first, before locking any codec
+		unsupportedCodec := webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType: "video/AV1",
+			},
+			PayloadType: 99,
+		}
+		err := tracker.ValidateVideoCodec(unsupportedCodec)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported video codec")
+
+		// Test VP9 codec support after testing unsupported
 		vp9Codec := webrtc.RTPCodecParameters{
 			RTPCodecCapability: webrtc.RTPCodecCapability{
 				MimeType: "video/VP9",
 			},
 			PayloadType: 98,
 		}
-		err := tracker.ValidateVideoCodec(vp9Codec)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "unsupported video codec")
+		err = tracker.ValidateVideoCodec(vp9Codec)
+		assert.NoError(t, err, "VP9 codec should be supported")
 	})
 
 	t.Run("tracks audio and video independently", func(t *testing.T) {
@@ -139,7 +149,7 @@ func TestCodecTracker(t *testing.T) {
 		tracker.Reset()
 
 		// Should be able to lock different codec now
-		// After reset, we can lock with a different payload type
+		// Test that we can lock with a different payload type after reset
 		h264NewCodec := webrtc.RTPCodecParameters{
 			RTPCodecCapability: webrtc.RTPCodecCapability{
 				MimeType: "video/H264",

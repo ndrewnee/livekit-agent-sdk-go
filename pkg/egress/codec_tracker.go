@@ -116,9 +116,14 @@ func (ct *CodecTracker) Reset() {
 }
 
 // isVideoCodecSupported checks if a video codec is supported for zero-transcode
+// Per SPECS.md: H264, VP8, and VP9 are supported
 func isVideoCodecSupported(mimeType string) bool {
 	switch mimeType {
-	case "video/H264":
+	case "video/H264", "video/h264":
+		return true
+	case "video/VP8", "video/vp8":
+		return true
+	case "video/VP9", "video/vp9":
 		return true
 	default:
 		return false
@@ -126,11 +131,16 @@ func isVideoCodecSupported(mimeType string) bool {
 }
 
 // isAudioCodecSupported checks if an audio codec is supported for zero-transcode
+// Per SPECS.md: Opus, AAC, and MP3 are supported
 func isAudioCodecSupported(mimeType string) bool {
 	switch mimeType {
-	case "audio/opus":
+	case "audio/opus", "audio/OPUS":
 		return true
-	case "audio/mpeg": // MP3
+	case "audio/mpeg", "audio/MPEG": // MP3
+		return true
+	case "audio/aac", "audio/AAC":
+		return true
+	case "audio/mp4", "audio/MP4": // AAC in MP4 container
 		return true
 	default:
 		return false
