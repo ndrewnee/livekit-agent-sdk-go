@@ -24,8 +24,12 @@ GstFlowReturn push_buffer_to_appsrc(GstElement *appsrc, void *data, int size, ui
         gst_buffer_unmap(buffer, &map);
     }
 
-    // Set presentation timestamp
+    // Set presentation timestamp and decoding timestamp
     GST_BUFFER_PTS(buffer) = pts;
+    GST_BUFFER_DTS(buffer) = pts;  // For video, DTS = PTS in our case
+
+    // Mark buffer as NOT live data to prevent GStreamer from adding base-time offset
+    GST_BUFFER_FLAG_UNSET(buffer, GST_BUFFER_FLAG_LIVE);
 
     // Push buffer to appsrc
     GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(appsrc), buffer);
@@ -53,6 +57,14 @@ void set_appsrc_caps(GstElement *appsrc, const char *caps_string) {
     if (caps) {
         gst_app_src_set_caps(GST_APP_SRC(appsrc), caps);
         gst_caps_unref(caps);
+    }
+}
+
+// Set pipeline base-time to 0 to ensure timestamps start from 0
+void set_pipeline_base_time_zero(GstElement *pipeline) {
+    if (GST_IS_PIPELINE(pipeline)) {
+        gst_element_set_base_time(pipeline, 0);
+        gst_element_set_start_time(pipeline, GST_CLOCK_TIME_NONE);
     }
 }
 */
@@ -154,4 +166,9 @@ func (h *AppsrcHelper) SendEOS() {
 	if h.audioSrc != nil {
 		h.audioSrc.Emit("end-of-stream")
 	}
+}
+
+// SetPipelineBaseTimeZero sets the pipeline's base-time to 0 to ensure timestamps start from 0
+func SetPipelineBaseTimeZero(pipeline *gst.Pipeline) {
+	C.set_pipeline_base_time_zero((*C.GstElement)(unsafe.Pointer(pipeline.Instance())))
 }

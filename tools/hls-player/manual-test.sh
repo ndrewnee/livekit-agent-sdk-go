@@ -28,21 +28,15 @@ mkdir -p "$SESSION_DIR"
 # Go to project root
 cd "$(dirname "$0")/../.."
 
-echo "Running REAL E2E test with LiveKit room..."
-echo "This test:"
-echo "  • Creates real LiveKit room"
-echo "  • Publishes from test.mp4 (10 seconds, 720p)"
-echo "  • Captures with egress agent"
-echo "  • Generates HLS output"
-echo ""
-echo "Prerequisites:"
-echo "  • LiveKit server running on ${LIVEKIT_URL:-ws://localhost:7880}"
-echo "  • Default credentials: devkey/secret (--dev mode)"
+# Detect LiveKit server
+echo "Detecting LiveKit server..."
 echo ""
 
-# Check if LiveKit server is running
-if ! curl -s "http://localhost:7881/validate" > /dev/null 2>&1; then
-    echo "⚠️  LiveKit server not detected on localhost:7880"
+DETECT_OUTPUT=$(./tools/hls-player/detect-livekit.sh 2>&1)
+DETECT_EXIT_CODE=$?
+
+if [ $DETECT_EXIT_CODE -ne 0 ]; then
+    echo "$DETECT_OUTPUT"
     echo ""
     read -p "Continue anyway? [y/N] " -n 1 -r
     echo
@@ -50,7 +44,26 @@ if ! curl -s "http://localhost:7881/validate" > /dev/null 2>&1; then
         echo "Aborted. Start LiveKit server first."
         exit 1
     fi
+    # Use defaults
+    export LIVEKIT_URL="${LIVEKIT_URL:-ws://localhost:7880}"
+    export LIVEKIT_API_KEY="${LIVEKIT_API_KEY:-devkey}"
+    export LIVEKIT_API_SECRET="${LIVEKIT_API_SECRET:-secret}"
+else
+    # Parse environment variables from detection output
+    eval $(echo "$DETECT_OUTPUT" | grep "^export LIVEKIT_")
+
+    echo "✓ LiveKit server detected"
+    echo "  URL: $LIVEKIT_URL"
+    echo ""
 fi
+
+echo "Running REAL E2E test with LiveKit room..."
+echo "This test:"
+echo "  • Creates real LiveKit room"
+echo "  • Publishes from test.mp4 (10 seconds, 720p)"
+echo "  • Captures with egress agent"
+echo "  • Generates HLS output"
+echo ""
 
 # Set output directory for test
 export TEST_OUTPUT_DIR="$OUTPUT_DIR"

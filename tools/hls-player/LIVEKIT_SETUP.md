@@ -7,10 +7,16 @@ Quick guide to verify LiveKit server and run the real E2E manual test.
 ### If You Already Have LiveKit Running
 
 ```bash
-# Verify server is running
-curl http://localhost:7881/validate
+# Auto-detect server and get connection details
+./tools/hls-player/detect-livekit.sh
 
-# Run manual test (uses default ws://localhost:7880)
+# This will show:
+#   ✓ Server status and PID
+#   ✓ WebSocket and HTTP ports
+#   ✓ Credentials (if running in --dev mode)
+#   ✓ Environment variables to export
+
+# Run manual test (auto-detects LiveKit)
 ./tools/hls-player/manual-test.sh
 ```
 

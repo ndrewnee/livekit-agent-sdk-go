@@ -132,12 +132,18 @@ func createAWSConfig(ctx context.Context, s3Config *S3Config) (aws.Config, error
 
 	// Custom endpoint for MinIO or other S3-compatible storage
 	if s3Config.Endpoint != "" && s3Config.Endpoint != "s3.amazonaws.com" {
+		// Determine protocol based on UseSSL setting
+		protocol := "https"
+		if !s3Config.UseSSL {
+			protocol = "http"
+		}
+
 		opts = append(opts, config.WithEndpointResolverWithOptions(
 			aws.EndpointResolverWithOptionsFunc(
 				func(service, region string, options ...interface{}) (aws.Endpoint, error) {
 					if service == s3.ServiceID {
 						return aws.Endpoint{
-							URL:               fmt.Sprintf("https://%s", s3Config.Endpoint),
+							URL:               fmt.Sprintf("%s://%s", protocol, s3Config.Endpoint),
 							SigningRegion:     s3Config.Region,
 							HostnameImmutable: true,
 						}, nil

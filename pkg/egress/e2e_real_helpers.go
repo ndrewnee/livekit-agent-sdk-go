@@ -14,6 +14,17 @@ import (
 	lksdk "github.com/livekit/server-sdk-go/v2"
 )
 
+// connectParticipant connects a participant to a LiveKit room
+func connectParticipant(lkURL, apiKey, apiSecret, roomName, identity string) (*lksdk.Room, error) {
+	room, err := lksdk.ConnectToRoom(lkURL, lksdk.ConnectInfo{
+		APIKey:              apiKey,
+		APISecret:           apiSecret,
+		RoomName:            roomName,
+		ParticipantIdentity: identity,
+	}, &lksdk.RoomCallback{})
+	return room, err
+}
+
 // publishFromMP4File publishes both video and audio tracks from a single MP4 file
 // This is useful for testing with real media files that have both audio and video
 func publishFromMP4File(t *testing.T, room *lksdk.Room, mp4File string, durationSeconds int) error {

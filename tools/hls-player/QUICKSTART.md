@@ -8,7 +8,10 @@ A 5-minute guide to verify your HLS egress output works correctly.
 
 **LiveKit server must be running:**
 ```bash
-# Verify server is running
+# Auto-detect LiveKit server and get connection details
+./tools/hls-player/detect-livekit.sh
+
+# Or manually verify server is running
 curl http://localhost:7881/validate
 
 # If not running, start it (see tools/hls-player/LIVEKIT_SETUP.md)
@@ -241,9 +244,28 @@ Different tests generate different quality/duration output:
 
 The 1-second test (TestE2ECompletePipeline) is too short for meaningful audio assessment and may sound garbled due to AAC encoder initialization overhead.
 
+## Full-Scale E2E Test
+
+For comprehensive testing with multiple participants and MinIO:
+
+```bash
+# Run complete workflow test
+./tools/hls-player/fullscale-test.sh
+
+# This tests:
+#   ✓ LiveKit server + egress worker
+#   ✓ Multiple participants (3 by default)
+#   ✓ Real media from test.mp4
+#   ✓ HLS output to MinIO
+#   ✓ Automatic URL generation
+```
+
+See `tools/hls-player/FULLSCALE_TEST.md` for complete documentation.
+
 ## Next Steps
 
 - Test with real LiveKit room (see `e2e_real_test.go`)
+- Run full-scale test with multiple participants (`fullscale-test.sh`)
 - Verify MinIO upload functionality
 - Check different quality settings
 - Test with longer recordings

@@ -295,16 +295,7 @@ func TestE2ERealParticipantsToMinIO(t *testing.T) {
 	})
 }
 
-// connectParticipant connects a participant to a LiveKit room
-func connectParticipant(lkURL, apiKey, apiSecret, roomName, identity string) (*lksdk.Room, error) {
-	room, err := lksdk.ConnectToRoom(lkURL, lksdk.ConnectInfo{
-		APIKey:              apiKey,
-		APISecret:           apiSecret,
-		RoomName:            roomName,
-		ParticipantIdentity: identity,
-	}, &lksdk.RoomCallback{})
-	return room, err
-}
+// connectParticipant is now in e2e_real_helpers.go
 
 // publishVideoFromFile publishes a video track from an H.264 MP4 file
 func publishVideoFromFile(t *testing.T, room *lksdk.Room, videoFile string) (*lksdk.LocalTrackPublication, error) {

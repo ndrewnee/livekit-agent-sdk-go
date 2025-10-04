@@ -58,6 +58,30 @@ type DirectPipeline struct {
 	hasVideoSeq  bool
 	hasAudioSeq  bool
 
+	// H.264 SPS/PPS caching for proper HLS playback
+	// Without rtpjitterbuffer, we must manually cache and inject parameter sets
+	cachedSPS    []byte
+	cachedPPS    []byte
+	hasCachedSPS bool
+	hasCachedPPS bool
+	spsCacheMu   sync.RWMutex
+
+	// Timestamp normalization (convert RTP timestamps to start from 0)
+	firstVideoTimestamp uint32
+	firstAudioTimestamp uint32
+	hasFirstVideoTS     bool
+	hasFirstAudioTS     bool
+	timestampMu         sync.RWMutex
+
+	// Simple packet reordering buffer (sequence-number based)
+	videoPacketBuffer map[uint16]*rtp.Packet
+	audioPacketBuffer map[uint16]*rtp.Packet
+	bufferMu          sync.Mutex
+	lastVideoRelease  uint16
+	lastAudioRelease  uint16
+	hasLastVideoRel   bool
+	hasLastAudioRel   bool
+
 	// Tracking flags to prevent duplicate goroutines
 	monitoringStarted bool
 	monitoringMu      sync.Mutex
@@ -84,15 +108,17 @@ func NewDirectPipeline(config *Config, sessionID string) (*DirectPipeline, error
 	}
 
 	p := &DirectPipeline{
-		config:     config,
-		sessionID:  sessionID,
-		outputDir:  outputDir,
-		ctx:        ctx,
-		cancel:     cancel,
-		state:      StateStopped,
-		statsTime:  time.Now(),
-		avSync:     NewAVSyncMonitor(),
-		gapMetrics: NewGapMetrics(),
+		config:            config,
+		sessionID:         sessionID,
+		outputDir:         outputDir,
+		ctx:               ctx,
+		cancel:            cancel,
+		state:             StateStopped,
+		statsTime:         time.Now(),
+		avSync:            NewAVSyncMonitor(),
+		gapMetrics:        NewGapMetrics(),
+		videoPacketBuffer: make(map[uint16]*rtp.Packet),
+		audioPacketBuffer: make(map[uint16]*rtp.Packet),
 	}
 
 	if err := p.createPipeline(); err != nil {
@@ -145,15 +171,9 @@ func (p *DirectPipeline) createPipeline() error {
 	caps = gst.NewCapsFromString("application/x-rtp,media=audio,clock-rate=48000,encoding-name=OPUS,payload=111")
 	p.audioSrc.SetProperty("caps", caps)
 
-	// Video chain: appsrc -> jitterbuffer -> depay -> parse -> rate -> mux
-	videoJitterBuffer, err := gst.NewElement("rtpjitterbuffer")
-	if err != nil {
-		return fmt.Errorf("failed to create video jitterbuffer: %w", err)
-	}
-	videoJitterBuffer.SetProperty("latency", uint(p.config.JitterBufferMs))
-	videoJitterBuffer.SetProperty("do-lost", true)
-	videoJitterBuffer.SetProperty("drop-on-latency", false)
-
+	// Video chain: appsrc -> depay -> parse -> queue -> mux
+	// NOTE: Packet reordering handled in Go code before pushing to appsrc
+	// This avoids rtpjitterbuffer which requires RTCP
 	rtph264depay, err := gst.NewElement("rtph264depay")
 	if err != nil {
 		return fmt.Errorf("failed to create rtph264depay: %w", err)
@@ -163,7 +183,16 @@ func (p *DirectPipeline) createPipeline() error {
 	if err != nil {
 		return fmt.Errorf("failed to create h264parse: %w", err)
 	}
-	h264parse.SetProperty("config-interval", -1)
+	// CRITICAL: Inject SPS/PPS with every IDR frame for HLS segment initialization
+	h264parse.SetProperty("config-interval", -1) // -1 = send with every IDR frame
+
+	// Use capsfilter to ensure proper H.264 format for HLS
+	h264capsfilter, err := gst.NewElement("capsfilter")
+	if err != nil {
+		return fmt.Errorf("failed to create h264 capsfilter: %w", err)
+	}
+	videoCaps := gst.NewCapsFromString("video/x-h264,stream-format=byte-stream,alignment=au")
+	h264capsfilter.SetProperty("caps", videoCaps)
 
 	// NOTE: videorate removed - it requires decoded video frames (YUV/RGB)
 	// For zero-transcode H.264 HLS, we cannot use videorate without decoding first
@@ -180,15 +209,8 @@ func (p *DirectPipeline) createPipeline() error {
 	videoQueue.SetProperty("max-size-time", uint64(2000000000)) // 2 seconds
 	videoQueue.SetProperty("leaky", 2)                           // downstream
 
-	// Audio chain: appsrc -> jitterbuffer -> depay -> parse -> [processing] -> mux
-	audioJitterBuffer, err := gst.NewElement("rtpjitterbuffer")
-	if err != nil {
-		return fmt.Errorf("failed to create audio jitterbuffer: %w", err)
-	}
-	audioJitterBuffer.SetProperty("latency", uint(p.config.JitterBufferMs))
-	audioJitterBuffer.SetProperty("do-lost", true)
-	audioJitterBuffer.SetProperty("drop-on-latency", false)
-
+	// Audio chain: appsrc -> depay -> parse -> [processing] -> mux
+	// NOTE: No jitterbuffer - it requires RTCP. Packet reordering would be handled in Go if needed.
 	rtpopusdepay, err := gst.NewElement("rtpopusdepay")
 	if err != nil {
 		return fmt.Errorf("failed to create rtpopusdepay: %w", err)
@@ -316,6 +338,10 @@ func (p *DirectPipeline) createPipeline() error {
 		return fmt.Errorf("failed to create mpegtsmux: %w", err)
 	}
 	mpegtsmux.SetProperty("alignment", 7)
+	// Set start-time to 0 explicitly
+	// This prevents the muxer from using pipeline running time as timestamp offset
+	mpegtsmux.SetProperty("start-time-selection", 2) // 2 = set (use explicit start-time value)
+	mpegtsmux.SetProperty("start-time", uint64(0))   // Start from timestamp 0
 
 	// HLS sink
 	// Use hlssink (v1) instead of hlssink2 because:
@@ -334,12 +360,11 @@ func (p *DirectPipeline) createPipeline() error {
 	// Add all elements to pipeline
 	elements := []*gst.Element{
 		p.videoSrc,
-		videoJitterBuffer,
 		rtph264depay,
 		h264parse,
+		h264capsfilter,
 		videoQueue,
 		p.audioSrc,
-		audioJitterBuffer,
 		rtpopusdepay,
 	}
 
@@ -354,30 +379,27 @@ func (p *DirectPipeline) createPipeline() error {
 	}
 
 	// Link video chain (zero-transcode H.264)
-	// appsrc -> jitterbuffer -> depay -> parse -> queue -> mux
-	if err := p.videoSrc.Link(videoJitterBuffer); err != nil {
-		return fmt.Errorf("failed to link videoSrc -> videoJitterBuffer: %w", err)
-	}
-	if err := videoJitterBuffer.Link(rtph264depay); err != nil {
-		return fmt.Errorf("failed to link videoJitterBuffer -> rtph264depay: %w", err)
+	// appsrc -> depay -> parse -> capsfilter -> queue -> mux
+	if err := p.videoSrc.Link(rtph264depay); err != nil {
+		return fmt.Errorf("failed to link videoSrc -> rtph264depay: %w", err)
 	}
 	if err := rtph264depay.Link(h264parse); err != nil {
 		return fmt.Errorf("failed to link rtph264depay -> h264parse: %w", err)
 	}
-	if err := h264parse.Link(videoQueue); err != nil {
-		return fmt.Errorf("failed to link h264parse -> videoQueue: %w", err)
+	if err := h264parse.Link(h264capsfilter); err != nil {
+		return fmt.Errorf("failed to link h264parse -> h264capsfilter: %w", err)
+	}
+	if err := h264capsfilter.Link(videoQueue); err != nil {
+		return fmt.Errorf("failed to link h264capsfilter -> videoQueue: %w", err)
 	}
 	if err := videoQueue.Link(mpegtsmux); err != nil {
 		return fmt.Errorf("failed to link videoQueue -> mpegtsmux: %w", err)
 	}
 
 	// Link audio chain
-	// appsrc -> jitterbuffer -> depay -> [processing] -> queue -> mux
-	if err := p.audioSrc.Link(audioJitterBuffer); err != nil {
-		return fmt.Errorf("failed to link audioSrc -> audioJitterBuffer: %w", err)
-	}
-	if err := audioJitterBuffer.Link(rtpopusdepay); err != nil {
-		return fmt.Errorf("failed to link audioJitterBuffer -> rtpopusdepay: %w", err)
+	// appsrc -> depay -> [processing] -> queue -> mux
+	if err := p.audioSrc.Link(rtpopusdepay); err != nil {
+		return fmt.Errorf("failed to link audioSrc -> rtpopusdepay: %w", err)
 	}
 
 	// Link audio processing chain
@@ -417,8 +439,7 @@ func (p *DirectPipeline) createPipeline() error {
 
 // InjectVideoRTP injects an RTP packet directly into the video pipeline
 func (p *DirectPipeline) InjectVideoRTP(packet *rtp.Packet) error {
-	// Allow injection in PAUSED state for live pipelines
-	// The pipeline may be PAUSED waiting for data
+	// Allow injection in PAUSED/PLAYING states
 	p.stateMu.RLock()
 	currentState := p.state
 	p.stateMu.RUnlock()
@@ -446,16 +467,82 @@ func (p *DirectPipeline) InjectVideoRTP(packet *rtp.Packet) error {
 	p.lastVideoSeq = packet.SequenceNumber
 	p.hasVideoSeq = true
 
-	// Marshal RTP packet to bytes
+	// NOTE: LiveKit RTP H.264 packetization discovered through testing:
+	// - Packets 1-35: Empty padding/keep-alive
+	// - Packet ~36: STAP-A (aggregation containing SPS+PPS+SEI)
+	// - Packets 37+: FU-A (fragmented IDR frames and P-frames)
+	//
+	// SOLUTION: Manually cache SPS/PPS from STAP-A packets and inject before processing
+
+	p.stats.VideoPacketsReceived++
+
+	// Parse and cache SPS/PPS from RTP payload (before marshaling to GStreamer)
+	if len(packet.Payload) > 0 {
+		nalType := packet.Payload[0] & 0x1F
+
+		switch nalType {
+		case 7: // SPS (Sequence Parameter Set)
+			p.spsCacheMu.Lock()
+			if !p.hasCachedSPS {
+				p.cachedSPS = make([]byte, len(packet.Payload))
+				copy(p.cachedSPS, packet.Payload)
+				p.hasCachedSPS = true
+				log.Printf("[%s] Cached SPS from RTP (len=%d)", p.sessionID, len(packet.Payload))
+			}
+			p.spsCacheMu.Unlock()
+
+		case 8: // PPS (Picture Parameter Set)
+			p.spsCacheMu.Lock()
+			if !p.hasCachedPPS {
+				p.cachedPPS = make([]byte, len(packet.Payload))
+				copy(p.cachedPPS, packet.Payload)
+				p.hasCachedPPS = true
+				log.Printf("[%s] Cached PPS from RTP (len=%d)", p.sessionID, len(packet.Payload))
+			}
+			p.spsCacheMu.Unlock()
+
+		case 24: // STAP-A (Single Time Aggregation Packet) - contains multiple NALs
+			// Parse STAP-A to extract SPS and PPS
+			p.parseSTAPA(packet.Payload)
+		}
+	}
+
+	// Normalize RTP timestamp to start from 0 (BEFORE marshaling!)
+	p.timestampMu.Lock()
+	if !p.hasFirstVideoTS {
+		p.firstVideoTimestamp = packet.Timestamp
+		p.hasFirstVideoTS = true
+		log.Printf("[%s] First video RTP timestamp: %d", p.sessionID, packet.Timestamp)
+	}
+	normalizedTimestamp := packet.Timestamp - p.firstVideoTimestamp
+	p.timestampMu.Unlock()
+
+	// Debug: Log first few PTS values
+	if p.stats.VideoPacketsReceived < 5 {
+		log.Printf("[%s] Video packet #%d: RTP ts=%d, normalized=%d",
+			p.sessionID, p.stats.VideoPacketsReceived, packet.Timestamp, normalizedTimestamp)
+	}
+
+	// Modify the packet timestamp to be normalized BEFORE marshaling
+	packet.Timestamp = normalizedTimestamp
+
+	// Marshal RTP packet to bytes (now with normalized timestamp in RTP header)
 	data, err := packet.Marshal()
 	if err != nil {
 		p.stats.DroppedFrames++
 		return fmt.Errorf("failed to marshal RTP packet: %w", err)
 	}
 
-	// Calculate presentation timestamp from RTP timestamp
+	// Debug: Verify the timestamp in marshaled packet
+	if p.stats.VideoPacketsReceived < 3 && len(data) >= 8 {
+		tsInPacket := uint32(data[4])<<24 | uint32(data[5])<<16 | uint32(data[6])<<8 | uint32(data[7])
+		log.Printf("[%s] Video packet #%d marshaled: timestamp in RTP header = %d (expected %d)",
+			p.sessionID, p.stats.VideoPacketsReceived, tsInPacket, normalizedTimestamp)
+	}
+
+	// Calculate presentation timestamp from normalized RTP timestamp
 	// For H.264, clock rate is 90000 Hz
-	pts := uint64(packet.Timestamp) * uint64(1000000000) / 90000
+	pts := uint64(normalizedTimestamp) * uint64(1000000000) / 90000
 
 	// Update A/V sync monitor
 	p.avSync.UpdateVideoPTS(pts)
@@ -466,15 +553,24 @@ func (p *DirectPipeline) InjectVideoRTP(packet *rtp.Packet) error {
 			p.stats.DroppedFrames++
 			return fmt.Errorf("failed to push video buffer: %w", err)
 		}
-		p.stats.VideoPacketsReceived++
+		// Note: VideoPacketsReceived already incremented above during debug logging
 
-		// If pipeline was paused waiting for data, transition to playing
+		// If pipeline was paused waiting for data, transition to PLAYING
 		p.stateMu.Lock()
 		if p.state == StatePaused && p.stats.VideoPacketsReceived == 1 {
-			p.state = StatePlaying
-			log.Printf("Pipeline transitioned to PLAYING after receiving first video data")
+			p.stateMu.Unlock()
+			// Transition GStreamer pipeline from PAUSED to PLAYING
+			if err := p.pipeline.SetState(gst.StatePlaying); err != nil {
+				log.Printf("Warning: Failed to transition pipeline to PLAYING: %v", err)
+			} else {
+				p.stateMu.Lock()
+				p.state = StatePlaying
+				p.stateMu.Unlock()
+				log.Printf("Pipeline transitioned to PLAYING after receiving first video data")
+			}
+		} else {
+			p.stateMu.Unlock()
 		}
-		p.stateMu.Unlock()
 	} else {
 		return fmt.Errorf("appsrc helper not initialized")
 	}
@@ -513,16 +609,35 @@ func (p *DirectPipeline) InjectAudioRTP(packet *rtp.Packet) error {
 	p.lastAudioSeq = packet.SequenceNumber
 	p.hasAudioSeq = true
 
-	// Marshal RTP packet to bytes
+	// Normalize RTP timestamp to start from 0 (BEFORE marshaling!)
+	p.timestampMu.Lock()
+	if !p.hasFirstAudioTS {
+		p.firstAudioTimestamp = packet.Timestamp
+		p.hasFirstAudioTS = true
+		log.Printf("[%s] First audio RTP timestamp: %d", p.sessionID, packet.Timestamp)
+	}
+	normalizedTimestamp := packet.Timestamp - p.firstAudioTimestamp
+	p.timestampMu.Unlock()
+
+	// Debug: Log first few PTS values
+	if p.stats.AudioPacketsReceived < 5 {
+		log.Printf("[%s] Audio packet #%d: RTP ts=%d, normalized=%d",
+			p.sessionID, p.stats.AudioPacketsReceived, packet.Timestamp, normalizedTimestamp)
+	}
+
+	// Modify the packet timestamp to be normalized BEFORE marshaling
+	packet.Timestamp = normalizedTimestamp
+
+	// Marshal RTP packet to bytes (now with normalized timestamp in RTP header)
 	data, err := packet.Marshal()
 	if err != nil {
 		p.stats.DroppedFrames++
 		return fmt.Errorf("failed to marshal RTP packet: %w", err)
 	}
 
-	// Calculate presentation timestamp from RTP timestamp
+	// Calculate presentation timestamp from normalized RTP timestamp
 	// For Opus, clock rate is 48000 Hz
-	pts := uint64(packet.Timestamp) * uint64(1000000000) / 48000
+	pts := uint64(normalizedTimestamp) * uint64(1000000000) / 48000
 
 	// Update A/V sync monitor
 	p.avSync.UpdateAudioPTS(pts)
@@ -613,9 +728,11 @@ func (p *DirectPipeline) Start() error {
 		fmt.Printf("===== Pipeline state set to StatePaused (2) for async start =====\n")
 	}
 
-	// Set pipeline to playing state
-	if err := p.pipeline.SetState(gst.StatePlaying); err != nil {
-		return fmt.Errorf("failed to start pipeline: %w", err)
+	// Set pipeline to PAUSED state first (required for appsrc to accept buffers)
+	// The pipeline will transition to PLAYING once data starts flowing
+	// Note: hlssink may create an initial empty segment, which we'll filter during upload
+	if err := p.pipeline.SetState(gst.StatePaused); err != nil {
+		return fmt.Errorf("failed to pause pipeline: %w", err)
 	}
 
 	// Start main loop and statistics monitoring immediately
@@ -780,9 +897,9 @@ func (p *DirectPipeline) monitorStateChangesAsync(result chan<- error) {
 			return
 
 		case <-timer.C:
-			// Check final state
+			// Check final state - accept READY/PAUSED/PLAYING for live sources
 			state := p.pipeline.GetCurrentState()
-			if state == gst.StatePlaying || (p.config.IsLiveSource && state == gst.StatePaused) {
+			if state == gst.StatePlaying || state == gst.StatePaused || state == gst.StateReady {
 				p.updateState(state)
 				if result != nil {
 					result <- nil
@@ -1042,4 +1159,77 @@ func (p *DirectPipeline) recoverFromCrash() {
 	}
 
 	log.Printf("Failed to recover pipeline after 3 attempts for session %s", p.sessionID)
+}
+
+// parseSTAPA parses a STAP-A (Single Time Aggregation Packet) RTP payload
+// and extracts SPS and PPS NAL units for caching.
+//
+// STAP-A format (RFC 6184):
+// - NAL header (1 byte, type=24)
+// - Multiple NAL units, each prefixed with 2-byte size:
+//   - Size (2 bytes, network order)
+//   - NAL unit (Size bytes)
+func (p *DirectPipeline) parseSTAPA(payload []byte) {
+	if len(payload) < 3 {
+		return // Too small for STAP-A
+	}
+
+	// Skip NAL header (first byte, type=24)
+	offset := 1
+	foundSPS := false
+	foundPPS := false
+
+	for offset+2 < len(payload) {
+		// Read NAL unit size (2 bytes, big-endian)
+		nalSize := int(payload[offset])<<8 | int(payload[offset+1])
+		offset += 2
+
+		if offset+nalSize > len(payload) {
+			log.Printf("[%s] STAP-A: Invalid NAL size %d at offset %d (payload len=%d)", p.sessionID, nalSize, offset, len(payload))
+			break
+		}
+
+		// Extract NAL unit
+		nalUnit := payload[offset : offset+nalSize]
+		offset += nalSize
+
+		if len(nalUnit) == 0 {
+			continue
+		}
+
+		nalType := nalUnit[0] & 0x1F
+
+		switch nalType {
+		case 7: // SPS
+			p.spsCacheMu.Lock()
+			if !p.hasCachedSPS {
+				p.cachedSPS = make([]byte, len(nalUnit))
+				copy(p.cachedSPS, nalUnit)
+				p.hasCachedSPS = true
+				foundSPS = true
+				log.Printf("[%s] Extracted SPS from STAP-A (len=%d)", p.sessionID, len(nalUnit))
+			}
+			p.spsCacheMu.Unlock()
+
+		case 8: // PPS
+			p.spsCacheMu.Lock()
+			if !p.hasCachedPPS {
+				p.cachedPPS = make([]byte, len(nalUnit))
+				copy(p.cachedPPS, nalUnit)
+				p.hasCachedPPS = true
+				foundPPS = true
+				log.Printf("[%s] Extracted PPS from STAP-A (len=%d)", p.sessionID, len(nalUnit))
+			}
+			p.spsCacheMu.Unlock()
+
+		case 6: // SEI (Supplemental Enhancement Information)
+			// Ignore SEI - not needed for basic playback
+		default:
+			// Other NAL types (AUD, etc.) - not needed for caching
+		}
+	}
+
+	if foundSPS && foundPPS {
+		log.Printf("[%s] ✓ Successfully cached SPS+PPS from STAP-A", p.sessionID)
+	}
 }
