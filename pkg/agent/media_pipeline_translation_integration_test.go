@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -26,11 +27,15 @@ func (suite *TranslationIntegrationTestSuite) TestAverageLatencyMultipleRuns() {
 	}
 
 	realStage := NewTranslationStage(&TranslationConfig{
-		Name:     "latency-test",
-		Priority: 30,
-		APIKey:   apiKey,
+		Name:         "latency-test",
+		Priority:     30,
+		APIKey:       apiKey,
+		EnableWarmup: true,
 	})
 	defer realStage.Disconnect()
+
+	// Wait for warm-up to complete
+	time.Sleep(2 * time.Second)
 
 	realStage.AddBeforeTranslationCallback(func(data *MediaData) {
 		if data.Metadata == nil {
@@ -143,11 +148,15 @@ func (suite *TranslationIntegrationTestSuite) TestLatencyWithDifferentTextLength
 	}
 
 	realStage := NewTranslationStage(&TranslationConfig{
-		Name:     "length-test",
-		Priority: 30,
-		APIKey:   apiKey,
+		Name:         "length-test",
+		Priority:     30,
+		APIKey:       apiKey,
+		EnableWarmup: true,
 	})
 	defer realStage.Disconnect()
+
+	// Wait for warm-up to complete
+	time.Sleep(2 * time.Second)
 
 	realStage.AddBeforeTranslationCallback(func(data *MediaData) {
 		if data.Metadata == nil {
@@ -246,10 +255,14 @@ func (suite *TranslationIntegrationTestSuite) TestLatencyWithMultipleLanguages()
 
 	for _, tc := range testCases {
 		realStage := NewTranslationStage(&TranslationConfig{
-			Name:     "multi-lang-test",
-			Priority: 30,
-			APIKey:   apiKey,
+			Name:         "multi-lang-test",
+			Priority:     30,
+			APIKey:       apiKey,
+			EnableWarmup: true,
 		})
+
+		// Wait for warm-up to complete
+		time.Sleep(2 * time.Second)
 
 		realStage.AddBeforeTranslationCallback(func(data *MediaData) {
 			if data.Metadata == nil {
@@ -347,7 +360,7 @@ func calculateStdDev(durations []time.Duration, avg time.Duration) time.Duration
 		sumSquares += diff * diff
 	}
 	variance := sumSquares / float64(len(durations))
-	return time.Duration(int64(variance)) * time.Millisecond
+	return time.Duration(int64(math.Sqrt(variance))) * time.Millisecond
 }
 
 // TestModelPerformanceComparison compares latency across different OpenAI models.
@@ -394,11 +407,15 @@ func (suite *TranslationIntegrationTestSuite) TestModelPerformanceComparison() {
 		fmt.Printf("Testing %s (%s)...\n", modelInfo.name, modelInfo.description)
 
 		stage := NewTranslationStage(&TranslationConfig{
-			Name:     "model-comparison-test",
-			Priority: 30,
-			APIKey:   apiKey,
-			Model:    modelInfo.name,
+			Name:         "model-comparison-test",
+			Priority:     30,
+			APIKey:       apiKey,
+			Model:        modelInfo.name,
+			EnableWarmup: true,
 		})
+
+		// Wait for warm-up to complete
+		time.Sleep(2 * time.Second)
 
 		stage.AddBeforeTranslationCallback(func(data *MediaData) {
 			if data.Metadata == nil {
@@ -719,11 +736,15 @@ func (suite *TranslationIntegrationTestSuite) TestTranslationQuality() {
 		fmt.Printf("Testing %s...\n", modelName)
 
 		stage := NewTranslationStage(&TranslationConfig{
-			Name:     "quality-test",
-			Priority: 30,
-			APIKey:   apiKey,
-			Model:    modelName,
+			Name:         "quality-test",
+			Priority:     30,
+			APIKey:       apiKey,
+			Model:        modelName,
+			EnableWarmup: true,
 		})
+
+		// Wait for warm-up to complete
+		time.Sleep(2 * time.Second)
 
 		result := modelQualityResult{
 			model:      modelName,
@@ -965,11 +986,15 @@ func (suite *TranslationIntegrationTestSuite) TestTranslationQualityRegression()
 		fmt.Printf("Testing %s...\n", modelName)
 
 		stage := NewTranslationStage(&TranslationConfig{
-			Name:     "regression-test",
-			Priority: 30,
-			APIKey:   apiKey,
-			Model:    modelName,
+			Name:         "regression-test",
+			Priority:     30,
+			APIKey:       apiKey,
+			Model:        modelName,
+			EnableWarmup: true,
 		})
+
+		// Wait for warm-up to complete
+		time.Sleep(2 * time.Second)
 
 		result := regressionResult{
 			model:       modelName,
@@ -1141,11 +1166,15 @@ func (suite *TranslationIntegrationTestSuite) TestQualityVsLatencyTradeoff() {
 		fmt.Printf("Testing %s...\n", modelName)
 
 		stage := NewTranslationStage(&TranslationConfig{
-			Name:     "tradeoff-test",
-			Priority: 30,
-			APIKey:   apiKey,
-			Model:    modelName,
+			Name:         "tradeoff-test",
+			Priority:     30,
+			APIKey:       apiKey,
+			Model:        modelName,
+			EnableWarmup: true,
 		})
+
+		// Wait for warm-up to complete
+		time.Sleep(2 * time.Second)
 
 		var totalLatency time.Duration
 		correctCount := 0
