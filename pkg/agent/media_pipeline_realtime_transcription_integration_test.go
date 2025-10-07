@@ -22,7 +22,7 @@ import (
 // Prerequisites:
 // - LiveKit server running (default: ws://localhost:7880)
 // - OPENAI_API_KEY environment variable set
-// - audiobook.wav in project root
+// - audio-sample-5s.wav in pkg/agent/testdata/
 //
 // These tests validate:
 // - Complete audio pipeline with LiveKit + OpenAI
@@ -49,7 +49,7 @@ func (suite *RealtimeTranscriptionIntegrationTestSuite) SetupSuite() {
 	suite.livekitURL = getEnvOrDefault("LIVEKIT_URL", "ws://localhost:7880")
 	suite.livekitKey = getEnvOrDefault("LIVEKIT_API_KEY", "devkey")
 	suite.livekitSecret = getEnvOrDefault("LIVEKIT_API_SECRET", "secret")
-	suite.audioFile = filepath.Join(findProjectRoot(), "audiobook.wav")
+	suite.audioFile = filepath.Join(findProjectRoot(), "pkg", "agent", "testdata", "audio-sample-5s.wav")
 }
 
 // TestAverageLatencyMultipleRuns measures average latency across multiple transcription runs with real audio.
@@ -60,7 +60,7 @@ func (suite *RealtimeTranscriptionIntegrationTestSuite) TestAverageLatencyMultip
 	}
 
 	if _, err := os.Stat(suite.audioFile); err != nil {
-		suite.T().Skipf("Skipping test: audiobook.wav not found at %s", suite.audioFile)
+		suite.T().Skipf("Skipping test: audio-sample-5s.wav not found at %s", suite.audioFile)
 	}
 
 	const numRuns = 5
@@ -70,15 +70,15 @@ func (suite *RealtimeTranscriptionIntegrationTestSuite) TestAverageLatencyMultip
 	fmt.Printf("\n=== Running %d transcription latency tests ===\n", numRuns)
 
 	for i := 0; i < numRuns; i++ {
-		result := suite.runSingleTranscription(apiKey, "gpt-4o-transcribe", "en", fmt.Sprintf("run-%d", i+1))
-		if result.TranscriptionCount > 0 {
+		result := suite.runSingleTranscription(apiKey, "gpt-4o-mini-transcribe", "en", fmt.Sprintf("run-%d", i+1))
+		if result.FinalCount > 0 {
 			successCount++
 			firstTranscriptionTimes = append(firstTranscriptionTimes, time.Duration(result.FirstTranscriptionMs)*time.Millisecond)
 		}
 	}
 
 	// Calculate and display statistics
-	fmt.Printf("\n=== Latency Statistics (%d successful runs) ===\n", successCount)
+	fmt.Printf("\n=== Real-time Transcription Latency Statistics (%d successful runs) ===\n", successCount)
 
 	if len(firstTranscriptionTimes) > 0 {
 		avgFirst := calculateAverage(firstTranscriptionTimes)
@@ -86,7 +86,7 @@ func (suite *RealtimeTranscriptionIntegrationTestSuite) TestAverageLatencyMultip
 		maxFirst := calculateMax(firstTranscriptionTimes)
 		stdDevFirst := calculateStdDev(firstTranscriptionTimes, avgFirst)
 
-		fmt.Printf("\nTime-to-First-Transcription:\n")
+		fmt.Printf("\nReal-time Latency (audio packet → transcription):\n")
 		fmt.Printf("  Average: %dms\n", avgFirst.Milliseconds())
 		fmt.Printf("  Min: %dms\n", minFirst.Milliseconds())
 		fmt.Printf("  Max: %dms\n", maxFirst.Milliseconds())
@@ -107,7 +107,7 @@ func (suite *RealtimeTranscriptionIntegrationTestSuite) TestModelComparison() {
 	}
 
 	if _, err := os.Stat(suite.audioFile); err != nil {
-		suite.T().Skipf("Skipping test: audiobook.wav not found at %s", suite.audioFile)
+		suite.T().Skipf("Skipping test: audio-sample-5s.wav not found at %s", suite.audioFile)
 	}
 
 	models := []string{"gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"}
@@ -123,38 +123,37 @@ func (suite *RealtimeTranscriptionIntegrationTestSuite) TestModelComparison() {
 
 	// Display comparison
 	fmt.Printf("\n=== Model Comparison Results ===\n")
-	fmt.Printf("%-25s | %15s | %12s | %10s | %10s\n", "Model", "First Trans (ms)", "Total Count", "Packets", "Avg Latency")
-	fmt.Println(repeatString("-", 90))
+	fmt.Printf("%-25s | %15s | %12s | %10s\n", "Model", "RT Latency (ms)", "Finals", "Packets")
+	fmt.Println(repeatString("-", 75))
 
 	for _, model := range models {
 		result := results[model]
-		fmt.Printf("%-25s | %15d | %12d | %10d | %9.2fms\n",
+		fmt.Printf("%-25s | %15.2f | %12d | %10d\n",
 			model,
-			result.FirstTranscriptionMs,
-			result.TranscriptionCount,
-			result.PacketsProcessed,
-			result.AvgLatencyMs)
+			result.AvgLatencyMs,
+			result.FinalCount,
+			result.PacketsProcessed)
 	}
 	fmt.Println()
 
 	// Find fastest model
 	var fastestModel string
-	var fastestMs int64 = 999999
+	var fastestMs float64 = 999999
 	for model, result := range results {
-		if result.FirstTranscriptionMs > 0 && result.FirstTranscriptionMs < fastestMs {
-			fastestMs = result.FirstTranscriptionMs
+		if result.AvgLatencyMs > 0 && result.AvgLatencyMs < fastestMs {
+			fastestMs = result.AvgLatencyMs
 			fastestModel = model
 		}
 	}
 
 	if fastestModel != "" {
-		fmt.Printf("🏆 Fastest Model: %s (%dms)\n\n", fastestModel, fastestMs)
+		fmt.Printf("🏆 Fastest Model: %s (%.2fms)\n\n", fastestModel, fastestMs)
 		fmt.Println("Performance vs fastest:")
 		for _, model := range models {
 			result := results[model]
-			if result.FirstTranscriptionMs > 0 && model != fastestModel {
-				slowdown := float64(result.FirstTranscriptionMs-fastestMs) / float64(fastestMs) * 100
-				fmt.Printf("  %s: +%.1f%% slower (%dms)\n", model, slowdown, result.FirstTranscriptionMs)
+			if result.AvgLatencyMs > 0 && model != fastestModel {
+				slowdown := (result.AvgLatencyMs - fastestMs) / fastestMs * 100
+				fmt.Printf("  %s: +%.1f%% slower (%.2fms)\n", model, slowdown, result.AvgLatencyMs)
 			}
 		}
 		fmt.Println()
@@ -299,7 +298,6 @@ func (suite *RealtimeTranscriptionIntegrationTestSuite) runSingleTranscription(a
 	fmt.Println()
 
 	// Collect transcriptions
-	startTime := time.Now()
 	result := &ModelTestResult{
 		Model: model,
 	}
@@ -309,17 +307,16 @@ func (suite *RealtimeTranscriptionIntegrationTestSuite) runSingleTranscription(a
 collectLoop:
 	for {
 		select {
+		case <-publisher.AudioFinishedChan():
+			fmt.Println("  🎵 Audio finished streaming")
+			// Wait a bit more to collect final transcriptions
+			time.Sleep(2 * time.Second)
+			break collectLoop
+
 		case event := <-transcriptions:
 			if event.Error != nil {
 				fmt.Printf("  ⚠️  Error: %v\n", event.Error)
 				continue
-			}
-
-			elapsed := time.Since(startTime).Milliseconds()
-
-			if result.TranscriptionCount == 0 {
-				result.FirstTranscriptionMs = elapsed
-				fmt.Printf("  ⚡ First transcription at %dms\n", elapsed)
 			}
 
 			result.TranscriptionCount++
@@ -339,30 +336,26 @@ collectLoop:
 				status,
 				truncateString(event.Text, 50))
 
-			// Exit after getting at least 3 transcriptions
-			if result.TranscriptionCount >= 3 {
-				break collectLoop
-			}
-
 		case <-timeout:
 			fmt.Printf("  ⏱️  Timeout after 30s\n")
 			break collectLoop
 		}
 	}
 
-	// Get final stats
+	// Get final stats - AvgLatencyMs now reflects real-time transcription latency
+	// (time from sending audio packet to receiving transcription)
 	stats := stage.GetStats()
 	result.PacketsProcessed = stats.AudioPacketsSent
 	result.AvgLatencyMs = stats.AverageLatencyMs
+	result.FirstTranscriptionMs = int64(stats.AverageLatencyMs) // Use avg latency as the metric
 
 	// Display results
 	fmt.Println()
 	fmt.Printf("  📊 Test Results:\n")
-	fmt.Printf("     First Transcription: %dms\n", result.FirstTranscriptionMs)
-	fmt.Printf("     Total: %d (Partial: %d, Final: %d)\n",
+	fmt.Printf("     Real-time Transcription Latency: %.2fms\n", result.AvgLatencyMs)
+	fmt.Printf("     Total Transcriptions: %d (Partial: %d, Final: %d)\n",
 		result.TranscriptionCount, result.PartialCount, result.FinalCount)
-	fmt.Printf("     Packets Processed: %d\n", result.PacketsProcessed)
-	fmt.Printf("     Avg Latency: %.2fms\n", result.AvgLatencyMs)
+	fmt.Printf("     Audio Packets Sent: %d\n", result.PacketsProcessed)
 	fmt.Println()
 
 	return result
