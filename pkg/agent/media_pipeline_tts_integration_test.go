@@ -295,12 +295,16 @@ func (suite *TTSLatencyTestSuite) TestAverageLatencyMultipleRuns() {
 	}
 
 	realStage := NewTextToSpeechStage(&TextToSpeechConfig{
-		Name:     "latency-test",
-		Priority: 50,
-		APIKey:   apiKey,
-		Model:    "gpt-4o-mini-tts", // Default baseline model
-		Voice:    "alloy",
+		Name:         "latency-test",
+		Priority:     50,
+		APIKey:       apiKey,
+		Model:        "gpt-4o-mini-tts", // Default baseline model
+		Voice:        "alloy",
+		EnableWarmup: true,
 	})
+
+	// Wait for warm-up to complete
+	time.Sleep(2 * time.Second)
 
 	const numRuns = 10
 	var totalLatencies []time.Duration
@@ -398,12 +402,16 @@ func (suite *TTSLatencyTestSuite) TestLatencyWithDifferentTextLengths() {
 	}
 
 	realStage := NewTextToSpeechStage(&TextToSpeechConfig{
-		Name:     "length-test",
-		Priority: 50,
-		APIKey:   apiKey,
-		Model:    "gpt-4o-mini-tts",
-		Voice:    "alloy",
+		Name:         "length-test",
+		Priority:     50,
+		APIKey:       apiKey,
+		Model:        "gpt-4o-mini-tts",
+		Voice:        "alloy",
+		EnableWarmup: true,
 	})
+
+	// Wait for warm-up to complete
+	time.Sleep(2 * time.Second)
 
 	testCases := []struct {
 		name string
@@ -487,12 +495,16 @@ func (suite *TTSLatencyTestSuite) TestLatencyWithMultipleLanguages() {
 
 	for _, tc := range testCases {
 		realStage := NewTextToSpeechStage(&TextToSpeechConfig{
-			Name:     "multi-lang-test",
-			Priority: 50,
-			APIKey:   apiKey,
-			Model:    "gpt-4o-mini-tts",
-			Voice:    "alloy",
+			Name:         "multi-lang-test",
+			Priority:     50,
+			APIKey:       apiKey,
+			Model:        "gpt-4o-mini-tts",
+			Voice:        "alloy",
+			EnableWarmup: true,
 		})
+
+		// Wait for warm-up to complete
+		time.Sleep(2 * time.Second)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
@@ -562,12 +574,16 @@ func (suite *TTSLatencyTestSuite) TestModelPerformanceComparison() {
 		fmt.Printf("Testing %s (%s)...\n", modelInfo.name, modelInfo.description)
 
 		stage := NewTextToSpeechStage(&TextToSpeechConfig{
-			Name:     "model-comparison-test",
-			Priority: 50,
-			APIKey:   apiKey,
-			Model:    modelInfo.name,
-			Voice:    "alloy",
+			Name:         "model-comparison-test",
+			Priority:     50,
+			APIKey:       apiKey,
+			Model:        modelInfo.name,
+			Voice:        "alloy",
+			EnableWarmup: true,
 		})
+
+		// Wait for warm-up to complete
+		time.Sleep(2 * time.Second)
 
 		result := modelResult{
 			model:          modelInfo.name,
@@ -680,12 +696,16 @@ func (suite *TTSLatencyTestSuite) TestVoicePerformanceComparison() {
 		fmt.Printf("Testing voice: %s\n", voice)
 
 		stage := NewTextToSpeechStage(&TextToSpeechConfig{
-			Name:     "voice-comparison-test",
-			Priority: 50,
-			APIKey:   apiKey,
-			Model:    "gpt-4o-mini-tts",
-			Voice:    voice,
+			Name:         "voice-comparison-test",
+			Priority:     50,
+			APIKey:       apiKey,
+			Model:        "gpt-4o-mini-tts",
+			Voice:        voice,
+			EnableWarmup: true,
 		})
+
+		// Wait for warm-up to complete
+		time.Sleep(2 * time.Second)
 
 		result := voiceResult{
 			voice:          voice,
@@ -788,12 +808,16 @@ func (suite *TTSLatencyTestSuite) TestQualityVsLatencyTradeoff() {
 		fmt.Printf("Testing %s...\n", modelName)
 
 		stage := NewTextToSpeechStage(&TextToSpeechConfig{
-			Name:     "tradeoff-test",
-			Priority: 50,
-			APIKey:   apiKey,
-			Model:    modelName,
-			Voice:    "alloy",
+			Name:         "tradeoff-test",
+			Priority:     50,
+			APIKey:       apiKey,
+			Model:        modelName,
+			Voice:        "alloy",
+			EnableWarmup: true,
 		})
+
+		// Wait for warm-up to complete
+		time.Sleep(2 * time.Second)
 
 		var totalLatency time.Duration
 		var totalAudioSize int
