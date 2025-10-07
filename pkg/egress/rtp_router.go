@@ -13,11 +13,11 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// RTPRouter routes RTP packets from LiveKit tracks to the GStreamer pipeline
+// RTPRouter routes RTP packets from LiveKit tracks to an RTP sink (DirectPipeline or HLSSaver)
 // Implements the routing architecture from PLAN.md Milestone 2
 type RTPRouter struct {
-	config   *Config
-	pipeline *pipeline.DirectPipeline // Direct injection pipeline
+	config *Config
+	sink   pipeline.RTPSink // Can be DirectPipeline or HLSSaver
 
 	// UDP mode connections (deprecated, but kept for compatibility)
 	videoConn *net.UDPConn
@@ -52,11 +52,11 @@ type RouterStats struct {
 	LastPacketTime   int64  `json:"last_packet_time"` // Unix timestamp
 }
 
-// NewRTPRouter creates a new RTP router
-func NewRTPRouter(config *Config, pipeline *pipeline.DirectPipeline) *RTPRouter {
+// NewRTPRouter creates a new RTP router with the given sink (DirectPipeline or HLSSaver)
+func NewRTPRouter(config *Config, sink pipeline.RTPSink) *RTPRouter {
 	return &RTPRouter{
 		config:         config,
-		pipeline:       pipeline,
+		sink:           sink,
 		errorLogPeriod: 10 * time.Second, // Log errors at most every 10 seconds
 	}
 }
@@ -186,7 +186,7 @@ func (r *RTPRouter) forwardRTPPackets(track *webrtc.TrackRemote) {
 		}
 
 		packetCount++
-		if packetCount == 1 || packetCount %100 == 0 {
+		if packetCount == 1 || packetCount%100 == 0 {
 			fmt.Printf("===== Received packet #%d from track %s (kind: %v) =====\n", packetCount, track.ID(), track.Kind())
 		}
 
@@ -237,24 +237,24 @@ func (r *RTPRouter) routePacket(packet *rtp.Packet, kind webrtc.RTPCodecType) er
 	return r.routePacketUDP(packet, kind)
 }
 
-// routePacketDirect uses direct injection to the pipeline (recommended)
+// routePacketDirect uses direct injection to the sink (recommended)
 func (r *RTPRouter) routePacketDirect(packet *rtp.Packet, kind webrtc.RTPCodecType) error {
-	if r.pipeline == nil {
-		fmt.Printf("===== ERROR: pipeline is nil in routePacketDirect =====\n")
-		return fmt.Errorf("pipeline not available for direct injection")
+	if r.sink == nil {
+		fmt.Printf("===== ERROR: sink is nil in routePacketDirect =====\n")
+		return fmt.Errorf("sink not available for direct injection")
 	}
 
 	// Route based on codec type
 	var err error
 	switch kind {
 	case webrtc.RTPCodecTypeVideo:
-		err = r.pipeline.InjectVideoRTP(packet)
+		err = r.sink.InjectVideoRTP(packet)
 		if err != nil {
 			fmt.Printf("===== ERROR injecting video RTP: %v =====\n", err)
 		}
 		return err
 	case webrtc.RTPCodecTypeAudio:
-		err = r.pipeline.InjectAudioRTP(packet)
+		err = r.sink.InjectAudioRTP(packet)
 		if err != nil {
 			fmt.Printf("===== ERROR injecting audio RTP: %v =====\n", err)
 		}

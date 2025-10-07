@@ -30,34 +30,37 @@ type Config struct {
 	MonitoringConfig MonitoringConfig `yaml:"monitoring"`
 }
 
-// PipelineConfig holds GStreamer pipeline configuration
+// PipelineConfig holds pipeline configuration
 type PipelineConfig struct {
 	// Output directory for recordings
 	OutputDir string `yaml:"output_dir"`
 
-	// HLS segment settings
-	SegmentDuration int `yaml:"segment_duration"` // Duration of each segment in seconds (default: 4)
-	PlaylistType    string `yaml:"playlist_type"`  // HLS playlist type: "event" or "vod"
-	MaxSegments     int `yaml:"max_segments"`      // Maximum number of segments to keep (0 = unlimited)
-	TargetDuration  int `yaml:"target_duration"`   // Target duration for HLS playlist
+	// Pipeline mode selection
+	UseHLSSaver bool `yaml:"use_hls_saver"` // If true, use gohlslib HLSSaver (no GStreamer). If false, use DirectPipeline (GStreamer)
 
-	// Pipeline startup behavior
+	// HLS segment settings
+	SegmentDuration int    `yaml:"segment_duration"` // Duration of each segment in seconds (default: 6)
+	PlaylistType    string `yaml:"playlist_type"`    // HLS playlist type: "event" or "vod"
+	MaxSegments     int    `yaml:"max_segments"`     // Maximum number of segments to keep (0 = unlimited)
+	TargetDuration  int    `yaml:"target_duration"`  // Target duration for HLS playlist
+
+	// Pipeline startup behavior (DirectPipeline only)
 	AllowAsyncStart bool `yaml:"allow_async_start"` // If true, Start() returns immediately without waiting for pipeline PLAYING state
 
-	// Audio/Video settings
+	// Audio/Video settings (DirectPipeline only)
 	VideoFramerate int    `yaml:"video_framerate"` // Target video framerate (default: 30)
 	AudioCodec     string `yaml:"audio_codec"`     // Audio codec: "opus", "aac", "mp3"
 	VideoCodec     string `yaml:"video_codec"`     // Video codec: "h264", "vp8", "vp9"
 
-	// Buffer settings
-	VideoBufferMs int `yaml:"video_buffer_ms"` // Video buffer in milliseconds
-	AudioBufferMs int `yaml:"audio_buffer_ms"` // Audio buffer in milliseconds
+	// Buffer settings (DirectPipeline only)
+	VideoBufferMs  int `yaml:"video_buffer_ms"`  // Video buffer in milliseconds
+	AudioBufferMs  int `yaml:"audio_buffer_ms"`  // Audio buffer in milliseconds
 	JitterBufferMs int `yaml:"jitter_buffer_ms"` // Jitter buffer for RTP
 
-	// Gap filling settings
-	EnableGapFilling bool `yaml:"enable_gap_filling"` // Enable gap filling for missing packets
-	VideoGapMode     string `yaml:"video_gap_mode"`   // "duplicate" or "black"
-	AudioGapMode     string `yaml:"audio_gap_mode"`   // "silence" or "repeat"
+	// Gap filling settings (DirectPipeline only)
+	EnableGapFilling bool   `yaml:"enable_gap_filling"` // Enable gap filling for missing packets
+	VideoGapMode     string `yaml:"video_gap_mode"`     // "duplicate" or "black"
+	AudioGapMode     string `yaml:"audio_gap_mode"`     // "silence" or "repeat"
 }
 
 // StorageConfig holds storage configuration
@@ -65,8 +68,8 @@ type StorageConfig struct {
 	Type string `yaml:"type"` // Storage type: "local", "s3", "gcs"
 
 	// Local storage settings
-	LocalPath      string `yaml:"local_path"`       // Local directory for recordings
-	RetentionHours int    `yaml:"retention_hours"`  // How long to keep recordings (0 = forever)
+	LocalPath      string `yaml:"local_path"`      // Local directory for recordings
+	RetentionHours int    `yaml:"retention_hours"` // How long to keep recordings (0 = forever)
 
 	// S3 configuration
 	S3Config S3StorageConfig `yaml:"s3"`
@@ -75,10 +78,10 @@ type StorageConfig struct {
 	GCSConfig GCSStorageConfig `yaml:"gcs"`
 
 	// Upload settings
-	EnableUpload    bool          `yaml:"enable_upload"`     // Enable uploading to remote storage
-	UploadInterval  time.Duration `yaml:"upload_interval"`   // How often to upload segments
-	RetryAttempts   int          `yaml:"retry_attempts"`     // Number of retry attempts for failed uploads
-	RetryDelay      time.Duration `yaml:"retry_delay"`       // Delay between retry attempts
+	EnableUpload   bool          `yaml:"enable_upload"`   // Enable uploading to remote storage
+	UploadInterval time.Duration `yaml:"upload_interval"` // How often to upload segments
+	RetryAttempts  int           `yaml:"retry_attempts"`  // Number of retry attempts for failed uploads
+	RetryDelay     time.Duration `yaml:"retry_delay"`     // Delay between retry attempts
 }
 
 // S3StorageConfig holds S3-specific storage configuration
@@ -102,23 +105,23 @@ type GCSStorageConfig struct {
 // RecordingConfig holds recording-specific configuration
 type RecordingConfig struct {
 	// Recording control
-	AutoStart         bool          `yaml:"auto_start"`          // Automatically start recording when tracks are available
-	MinParticipants   int          `yaml:"min_participants"`    // Minimum participants to start recording
-	MaxDuration       time.Duration `yaml:"max_duration"`        // Maximum recording duration (0 = unlimited)
-	IdleTimeout       time.Duration `yaml:"idle_timeout"`        // Stop recording after idle time
+	AutoStart       bool          `yaml:"auto_start"`       // Automatically start recording when tracks are available
+	MinParticipants int           `yaml:"min_participants"` // Minimum participants to start recording
+	MaxDuration     time.Duration `yaml:"max_duration"`     // Maximum recording duration (0 = unlimited)
+	IdleTimeout     time.Duration `yaml:"idle_timeout"`     // Stop recording after idle time
 
 	// Track selection
-	RecordVideo       bool   `yaml:"record_video"`        // Record video tracks
-	RecordAudio       bool   `yaml:"record_audio"`        // Record audio tracks
-	RecordScreenShare bool   `yaml:"record_screenshare"`  // Record screen share tracks
+	RecordVideo         bool   `yaml:"record_video"`          // Record video tracks
+	RecordAudio         bool   `yaml:"record_audio"`          // Record audio tracks
+	RecordScreenShare   bool   `yaml:"record_screenshare"`    // Record screen share tracks
 	PreferredVideoTrack string `yaml:"preferred_video_track"` // Preferred video track ID or participant
 	PreferredAudioTrack string `yaml:"preferred_audio_track"` // Preferred audio track ID or participant
 
 	// Screenshot settings
-	EnableScreenshots  bool   `yaml:"enable_screenshots"`   // Enable periodic screenshots
-	ScreenshotInterval int    `yaml:"screenshot_interval"`  // Screenshot interval in seconds
-	ScreenshotFormat   string `yaml:"screenshot_format"`    // Screenshot format: "jpeg" or "png"
-	ScreenshotQuality  int    `yaml:"screenshot_quality"`   // JPEG quality (1-100)
+	EnableScreenshots  bool   `yaml:"enable_screenshots"`  // Enable periodic screenshots
+	ScreenshotInterval int    `yaml:"screenshot_interval"` // Screenshot interval in seconds
+	ScreenshotFormat   string `yaml:"screenshot_format"`   // Screenshot format: "jpeg" or "png"
+	ScreenshotQuality  int    `yaml:"screenshot_quality"`  // JPEG quality (1-100)
 }
 
 // NetworkConfig holds network-related configuration
@@ -146,9 +149,9 @@ type NetworkConfig struct {
 // MonitoringConfig holds monitoring and metrics configuration
 type MonitoringConfig struct {
 	// Metrics collection
-	EnableMetrics   bool   `yaml:"enable_metrics"`    // Enable metrics collection
-	MetricsInterval int    `yaml:"metrics_interval"`  // Metrics collection interval in seconds
-	MetricsEndpoint string `yaml:"metrics_endpoint"`  // Prometheus metrics endpoint
+	EnableMetrics   bool   `yaml:"enable_metrics"`   // Enable metrics collection
+	MetricsInterval int    `yaml:"metrics_interval"` // Metrics collection interval in seconds
+	MetricsEndpoint string `yaml:"metrics_endpoint"` // Prometheus metrics endpoint
 
 	// Health checks
 	EnableHealthCheck bool   `yaml:"enable_health_check"` // Enable health check endpoint
@@ -164,14 +167,15 @@ type MonitoringConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		MaxConcurrentSessions: 10,
-		VideoQuality:         livekit.VideoQuality_HIGH,
+		VideoQuality:          livekit.VideoQuality_HIGH,
 
 		PipelineConfig: PipelineConfig{
 			OutputDir:        "/tmp/recordings",
-			SegmentDuration:  4,
+			UseHLSSaver:      true, // Use gohlslib (no GStreamer) by default
+			SegmentDuration:  6,
 			PlaylistType:     "event",
 			MaxSegments:      0,
-			TargetDuration:   4,
+			TargetDuration:   6,
 			VideoFramerate:   30,
 			AudioCodec:       "opus",
 			VideoCodec:       "h264",
@@ -225,8 +229,8 @@ func DefaultConfig() *Config {
 			EnableHealthCheck: true,
 			HealthCheckPort:   8080,
 			HealthCheckPath:   "/health",
-			LogLevel:         "info",
-			LogFile:          "",
+			LogLevel:          "info",
+			LogFile:           "",
 		},
 	}
 }

@@ -16,32 +16,32 @@ import (
 )
 
 // RecordingSession manages a single room recording session
-// This coordinates between LiveKit room events and the GStreamer pipeline
+// This coordinates between LiveKit room events and the RTP sink (DirectPipeline or HLSSaver)
 type RecordingSession struct {
-	jobCtx      *agent.JobContext
-	config      *Config
-	room        *lksdk.Room
+	jobCtx *agent.JobContext
+	config *Config
+	room   *lksdk.Room
 
 	// Components
 	trackManager       *TrackManager
 	trackSubscriber    *TrackSubscriber
 	participantTracker *ParticipantTracker
 	rtpRouter          *RTPRouter
-	pipeline           *pipeline.DirectPipeline
+	sink               pipeline.RTPSink // Can be DirectPipeline or HLSSaver
 	codecTracker       *CodecTracker
 	connManager        *ConnectionManager
 
 	// State management
-	state         SessionState
-	stateMu       sync.RWMutex
-	startTime     time.Time
-	stopTime      time.Time
+	state     SessionState
+	stateMu   sync.RWMutex
+	startTime time.Time
+	stopTime  time.Time
 
 	// Graceful shutdown
-	ctx           context.Context
-	cancel        context.CancelFunc
-	done          chan error
-	stopOnce      sync.Once
+	ctx      context.Context
+	cancel   context.CancelFunc
+	done     chan error
+	stopOnce sync.Once
 
 	// Statistics
 	stats         SessionStats
@@ -147,7 +147,7 @@ func (s *RecordingSession) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize components: %w", err)
 	}
 
-	// Start RTP router BEFORE pipeline so tracks that subscribe during pipeline.Start() can be forwarded
+	// Start RTP router BEFORE sink so tracks that subscribe during sink.Start() can be forwarded
 	fmt.Printf("===== About to start RTP router =====\n")
 	if err := s.rtpRouter.Start(); err != nil {
 		s.setState(StateError)
@@ -155,11 +155,11 @@ func (s *RecordingSession) Start(ctx context.Context) error {
 	}
 	fmt.Printf("===== RTP router started successfully =====\n")
 
-	// Start the pipeline (this may block waiting for PAUSED state)
-	if err := s.pipeline.Start(); err != nil {
+	// Start the sink (this may block waiting for PAUSED state for DirectPipeline)
+	if err := s.sink.Start(); err != nil {
 		s.setState(StateError)
-		s.rtpRouter.Stop() // Stop router if pipeline fails
-		return fmt.Errorf("failed to start pipeline: %w", err)
+		s.rtpRouter.Stop() // Stop router if sink fails
+		return fmt.Errorf("failed to start sink: %w", err)
 	}
 
 	// Forward any tracks that were subscribed before Start()
@@ -257,32 +257,51 @@ func (s *RecordingSession) initializeComponents() error {
 		},
 	)
 
-	// Create pipeline configuration
-	pipelineConfig := &pipeline.Config{
-		OutputDir:          s.config.PipelineConfig.OutputDir,
-		SegmentDuration:    s.config.PipelineConfig.SegmentDuration,
-		JitterBufferMs:     s.config.PipelineConfig.JitterBufferMs,
-		AudioMode:          pipeline.AudioPassThrough, // Zero-transcode per SPECS.md
-		EnableScreenshots:  s.config.RecordingConfig.EnableScreenshots,
-		ScreenshotInterval: s.config.RecordingConfig.ScreenshotInterval,
-		AllowAsyncStart:    s.config.PipelineConfig.AllowAsyncStart,
-	}
-
-	// Validate pipeline config
-	if err := pipeline.ValidateConfig(pipelineConfig); err != nil {
-		return fmt.Errorf("invalid pipeline config: %w", err)
-	}
-
-	// Create the pipeline
+	// Create RTP sink (DirectPipeline or HLSSaver)
 	sessionID := fmt.Sprintf("%s-%d", s.getJobID(), time.Now().Unix())
-	directPipeline, err := pipeline.NewDirectPipeline(pipelineConfig, sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to create pipeline: %w", err)
-	}
-	s.pipeline = directPipeline
 
-	// Create RTP router
-	s.rtpRouter = NewRTPRouter(s.config, s.pipeline)
+	if s.config.PipelineConfig.UseHLSSaver {
+		// Create HLSSaver (no GStreamer)
+		logger.Infow("using HLSSaver (gohlslib) for recording", "jobID", s.getJobID())
+
+		segmentDuration := time.Duration(s.config.PipelineConfig.SegmentDuration) * time.Second
+		if segmentDuration == 0 {
+			segmentDuration = 6 * time.Second // Default
+		}
+
+		hlsSaver, err := NewHLSSaver(sessionID, s.config.PipelineConfig.OutputDir, segmentDuration)
+		if err != nil {
+			return fmt.Errorf("failed to create HLS saver: %w", err)
+		}
+		s.sink = hlsSaver
+	} else {
+		// Create DirectPipeline (GStreamer)
+		logger.Infow("using DirectPipeline (GStreamer) for recording", "jobID", s.getJobID())
+
+		pipelineConfig := &pipeline.Config{
+			OutputDir:          s.config.PipelineConfig.OutputDir,
+			SegmentDuration:    s.config.PipelineConfig.SegmentDuration,
+			JitterBufferMs:     s.config.PipelineConfig.JitterBufferMs,
+			AudioMode:          pipeline.AudioPassThrough, // Zero-transcode per SPECS.md
+			EnableScreenshots:  s.config.RecordingConfig.EnableScreenshots,
+			ScreenshotInterval: s.config.RecordingConfig.ScreenshotInterval,
+			AllowAsyncStart:    s.config.PipelineConfig.AllowAsyncStart,
+		}
+
+		// Validate pipeline config
+		if err := pipeline.ValidateConfig(pipelineConfig); err != nil {
+			return fmt.Errorf("invalid pipeline config: %w", err)
+		}
+
+		directPipeline, err := pipeline.NewDirectPipeline(pipelineConfig, sessionID)
+		if err != nil {
+			return fmt.Errorf("failed to create pipeline: %w", err)
+		}
+		s.sink = directPipeline
+	}
+
+	// Create RTP router with the sink
+	s.rtpRouter = NewRTPRouter(s.config, s.sink)
 
 	return nil
 }
@@ -389,9 +408,9 @@ func (s *RecordingSession) Stop() {
 			s.rtpRouter.Stop()
 		}
 
-		// Stop pipeline
-		if s.pipeline != nil {
-			s.pipeline.Stop()
+		// Stop sink (DirectPipeline or HLSSaver)
+		if s.sink != nil {
+			s.sink.Stop()
 		}
 
 		// Stop connection manager

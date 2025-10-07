@@ -30,8 +30,8 @@ type DirectPipeline struct {
 	outputDir string
 
 	pipeline     *gst.Pipeline
-	videoSrc     *gst.Element // appsrc element
-	audioSrc     *gst.Element // appsrc element
+	videoSrc     *gst.Element  // appsrc element
+	audioSrc     *gst.Element  // appsrc element
 	appsrcHelper *AppsrcHelper // Real CGo appsrc helper
 
 	bus      *gst.Bus
@@ -146,11 +146,11 @@ func (p *DirectPipeline) createPipeline() error {
 	}
 	p.videoSrc.SetProperty("is-live", true)
 	p.videoSrc.SetProperty("format", gst.FormatTime)
-	p.videoSrc.SetProperty("do-timestamp", false) // We'll set timestamps ourselves
-	p.videoSrc.SetProperty("emit-signals", true) // Enable signal emission
-	p.videoSrc.SetProperty("block", false) // Don't block when buffer is full
+	p.videoSrc.SetProperty("do-timestamp", false)             // We'll set timestamps ourselves
+	p.videoSrc.SetProperty("emit-signals", true)              // Enable signal emission
+	p.videoSrc.SetProperty("block", false)                    // Don't block when buffer is full
 	p.videoSrc.SetProperty("max-bytes", uint64(10*1024*1024)) // 10MB buffer
-	p.videoSrc.SetProperty("stream-type", 0) // 0 = stream, allows playing without data
+	p.videoSrc.SetProperty("stream-type", 0)                  // 0 = stream, allows playing without data
 	// Complete RTP caps with payload type for proper negotiation
 	caps := gst.NewCapsFromString("application/x-rtp,media=video,clock-rate=90000,encoding-name=H264,payload=96")
 	p.videoSrc.SetProperty("caps", caps)
@@ -162,11 +162,11 @@ func (p *DirectPipeline) createPipeline() error {
 	}
 	p.audioSrc.SetProperty("is-live", true)
 	p.audioSrc.SetProperty("format", gst.FormatTime)
-	p.audioSrc.SetProperty("do-timestamp", false) // We'll set timestamps ourselves
-	p.audioSrc.SetProperty("emit-signals", true) // Enable signal emission
-	p.audioSrc.SetProperty("block", false) // Don't block when buffer is full
+	p.audioSrc.SetProperty("do-timestamp", false)            // We'll set timestamps ourselves
+	p.audioSrc.SetProperty("emit-signals", true)             // Enable signal emission
+	p.audioSrc.SetProperty("block", false)                   // Don't block when buffer is full
 	p.audioSrc.SetProperty("max-bytes", uint64(2*1024*1024)) // 2MB buffer
-	p.audioSrc.SetProperty("stream-type", 0) // 0 = stream, allows playing without data
+	p.audioSrc.SetProperty("stream-type", 0)                 // 0 = stream, allows playing without data
 	// Complete RTP caps with payload type for proper negotiation
 	caps = gst.NewCapsFromString("application/x-rtp,media=audio,clock-rate=48000,encoding-name=OPUS,payload=111")
 	p.audioSrc.SetProperty("caps", caps)
@@ -207,7 +207,7 @@ func (p *DirectPipeline) createPipeline() error {
 		return fmt.Errorf("failed to create video queue: %w", err)
 	}
 	videoQueue.SetProperty("max-size-time", uint64(2000000000)) // 2 seconds
-	videoQueue.SetProperty("leaky", 2)                           // downstream
+	videoQueue.SetProperty("leaky", 2)                          // downstream
 
 	// Audio chain: appsrc -> depay -> parse -> [processing] -> mux
 	// NOTE: No jitterbuffer - it requires RTCP. Packet reordering would be handled in Go if needed.
@@ -330,7 +330,7 @@ func (p *DirectPipeline) createPipeline() error {
 		return fmt.Errorf("failed to create audio queue: %w", err)
 	}
 	audioQueue.SetProperty("max-size-time", uint64(2000000000)) // 2 seconds
-	audioQueue.SetProperty("leaky", 2)                           // downstream
+	audioQueue.SetProperty("leaky", 2)                          // downstream
 
 	// Muxer
 	mpegtsmux, err := gst.NewElement("mpegtsmux")
@@ -780,7 +780,6 @@ func (p *DirectPipeline) Start() error {
 	return fmt.Errorf("pipeline failed to reach PAUSED/PLAYING state: ret=%v, state=%v", stateRet, currentState)
 }
 
-
 // handleStateChangeResult interprets the state change result and updates internal state
 func (p *DirectPipeline) handleStateChangeResult(stateRet gst.StateChangeReturn, currentState gst.State) error {
 	switch stateRet {
@@ -1029,13 +1028,24 @@ func (p *DirectPipeline) GetStats() PipelineStats {
 	return p.stats
 }
 
+// GetRTPSinkStats returns RTP sink statistics (RTPSink interface)
+func (p *DirectPipeline) GetRTPSinkStats() RTPSinkStats {
+	return RTPSinkStats{
+		VideoPacketsReceived: p.stats.VideoPacketsReceived,
+		AudioPacketsReceived: p.stats.AudioPacketsReceived,
+		BytesProcessed:       0, // Not tracked separately
+		DroppedPackets:       p.stats.DroppedFrames,
+		Errors:               0, // Not tracked separately
+	}
+}
+
 // GetAVSyncStatus returns current A/V sync status
 func (p *DirectPipeline) GetAVSyncStatus() AVSyncStatus {
 	if p.avSync != nil {
 		return p.avSync.GetStatus()
 	}
 	return AVSyncStatus{
-		Status:  "UNKNOWN",
+		Status: "UNKNOWN",
 	}
 }
 

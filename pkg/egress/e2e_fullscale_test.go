@@ -1,3 +1,4 @@
+//go:build e2e
 // +build e2e
 
 package egress
@@ -14,7 +15,6 @@ import (
 
 	"github.com/am-sokolov/livekit-agent-sdk-go/pkg/agent"
 	"github.com/am-sokolov/livekit-agent-sdk-go/pkg/egress/pipeline"
-	"github.com/am-sokolov/livekit-agent-sdk-go/pkg/egress/router"
 	"github.com/am-sokolov/livekit-agent-sdk-go/pkg/egress/storage"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -38,9 +38,10 @@ import (
 // 8. Verification of HLS playlists and segments
 //
 // Test Status: ✅ Worker architecture working correctly
-//              ✅ Jobs created per participant
-//              ✅ Tracks subscribed and packets flowing
-//              ⚠️  HLS segments not created (pipeline issue - see pipeline/direct_pipeline.go)
+//
+//	✅ Jobs created per participant
+//	✅ Tracks subscribed and packets flowing
+//	⚠️  HLS segments not created (pipeline issue - see pipeline/direct_pipeline.go)
 func TestE2EFullScale(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping full-scale E2E test in short mode")
@@ -50,7 +51,7 @@ func TestE2EFullScale(t *testing.T) {
 	lkURL := getEnvOrDefault("LIVEKIT_URL", "ws://localhost:7880")
 	lkAPIKey := getEnvOrDefault("LIVEKIT_API_KEY", "devkey")
 	lkAPISecret := getEnvOrDefault("LIVEKIT_API_SECRET", "secret")
-	participantCount := 3 // Number of participants to test
+	participantCount := 3                 // Number of participants to test
 	recordingDuration := 20 * time.Second // Longer duration to ensure segments are created
 
 	t.Logf("═══════════════════════════════════════════════════════════")
@@ -80,19 +81,11 @@ func TestE2EFullScale(t *testing.T) {
 	outputDir := fmt.Sprintf("/tmp/egress-fullscale/%s", sessionID)
 	os.MkdirAll(outputDir, 0755)
 
-	// Create pipeline config
-	config := &pipeline.Config{
-		OutputDir:       outputDir,
-		SegmentDuration: 4,
-		JitterBufferMs:  200,
-		AllowAsyncStart: true, // Don't wait for PAUSED state - accept data immediately
-	}
-
 	// Create egress handler
 	handler := &TestEgressHandler{
-		config:   config,
-		sessions: make(map[string]*TestRecordingSession),
-		t:        t,
+		outputDir: outputDir,
+		sessions:  make(map[string]*TestRecordingSession),
+		t:         t,
 	}
 
 	// Create worker - use JT_PUBLISHER to get one job per publishing participant
@@ -348,10 +341,10 @@ recordingComplete:
 // TestEgressHandler is a test implementation of the egress handler
 type TestEgressHandler struct {
 	agent.BaseHandler
-	config   *pipeline.Config
-	sessions map[string]*TestRecordingSession
-	mu       sync.RWMutex
-	t        *testing.T
+	outputDir string
+	sessions  map[string]*TestRecordingSession
+	mu        sync.RWMutex
+	t         *testing.T
 }
 
 // OnTrackPublished implements agent.UniversalHandler
@@ -401,10 +394,10 @@ func (h *TestEgressHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.Job
 	h.t.Logf("  Job assigned: %s", jobCtx.Job.Id)
 
 	session := &TestRecordingSession{
-		job:    jobCtx.Job,
-		room:   jobCtx.Room,
-		config: h.config,
-		t:      h.t,
+		job:       jobCtx.Job,
+		room:      jobCtx.Room,
+		outputDir: h.outputDir,
+		t:         h.t,
 	}
 
 	h.mu.Lock()
@@ -447,14 +440,13 @@ func (h *TestEgressHandler) Shutdown() {
 
 // TestRecordingSession handles a single recording session
 type TestRecordingSession struct {
-	job      *livekit.Job
-	room     *lksdk.Room
-	config   *pipeline.Config
-	pipeline *pipeline.DirectPipeline
-	router   *router.DirectRouter
-	cancel   context.CancelFunc
-	mu       sync.RWMutex
-	t        *testing.T
+	job       *livekit.Job
+	room      *lksdk.Room
+	outputDir string
+	saver     *HLSSaver
+	cancel    context.CancelFunc
+	mu        sync.RWMutex
+	t         *testing.T
 }
 
 // Start begins the recording
@@ -462,26 +454,17 @@ func (s *TestRecordingSession) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 
-	// Create pipeline (non-blocking - will transition to PAUSED asynchronously)
-	pipeline, err := pipeline.NewDirectPipeline(s.config, s.job.Id)
+	// Create HLSSaver (no GStreamer!)
+	// Use 2 second segments so we get multiple complete segments during 20s recording
+	saver, err := NewHLSSaver(s.job.Id, s.outputDir, 2*time.Second)
 	if err != nil {
-		return fmt.Errorf("failed to create pipeline: %w", err)
+		return fmt.Errorf("failed to create HLS saver: %w", err)
 	}
-	s.pipeline = pipeline
+	s.saver = saver
 
-	// Create router
-	router, err := router.NewDirectRouter(pipeline)
-	if err != nil {
-		pipeline.Stop()
-		return fmt.Errorf("failed to create router: %w", err)
-	}
-	s.router = router
-
-	// Start pipeline (async - don't wait for PAUSED state)
-	if err := pipeline.Start(); err != nil {
-		router.Close()
-		pipeline.Stop()
-		return fmt.Errorf("failed to start pipeline: %w", err)
+	// Start HLS saver
+	if err := saver.Start(); err != nil {
+		return fmt.Errorf("failed to start HLS saver: %w", err)
 	}
 
 	// Determine target participant
@@ -490,7 +473,7 @@ func (s *TestRecordingSession) Start(ctx context.Context) error {
 		targetIdentity = s.job.Participant.Identity
 	}
 
-	s.t.Logf("    Recording session started: %s (target: %s)", s.job.Id, targetIdentity)
+	s.t.Logf("    Recording session started with HLSSaver: %s (target: %s)", s.job.Id, targetIdentity)
 
 	// Subscribe to existing tracks from target participant immediately
 	for _, participant := range s.room.GetRemoteParticipants() {
@@ -531,14 +514,9 @@ func (s *TestRecordingSession) Stop() {
 		s.cancel()
 	}
 
-	if s.router != nil {
-		s.router.Close()
-		s.router = nil
-	}
-
-	if s.pipeline != nil {
-		s.pipeline.Stop()
-		s.pipeline = nil
+	if s.saver != nil {
+		s.saver.Stop()
+		s.saver = nil
 	}
 
 	s.t.Logf("    Recording session stopped: %s", s.job.Id)
@@ -599,40 +577,85 @@ func (s *TestRecordingSession) monitorTracks(ctx context.Context) {
 	}
 }
 
-// forwardRTPPackets forwards RTP packets to pipeline
+// forwardRTPPackets forwards RTP packets to HLS saver
 func (s *TestRecordingSession) forwardRTPPackets(track *webrtc.TrackRemote) {
+	packetCount := 0
+	var lastTimestamp uint32 = 0
+	var timestamps []uint32
+
 	for {
 		packet, _, err := track.ReadRTP()
 		if err != nil {
 			break
 		}
 
-		kind := router.TrackKindVideo
-		if track.Kind() == webrtc.RTPCodecTypeAudio {
-			kind = router.TrackKindAudio
+		packetCount++
+
+		// Debug: log first 50 packets and collect timestamps to see multiple NAL units
+		if track.Kind() == webrtc.RTPCodecTypeVideo && packetCount <= 50 {
+			s.t.Logf("    [DEBUG] Video packet #%d: seq=%d, ts=%d, delta=%d, payload=%d bytes, marker=%v, PT=%d, SSRC=%d",
+				packetCount, packet.SequenceNumber, packet.Timestamp,
+				int64(packet.Timestamp)-int64(lastTimestamp), len(packet.Payload), packet.Marker,
+				packet.PayloadType, packet.SSRC)
+			// Log first few bytes of payload if present
+			if len(packet.Payload) > 0 && packetCount <= 5 {
+				payloadPreview := packet.Payload
+				if len(payloadPreview) > 16 {
+					payloadPreview = payloadPreview[:16]
+				}
+				s.t.Logf("      Payload preview: %02x", payloadPreview)
+			} else if len(packet.Payload) == 0 && packetCount <= 5 {
+				s.t.Logf("      Payload is EMPTY - this is the bug!")
+			}
+			lastTimestamp = packet.Timestamp
+			timestamps = append(timestamps, packet.Timestamp)
 		}
 
-		// Lock to safely access router
+		// Debug: log first 10 audio packets
+		if track.Kind() == webrtc.RTPCodecTypeAudio && packetCount <= 10 {
+			s.t.Logf("    [DEBUG] Audio packet #%d: payload=%d bytes, marker=%v",
+				packetCount, len(packet.Payload), packet.Marker)
+		}
+
+		// Lock to safely access saver
 		s.mu.RLock()
-		router := s.router
+		saver := s.saver
 		s.mu.RUnlock()
 
-		if router != nil {
-			router.RoutePacket(packet, kind)
-		} else {
-			break // Router closed, stop forwarding
+		if saver == nil {
+			break // Saver closed, stop forwarding
 		}
+
+		// Route to HLSSaver based on track type
+		if track.Kind() == webrtc.RTPCodecTypeVideo {
+			saver.InjectVideoRTP(packet)
+		} else {
+			saver.InjectAudioRTP(packet)
+		}
+	}
+
+	// Log summary of timestamps
+	if track.Kind() == webrtc.RTPCodecTypeVideo && len(timestamps) > 0 {
+		unique := make(map[uint32]bool)
+		for _, ts := range timestamps {
+			unique[ts] = true
+		}
+		s.t.Logf("    [DEBUG] Video timestamp summary: %d packets, %d unique timestamps", len(timestamps), len(unique))
 	}
 }
 
-// GetStats returns pipeline stats
+// GetStats returns HLS saver stats
 func (s *TestRecordingSession) GetStats() *pipeline.PipelineStats {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if s.pipeline != nil {
-		stats := s.pipeline.GetStats()
-		return &stats
+	if s.saver != nil {
+		videoPackets, audioPackets := s.saver.GetStats()
+		return &pipeline.PipelineStats{
+			VideoPacketsReceived: videoPackets,
+			AudioPacketsReceived: audioPackets,
+			SegmentsWritten:      0, // HLSSaver doesn't track this directly
+		}
 	}
 	return nil
 }
@@ -653,14 +676,14 @@ func uploadToMinIO(ctx context.Context, t *testing.T, outputDir string) (map[str
 	storageConfig := &storage.Config{
 		Type: storage.StorageTypeS3,
 		S3: storage.S3Config{
-			Endpoint:       minioEndpoint,
-			Bucket:         minioBucket,
-			Region:         "us-east-1",
-			AccessKeyID:    minioAccessKey,
+			Endpoint:        minioEndpoint,
+			Bucket:          minioBucket,
+			Region:          "us-east-1",
+			AccessKeyID:     minioAccessKey,
 			SecretAccessKey: minioSecretKey,
-			UseSSL:         false,
-			ForcePathStyle: true, // Required for MinIO
-			ACL:            "public-read", // Make files publicly accessible
+			UseSSL:          false,
+			ForcePathStyle:  true,          // Required for MinIO
+			ACL:             "public-read", // Make files publicly accessible
 		},
 		Upload: storage.UploadConfig{
 			Concurrent:     true,
@@ -789,7 +812,7 @@ func uploadToMinIO(ctx context.Context, t *testing.T, outputDir string) (map[str
 
 					filteredLines = append(filteredLines, line)
 					lastLine = line
-					_ = i // unused
+					_ = i        // unused
 					_ = lastLine // unused
 				}
 
