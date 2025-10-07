@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"time"
 
@@ -18,20 +19,22 @@ import (
 
 // AudioPublisher publishes WAV audio files to LiveKit rooms for testing.
 type AudioPublisher struct {
-	room       *lksdk.Room
-	audioTrack *lksdk.LocalTrack
-	audioFile  string
-	ctx        context.Context
-	cancel     context.CancelFunc
+	room          *lksdk.Room
+	audioTrack    *lksdk.LocalTrack
+	audioFile     string
+	ctx           context.Context
+	cancel        context.CancelFunc
+	audioFinished chan time.Time // Signals when audio file finishes playing
 }
 
 // NewAudioPublisher creates a new audio publisher.
 func NewAudioPublisher(audioFile string) *AudioPublisher {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &AudioPublisher{
-		audioFile: audioFile,
-		ctx:       ctx,
-		cancel:    cancel,
+		audioFile:     audioFile,
+		ctx:           ctx,
+		cancel:        cancel,
+		audioFinished: make(chan time.Time, 1),
 	}
 }
 
@@ -104,12 +107,16 @@ func (p *AudioPublisher) StartStreaming() error {
 func (p *AudioPublisher) streamAudio(file *os.File) {
 	defer file.Close()
 
-	// Skip standard WAV header (44 bytes)
-	file.Seek(44, 0)
+	// Skip WAV header to reach audio data (78 bytes for this file)
+	// Standard WAV is 44 bytes, but some files have additional metadata chunks
+	// In production, you'd parse the WAV header properly
+	file.Seek(78, 0)
 
 	const (
-		frameDuration = 10 * time.Millisecond // 10ms frames
-		maxPacketSize = 960                   // Safe packet size
+		// For 48kHz stereo 16-bit PCM: 960 bytes = 5ms of audio
+		// (48000 samples/sec * 2 channels * 2 bytes/sample * 0.005 sec = 960 bytes)
+		frameDuration = 5 * time.Millisecond
+		maxPacketSize = 960
 	)
 
 	buffer := make([]byte, maxPacketSize)
@@ -124,21 +131,36 @@ func (p *AudioPublisher) streamAudio(file *os.File) {
 			n, err := file.Read(buffer)
 			if err != nil {
 				if err == io.EOF {
-					// Loop audio file
-					file.Seek(44, 0)
-					continue
+					// Signal that audio has finished
+					select {
+					case p.audioFinished <- time.Now():
+					default:
+					}
+					return
 				}
 				return
 			}
 
-			if n > 0 {
-				p.audioTrack.WriteSample(media.Sample{
-					Data:     buffer[:n],
-					Duration: frameDuration,
-				}, nil)
+			if n == 0 {
+				continue
+			}
+
+			// Write samples to track
+			err = p.audioTrack.WriteSample(media.Sample{
+				Data:     buffer[:n],
+				Duration: frameDuration,
+			}, nil)
+			if err != nil {
+				log.Println("Failed to write audio sample", err)
+				continue
 			}
 		}
 	}
+}
+
+// AudioFinishedChan returns a channel that receives a signal when audio finishes playing.
+func (p *AudioPublisher) AudioFinishedChan() <-chan time.Time {
+	return p.audioFinished
 }
 
 // Stop stops streaming and disconnects from the room.

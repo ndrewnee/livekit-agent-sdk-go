@@ -785,8 +785,6 @@ func (rts *RealtimeTranscriptionStage) handleDataChannelMessage(data []byte) {
 	}
 
 	// Log all messages from OpenAI to console
-	fmt.Printf("📨 OpenAI Message [%s]: %v\n", msgType, msg)
-
 	getLogger := logger.GetLogger()
 	getLogger.Debugw("Received data channel message", "type", msgType, "msg", msg)
 
@@ -1229,8 +1227,7 @@ func (rts *RealtimeTranscriptionStage) updateAverageLatencyLocked(transcriptionT
 			rts.stats.AverageLatencyMs = (rts.stats.AverageLatencyMs * 0.9) + (latencyMs * 0.1)
 		}
 
-		// Reset to zero time - will be set by next audio packet arrival
-		// This ensures we measure from when new audio actually starts, not from transcription time
-		rts.stats.CurrentSegmentStartTime = time.Time{}
+		// Reset segment start time for next transcription (this makes it per-transcription, not cumulative)
+		rts.stats.CurrentSegmentStartTime = transcriptionTime
 	}
 }

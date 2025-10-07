@@ -44,14 +44,15 @@ type TTSCallback func(roomID string, ttsAudioMap map[string][]byte)
 
 // TextToSpeechConfig configures the TextToSpeechStage.
 type TextToSpeechConfig struct {
-	Name     string        // Unique identifier for this stage
-	Priority int           // Execution order (should be 40, after TranslationStage)
-	APIKey   string        // OpenAI API key for authentication
-	Model    string        // TTS model to use (empty for default)
-	Voice    string        // Voice to use (empty for default)
-	Speed    float64       // Speaking speed (empty for default)
-	Timeout  time.Duration // Timeout for API calls (empty for default 5s)
-	Endpoint string        // API endpoint (empty for default)
+	Name         string        // Unique identifier for this stage
+	Priority     int           // Execution order (should be 40, after TranslationStage)
+	APIKey       string        // OpenAI API key for authentication
+	Model        string        // TTS model to use (empty for default)
+	Voice        string        // Voice to use (empty for default)
+	Speed        float64       // Speaking speed (empty for default)
+	Timeout      time.Duration // Timeout for API calls (empty for default 5s)
+	Endpoint     string        // API endpoint (empty for default)
+	EnableWarmup bool          // If true, performs async warm-up call on initialization
 }
 
 // TextToSpeechStage converts translated text chunks to speech using OpenAI TTS API.
@@ -179,7 +180,7 @@ func NewTextToSpeechStage(config *TextToSpeechConfig) *TextToSpeechStage {
 		config.Endpoint = openAITTSEndpoint
 	}
 
-	return &TextToSpeechStage{
+	stage := &TextToSpeechStage{
 		config:       config,
 		ttsCallbacks: make([]TTSCallback, 0),
 		client:       getSharedHTTPClient(),
@@ -192,6 +193,13 @@ func NewTextToSpeechStage(config *TextToSpeechConfig) *TextToSpeechStage {
 		},
 		stats: &TTSStats{},
 	}
+
+	// Perform async warm-up to establish connection and eliminate cold start
+	if config.EnableWarmup {
+		go stage.warmUp()
+	}
+
+	return stage
 }
 
 // GetName implements MediaPipelineStage.
@@ -556,4 +564,33 @@ func (tts *TextToSpeechStage) SetSpeed(speed float64) {
 	if speed > 0 && speed <= 4.0 {
 		tts.config.Speed = speed
 	}
+}
+
+// warmUp performs an async warm-up call to establish API connection and eliminate cold start.
+func (tts *TextToSpeechStage) warmUp() {
+	ctx, cancel := context.WithTimeout(context.Background(), tts.config.Timeout)
+	defer cancel()
+
+	getLogger := logger.GetLogger()
+	getLogger.Infow("Starting TTS stage warm-up")
+
+	// Perform a small test TTS generation to establish connection
+	_, err := tts.generateTTS(ctx, "Hello")
+	if err != nil {
+		getLogger.Debugw("TTS stage warm-up failed (non-critical)", "error", err)
+	} else {
+		getLogger.Infow("TTS stage warm-up completed successfully")
+	}
+
+	// Reset statistics to exclude warm-up call from metrics
+	tts.stats.mu.Lock()
+	tts.stats.TotalGenerations = 0
+	tts.stats.SuccessfulGenerations = 0
+	tts.stats.FailedGenerations = 0
+	tts.stats.ParallelBatches = 0
+	tts.stats.AverageLatencyMs = 0
+	tts.stats.BytesGenerated = 0
+	tts.stats.CharactersToSpeech = 0
+	tts.stats.LastGenerationAt = time.Time{}
+	tts.stats.mu.Unlock()
 }
