@@ -16,6 +16,7 @@ vendor/
 
 # Go workspace file
 go.work
+*.sum
 
 # IDE specific files
 .idea/
@@ -41,3 +42,6 @@ examples/transcription-agent/transcription-agent
 /venv/
 /.venv/
 /node_modules/
+/livekit/
+/go-astits/
+
