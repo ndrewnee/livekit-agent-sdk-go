@@ -1,0 +1,12 @@
+# Binary
+save-to-hls
+
+# HLS output
+hls-output/
+hls-output_final/
+
+# Test output
+/tmp/hls-output/
+/tmp/mp4-test-video.h264
+*.h264
+*.ogg

@@ -1,0 +1,95 @@
+# github.com/am-sokolov/livekit-agent-sdk-go/examples/save-to-hls-gstreamer.test
+ld: warning: duplicate -rpath '/opt/homebrew/Cellar/gstreamer/1.26.5_5/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/Cellar/gstreamer/1.26.5_5/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/Cellar/gstreamer/1.26.5_5/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/Cellar/gstreamer/1.26.5_5/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lglib-2.0', '-lgobject-2.0', '-lgstbase-1.0', '-lgstreamer-1.0', '-lintl'
+=== RUN   TestHLSRecorderGStreamer
+    main_test.go:25: === Step 1: Verify test video exists ===
+    main_test.go:30: ✓ Test video exists
+    main_test.go:32: 
+        === Step 2: Create HLS recorder ===
+    main_test.go:40: ✓ HLS recorder created
+    main_test.go:42: 
+        === Step 3: Initialize GStreamer pipeline ===
+    main_test.go:46: ✓ GStreamer pipeline initialized
+    main_test.go:48: 
+        === Step 4: Set up WebRTC ===
+    main_test.go:52: ✓ WebRTC setup complete
+    main_test.go:54: 
+        === Step 5: Create publisher peer connection ===
+    main_test.go:105: 
+        === Step 6: Add video and audio tracks ===
+    main_test.go:120: ✓ Video track added
+    main_test.go:135: ✓ Audio track added
+    main_test.go:137: 
+        === Step 7: Exchange SDP ===
+    main_test.go:88:   → Publisher ICE candidate: udp4 host 192.168.68.56:64751 (resolved: 192.168.68.56:64751)
+    main_test.go:88:   → Publisher ICE candidate: udp4 host 10.211.55.2:65376 (resolved: 10.211.55.2:65376)
+    main_test.go:88:   → Publisher ICE candidate: udp6 host [fdb2:2c26:f4e4::1]:55590 (resolved: [fdb2:2c26:f4e4::1]:55590)
+    main_test.go:88:   → Publisher ICE candidate: udp4 host 10.37.129.2:49162 (resolved: 10.37.129.2:49162)
+    main_test.go:88:   → Publisher ICE candidate: udp6 host [fdb2:2c26:f4e4:1::1]:59142 (resolved: [fdb2:2c26:f4e4:1::1]:59142)
+    main_test.go:81:   → Recorder ICE state: checking
+    main_test.go:98:   → Recorder ICE candidate: udp4 host 192.168.68.56:59857 (resolved: 192.168.68.56:59857)
+    main_test.go:169: ✓ SDP exchange complete
+    main_test.go:171: 
+        === Step 8: Start GStreamer pipeline ===
+    main_test.go:71:   → Publisher ICE state: checking
+2025/10/09 20:12:53.654305 main.go:150: GStreamer pipeline started
+    main_test.go:175: ✓ Pipeline started
+    main_test.go:177: 
+        === Step 9: Wait for ICE connection ===
+    main_test.go:98:   → Recorder ICE candidate: udp4 host 10.211.55.2:62108 (resolved: 10.211.55.2:62108)
+    main_test.go:98:   → Recorder ICE candidate: udp6 host [fdb2:2c26:f4e4::1]:59516 (resolved: [fdb2:2c26:f4e4::1]:59516)
+    main_test.go:98:   → Recorder ICE candidate: udp4 host 10.37.129.2:50464 (resolved: 10.37.129.2:50464)
+    main_test.go:98:   → Recorder ICE candidate: udp6 host [fdb2:2c26:f4e4:1::1]:63497 (resolved: [fdb2:2c26:f4e4:1::1]:63497)
+    main_test.go:88:   → Publisher ICE candidate: udp4 srflx 2.102.43.104:49300 related 0.0.0.0:49300 (resolved: 2.102.43.104:49300)
+    main_test.go:81:   → Recorder ICE state: connected
+    main_test.go:71:   → Publisher ICE state: connected
+    main_test.go:180: ✓ ICE connected
+    main_test.go:185: 
+        === Step 10: Publish video and audio with synchronized timing ===
+    main_test.go:201: 
+        === Step 12: Wait for publishing to complete ===
+    main_test.go:351:   → Extracting Opus audio...
+    main_test.go:245:   → Extracting H.264 from MP4...
+    main_test.go:98:   → Recorder ICE candidate: udp4 srflx 2.102.43.104:53578 related 0.0.0.0:53578 (resolved: 2.102.43.104:53578)
+    main_test.go:287:   → Detected frame rate: 30/1 fps (30.000 fps, duration: 33.333333ms)
+    main_test.go:305:   → Video: waiting 105.740708ms until synchronized start
+    main_test.go:310:   → Publishing H.264 frames at 2025-10-09 20:12:53.88033 +0100 BST m=+0.284844709
+2025/10/09 20:12:53.948727 main.go:174: Track received: video, codec: video/H264
+2025/10/09 20:12:53.948808 main.go:206: Starting video track handler
+2025/10/09 20:12:53.948954 main.go:242: Video stream initialized
+    main_test.go:383:   → Audio: codec=opus, sample_rate=48000, channels=2
+    main_test.go:422:   → Read 62 Opus frames from Ogg file
+    main_test.go:432:   → Publishing Opus packets at 2025-10-09 20:12:53.88033 +0100 BST m=+0.284844709
+2025/10/09 20:12:53.981422 main.go:174: Track received: audio, codec: audio/opus
+2025/10/09 20:12:53.981430 main.go:250: Starting audio track handler
+2025/10/09 20:12:53.981454 main.go:286: Audio stream initialized
+    main_test.go:334:   → Published 300 video frames (elapsed: 9.967821917s)
+    main_test.go:334:   → Published 600 video frames (elapsed: 19.966782375s)
+    main_test.go:334:   → Published 900 video frames (elapsed: 29.967764709s)
+    main_test.go:334:   → Published 1200 video frames (elapsed: 39.967812s)
+    main_test.go:334:   → Published 1500 video frames (elapsed: 49.967378209s)
+    main_test.go:334:   → Published 1800 video frames (elapsed: 59.967777834s)
+    main_test.go:476:   → Finished publishing 62 audio packets
+    main_test.go:345:   → Finished publishing 1934 video frames
+    main_test.go:211: ✓ Video publishing complete
+    main_test.go:217: ✓ Audio publishing complete
+    main_test.go:220: 
+        === Step 13: Allow time for segments to finalize ===
+    main_test.go:223: 
+        === Step 14: Stop recorder ===
+2025/10/09 20:14:03.349493 main.go:294: Stopping HLS recorder...
+2025/10/09 20:14:03.349647 main.go:255: Audio track read error: EOF
+2025/10/09 20:14:03.349705 main.go:211: Video track read error: EOF
+    main_test.go:71:   → Publisher ICE state: closed
+    main_test.go:81:   → Recorder ICE state: closed
+    main_test.go:226: ✓ Recorder stopped
+    main_test.go:228: 
+        === Step 15: Validate HLS output ===
+    main_test.go:230: HLS validation failed: playlist not found: hls-gst-output/playlist.m3u8
+--- FAIL: TestHLSRecorderGStreamer (71.76s)
+FAIL
+exit status 1
+FAIL	github.com/am-sokolov/livekit-agent-sdk-go/examples/save-to-hls-gstreamer	71.964s

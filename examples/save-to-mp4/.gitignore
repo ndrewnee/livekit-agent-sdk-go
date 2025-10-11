@@ -1,7 +1,0 @@
-# Binary
-save-to-hls
-
-# Test output
-/tmp/hls-output/
-*.h264
-*.ogg
