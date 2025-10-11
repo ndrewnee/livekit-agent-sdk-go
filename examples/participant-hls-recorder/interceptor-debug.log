@@ -1,0 +1,13 @@
+# github.com/am-sokolov/livekit-agent-sdk-go/examples/participant-hls-recorder [github.com/am-sokolov/livekit-agent-sdk-go/examples/participant-hls-recorder.test]
+./interceptor_debug_test.go:18:6: undefined: fileExists
+./interceptor_debug_test.go:18:17: undefined: testVideoPath
+./interceptor_debug_test.go:19:40: undefined: testVideoPath
+./interceptor_debug_test.go:24:15: undefined: createTestRoom
+./interceptor_debug_test.go:29:8: undefined: deleteTestRoom
+./interceptor_debug_test.go:122:39: undefined: testServerURL
+./interceptor_debug_test.go:123:24: undefined: testApiKey
+./interceptor_debug_test.go:124:24: undefined: testApiSecret
+./interceptor_debug_test.go:135:39: undefined: setupPublisher
+./interceptor_debug_test.go:142:2: undefined: startPublishing
+./interceptor_debug_test.go:142:2: too many errors
+FAIL	github.com/am-sokolov/livekit-agent-sdk-go/examples/participant-hls-recorder [build failed]

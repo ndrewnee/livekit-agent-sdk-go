@@ -1,0 +1,335 @@
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/go-gst/go-gst/gst"
+	"github.com/go-gst/go-gst/gst/app"
+	"github.com/pion/webrtc/v4"
+)
+
+// RecorderManager manages multiple participant recorders
+type RecorderManager struct {
+	mu        sync.RWMutex
+	recorders map[string]*ParticipantRecorder
+	config    *Config
+}
+
+func NewRecorderManager(config *Config) *RecorderManager {
+	return &RecorderManager{
+		recorders: make(map[string]*ParticipantRecorder),
+		config:    config,
+	}
+}
+
+func (rm *RecorderManager) CreateRecorder(participantIdentity, roomName string) (*ParticipantRecorder, error) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	// Check if recorder already exists
+	if _, exists := rm.recorders[participantIdentity]; exists {
+		return nil, fmt.Errorf("recorder already exists for participant: %s", participantIdentity)
+	}
+
+	// Create output directory
+	outputDir := fmt.Sprintf("%s/%s/%s", rm.config.OutputDir, roomName, participantIdentity)
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	recorder := &ParticipantRecorder{
+		participantIdentity: participantIdentity,
+		roomName:            roomName,
+		outputDir:           outputDir,
+		config:              rm.config,
+		startTime:           time.Now(),
+	}
+
+	rm.recorders[participantIdentity] = recorder
+	log.Printf("Created recorder for participant %s in room %s, output: %s", participantIdentity, roomName, outputDir)
+
+	return recorder, nil
+}
+
+func (rm *RecorderManager) GetRecorder(participantIdentity string) *ParticipantRecorder {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	return rm.recorders[participantIdentity]
+}
+
+func (rm *RecorderManager) RemoveRecorder(participantIdentity string) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	delete(rm.recorders, participantIdentity)
+	log.Printf("Removed recorder for participant: %s", participantIdentity)
+}
+
+func (rm *RecorderManager) PrintSummary() {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+
+	log.Println("=== Recording Summary ===")
+	for identity, recorder := range rm.recorders {
+		duration := time.Since(recorder.startTime)
+		log.Printf("Participant: %s", identity)
+		log.Printf("  Room: %s", recorder.roomName)
+		log.Printf("  Output: %s", recorder.outputDir)
+		log.Printf("  Duration: %s", duration.Round(time.Second))
+		log.Printf("  Video initialized: %v", recorder.videoInitialized)
+		log.Printf("  Audio initialized: %v", recorder.audioInitialized)
+	}
+	log.Println("========================")
+}
+
+// ParticipantRecorder records a single participant's tracks
+type ParticipantRecorder struct {
+	participantIdentity string
+	roomName            string
+	outputDir           string
+	config              *Config
+	startTime           time.Time
+
+	// GStreamer
+	pipeline         *gst.Pipeline
+	videoAppSrc      *app.Source
+	audioAppSrc      *app.Source
+
+	// Synchronization
+	mu               sync.Mutex
+	videoInitialized bool
+	audioInitialized bool
+
+	// Debug counters
+	videoPacketCount int
+	audioPacketCount int
+}
+
+// InitGStreamer initializes the GStreamer pipeline
+func (r *ParticipantRecorder) InitGStreamer() error {
+	gst.Init(nil)
+
+	// Create pipeline based on configuration
+	// Similar to save-to-hls-gstreamer but with configurable audio/video
+	pipelineStr := fmt.Sprintf(`
+		filesink location=%s/output.ts name=sink
+
+		mpegtsmux name=mux ! sink.
+	`, r.outputDir)
+
+	if r.config.EnableVideo {
+		pipelineStr += `
+		appsrc name=videosrc format=time is-live=true do-timestamp=true
+		! rtpjitterbuffer latency=200
+		! rtph264depay
+		! h264parse
+		! video/x-h264,stream-format=byte-stream,alignment=au
+		! queue max-size-buffers=0 max-size-time=0 max-size-bytes=0
+		! mux.
+		`
+	}
+
+	if r.config.EnableAudio {
+		pipelineStr += `
+		appsrc name=audiosrc format=time is-live=true do-timestamp=true
+		! rtpjitterbuffer latency=200
+		! rtpopusdepay
+		! opusdec
+		! audioconvert
+		! avenc_aac bitrate=128000
+		! aacparse
+		! queue max-size-buffers=0 max-size-time=0 max-size-bytes=0
+		! mux.
+		`
+	}
+
+	log.Printf("[%s] Creating GStreamer pipeline:\n%s", r.participantIdentity, pipelineStr)
+
+	pipeline, err := gst.NewPipelineFromString(pipelineStr)
+	if err != nil {
+		return fmt.Errorf("failed to create pipeline: %w", err)
+	}
+
+	r.pipeline = pipeline
+
+	// Get appsrc elements
+	if r.config.EnableVideo {
+		videoSrcElement, err := r.pipeline.GetElementByName("videosrc")
+		if err != nil {
+			return fmt.Errorf("failed to get videosrc: %w", err)
+		}
+		r.videoAppSrc = app.SrcFromElement(videoSrcElement)
+	}
+
+	if r.config.EnableAudio {
+		audioSrcElement, err := r.pipeline.GetElementByName("audiosrc")
+		if err != nil {
+			return fmt.Errorf("failed to get audiosrc: %w", err)
+		}
+		r.audioAppSrc = app.SrcFromElement(audioSrcElement)
+	}
+
+	// Set up bus message handling
+	r.pipeline.GetPipelineBus().AddWatch(func(msg *gst.Message) bool {
+		switch msg.Type() {
+		case gst.MessageEOS:
+			log.Printf("[%s] EOS received, stopping pipeline", r.participantIdentity)
+			r.pipeline.BlockSetState(gst.StateNull)
+			return false
+
+		case gst.MessageError:
+			gerr := msg.ParseError()
+			log.Printf("[%s] GStreamer error: %s (debug: %s)", r.participantIdentity, gerr.Error(), gerr.DebugString())
+			r.pipeline.BlockSetState(gst.StateNull)
+			return false
+
+		case gst.MessageWarning:
+			gw := msg.ParseWarning()
+			log.Printf("[%s] GStreamer warning: %s", r.participantIdentity, gw.Error())
+
+		case gst.MessageInfo:
+			info := msg.ParseInfo()
+			log.Printf("[%s] GStreamer info: %s", r.participantIdentity, info.Error())
+		}
+		return true
+	})
+
+	// Start pipeline immediately in PLAYING state like save-to-hls-gstreamer
+	// The mux needs to be running BEFORE any data arrives to properly link pads
+	if err := r.pipeline.SetState(gst.StatePlaying); err != nil {
+		return fmt.Errorf("failed to start pipeline: %w", err)
+	}
+
+	log.Printf("[%s] GStreamer pipeline initialized and started", r.participantIdentity)
+	return nil
+}
+
+// HandleVideoTrack processes incoming video RTP packets
+func (r *ParticipantRecorder) HandleVideoTrack(track *webrtc.TrackRemote) {
+	if !r.config.EnableVideo || r.videoAppSrc == nil {
+		log.Printf("[%s] Video recording disabled or not initialized", r.participantIdentity)
+		return
+	}
+
+	log.Printf("[%s] Starting video track handler", r.participantIdentity)
+
+	for {
+		rtpPacket, _, err := track.ReadRTP()
+		if err != nil {
+			log.Printf("[%s] Video track read error: %v", r.participantIdentity, err)
+			return
+		}
+
+		r.mu.Lock()
+		if !r.videoInitialized {
+			// Set caps on first packet
+			capsStr := fmt.Sprintf("application/x-rtp,media=(string)video,encoding-name=(string)H264,clock-rate=(int)90000,payload=(int)%d", rtpPacket.PayloadType)
+			caps := gst.NewCapsFromString(capsStr)
+			r.videoAppSrc.SetProperty("caps", caps)
+			r.videoInitialized = true
+			r.videoReady = true
+			log.Printf("[%s] Video stream initialized with caps: %s", r.participantIdentity, capsStr)
+			r.mu.Unlock()
+			r.checkAndSignalReady()
+		} else {
+			r.mu.Unlock()
+		}
+
+		// Marshal RTP packet
+		data, err := rtpPacket.Marshal()
+		if err != nil {
+			log.Printf("[%s] Failed to marshal video RTP packet: %v", r.participantIdentity, err)
+			continue
+		}
+
+		// Create GStreamer buffer with RTP timestamp as PTS
+		buffer := gst.NewBufferFromBytes(data)
+		ptsNs := uint64(rtpPacket.Timestamp) * 1000000000 / 90000
+		buffer.SetPresentationTimestamp(gst.ClockTime(ptsNs))
+
+		// Push to appsrc
+		if flow := r.videoAppSrc.PushBuffer(buffer); flow != gst.FlowOK {
+			if flow != gst.FlowFlushing {
+				log.Printf("[%s] Video appsrc push failed: %s", r.participantIdentity, flow.String())
+			}
+			return
+		}
+	}
+}
+
+// HandleAudioTrack processes incoming audio RTP packets
+func (r *ParticipantRecorder) HandleAudioTrack(track *webrtc.TrackRemote) {
+	if !r.config.EnableAudio || r.audioAppSrc == nil {
+		log.Printf("[%s] Audio recording disabled or not initialized", r.participantIdentity)
+		return
+	}
+
+	log.Printf("[%s] Starting audio track handler", r.participantIdentity)
+
+	for {
+		rtpPacket, _, err := track.ReadRTP()
+		if err != nil {
+			log.Printf("[%s] Audio track read error: %v", r.participantIdentity, err)
+			return
+		}
+
+		r.mu.Lock()
+		if !r.audioInitialized {
+			// Set caps on first packet
+			capsStr := fmt.Sprintf("application/x-rtp,media=(string)audio,encoding-name=(string)OPUS,clock-rate=(int)48000,payload=(int)%d", rtpPacket.PayloadType)
+			caps := gst.NewCapsFromString(capsStr)
+			r.audioAppSrc.SetProperty("caps", caps)
+			r.audioInitialized = true
+			r.audioReady = true
+			log.Printf("[%s] Audio stream initialized with caps: %s", r.participantIdentity, capsStr)
+			r.mu.Unlock()
+			r.checkAndSignalReady()
+		} else {
+			r.mu.Unlock()
+		}
+
+		// Marshal RTP packet
+		data, err := rtpPacket.Marshal()
+		if err != nil {
+			log.Printf("[%s] Failed to marshal audio RTP packet: %v", r.participantIdentity, err)
+			continue
+		}
+
+		// Create GStreamer buffer with RTP timestamp as PTS
+		buffer := gst.NewBufferFromBytes(data)
+		ptsNs := uint64(rtpPacket.Timestamp) * 1000000000 / 48000
+		buffer.SetPresentationTimestamp(gst.ClockTime(ptsNs))
+
+		// Push to appsrc
+		if flow := r.audioAppSrc.PushBuffer(buffer); flow != gst.FlowOK {
+			if flow != gst.FlowFlushing {
+				log.Printf("[%s] Audio appsrc push failed: %s", r.participantIdentity, flow.String())
+			}
+			return
+		}
+	}
+}
+
+// Stop gracefully stops the recorder
+func (r *ParticipantRecorder) Stop() {
+	log.Printf("[%s] Stopping recorder...", r.participantIdentity)
+
+	if r.videoAppSrc != nil {
+		r.videoAppSrc.EndStream()
+	}
+	if r.audioAppSrc != nil {
+		r.audioAppSrc.EndStream()
+	}
+
+	if r.pipeline != nil {
+		r.pipeline.SendEvent(gst.NewEOSEvent())
+		// Wait for EOS to propagate
+		r.pipeline.GetBus().TimedPopFiltered(gst.ClockTime(5*1000000000), gst.MessageEOS|gst.MessageError)
+		r.pipeline.SetState(gst.StateNull)
+	}
+
+	log.Printf("[%s] Recorder stopped", r.participantIdentity)
+}

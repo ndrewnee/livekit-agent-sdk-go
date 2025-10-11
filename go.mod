@@ -2,11 +2,14 @@ module github.com/am-sokolov/livekit-agent-sdk-go
 
 go 1.24.6
 
+replace github.com/livekit/server-sdk-go/v2 => ./server-sdk-go
+
 require (
 	github.com/aws/aws-sdk-go-v2 v1.39.2
 	github.com/aws/aws-sdk-go-v2/config v1.31.11
 	github.com/aws/aws-sdk-go-v2/credentials v1.18.15
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.88.3
+	github.com/bluenviron/gohlslib/v2 v2.2.3
 	github.com/go-gst/go-glib v1.4.0
 	github.com/go-gst/go-gst v1.4.0
 	github.com/golang-jwt/jwt/v4 v4.5.2
@@ -50,7 +53,6 @@ require (
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
-	github.com/bluenviron/gohlslib/v2 v2.2.3 // indirect
 	github.com/bluenviron/mediacommon/v2 v2.4.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect

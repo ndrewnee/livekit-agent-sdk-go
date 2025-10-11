@@ -1,0 +1,112 @@
+# github.com/am-sokolov/livekit-agent-sdk-go/examples/save-to-hls-gstreamer.test
+ld: warning: duplicate -rpath '/opt/homebrew/Cellar/gstreamer/1.26.5_5/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/Cellar/gstreamer/1.26.5_5/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/Cellar/gstreamer/1.26.5_5/lib' ignored
+ld: warning: duplicate -rpath '/opt/homebrew/Cellar/gstreamer/1.26.5_5/lib' ignored
+ld: warning: ignoring duplicate libraries: '-lglib-2.0', '-lgobject-2.0', '-lgstbase-1.0', '-lgstreamer-1.0', '-lintl'
+=== RUN   TestHLSRecorderGStreamer
+    main_test.go:21: === Step 1: Verify test video exists ===
+    main_test.go:26: ✓ Test video exists
+    main_test.go:28: 
+        === Step 2: Create HLS recorder ===
+    main_test.go:36: ✓ HLS recorder created
+    main_test.go:38: 
+        === Step 3: Initialize GStreamer pipeline ===
+    main_test.go:42: ✓ GStreamer pipeline initialized
+    main_test.go:44: 
+        === Step 4: Set up WebRTC ===
+    main_test.go:48: ✓ WebRTC setup complete
+    main_test.go:50: 
+        === Step 5: Create publisher peer connection ===
+    main_test.go:101: 
+        === Step 6: Add video and audio tracks ===
+    main_test.go:116: ✓ Video track added
+    main_test.go:131: ✓ Audio track added
+    main_test.go:133: 
+        === Step 7: Exchange SDP ===
+    main_test.go:84:   → Publisher ICE candidate: udp4 host 192.168.68.56:50595 (resolved: 192.168.68.56:50595)
+    main_test.go:84:   → Publisher ICE candidate: udp4 host 10.211.55.2:55236 (resolved: 10.211.55.2:55236)
+    main_test.go:84:   → Publisher ICE candidate: udp6 host [fdb2:2c26:f4e4::1]:62998 (resolved: [fdb2:2c26:f4e4::1]:62998)
+    main_test.go:84:   → Publisher ICE candidate: udp4 host 10.37.129.2:52554 (resolved: 10.37.129.2:52554)
+    main_test.go:84:   → Publisher ICE candidate: udp6 host [fdb2:2c26:f4e4:1::1]:63269 (resolved: [fdb2:2c26:f4e4:1::1]:63269)
+    main_test.go:77:   → Recorder ICE state: checking
+    main_test.go:94:   → Recorder ICE candidate: udp4 host 192.168.68.56:53852 (resolved: 192.168.68.56:53852)
+    main_test.go:165: ✓ SDP exchange complete
+    main_test.go:167: 
+        === Step 8: Start GStreamer pipeline ===
+    main_test.go:67:   → Publisher ICE state: checking
+2025/10/09 23:45:31.109547 main.go:152: GStreamer pipeline started
+    main_test.go:171: ✓ Pipeline started
+    main_test.go:173: 
+        === Step 9: Wait for ICE connection ===
+    main_test.go:94:   → Recorder ICE candidate: udp4 host 10.211.55.2:54724 (resolved: 10.211.55.2:54724)
+    main_test.go:94:   → Recorder ICE candidate: udp6 host [fdb2:2c26:f4e4::1]:64498 (resolved: [fdb2:2c26:f4e4::1]:64498)
+    main_test.go:94:   → Recorder ICE candidate: udp4 host 10.37.129.2:63678 (resolved: 10.37.129.2:63678)
+    main_test.go:94:   → Recorder ICE candidate: udp6 host [fdb2:2c26:f4e4:1::1]:51177 (resolved: [fdb2:2c26:f4e4:1::1]:51177)
+    main_test.go:77:   → Recorder ICE state: connected
+    main_test.go:67:   → Publisher ICE state: connected
+    main_test.go:176: ✓ ICE connected
+    main_test.go:181: 
+        === Step 10: Create GStreamer publisher ===
+    main_test.go:187: ✓ GStreamer publisher created
+    main_test.go:189: 
+        === Step 11: Start publishing ===
+    main_test.go:193: ✓ Publisher started
+    main_test.go:195: 
+        === Step 12: Wait for publishing to complete ===
+2025/10/09 23:45:31.164902 main.go:176: Track received: audio, codec: audio/opus
+2025/10/09 23:45:31.164923 main.go:261: Starting audio track handler
+2025/10/09 23:45:31.164971 main.go:277: Audio stream initialized with caps: application/x-rtp,media=(string)audio,encoding-name=(string)OPUS,clock-rate=(int)48000,payload=(int)111
+2025/10/09 23:45:31.176730 main.go:176: Track received: video, codec: video/H264
+2025/10/09 23:45:31.176742 main.go:208: Starting video track handler
+2025/10/09 23:45:31.176764 main.go:224: Video stream initialized with caps: application/x-rtp,media=(string)video,encoding-name=(string)H264,clock-rate=(int)90000,payload=(int)102
+    main_test.go:84:   → Publisher ICE candidate: udp4 srflx 2.102.43.104:61694 related 0.0.0.0:61694 (resolved: 2.102.43.104:61694)
+    main_test.go:94:   → Recorder ICE candidate: udp4 srflx 2.102.43.104:57438 related 0.0.0.0:57438 (resolved: 2.102.43.104:57438)
+2025/10/09 23:45:33.476715 main.go:228: Video: pushed RTP packet seq=2900, ts=918906080
+2025/10/09 23:45:36.339485 main.go:228: Video: pushed RTP packet seq=3000, ts=919163994
+2025/10/09 23:45:39.676766 main.go:228: Video: pushed RTP packet seq=3100, ts=919463894
+2025/10/09 23:45:42.476783 main.go:228: Video: pushed RTP packet seq=3200, ts=919715810
+2025/10/09 23:45:45.110144 main.go:228: Video: pushed RTP packet seq=3300, ts=919952731
+2025/10/09 23:45:47.408822 main.go:228: Video: pushed RTP packet seq=3400, ts=920159662
+2025/10/09 23:45:50.110841 main.go:228: Video: pushed RTP packet seq=3500, ts=920402581
+2025/10/09 23:45:52.341889 main.go:228: Video: pushed RTP packet seq=3600, ts=920603514
+2025/10/09 23:45:55.076768 main.go:228: Video: pushed RTP packet seq=3700, ts=920849432
+2025/10/09 23:45:57.274727 main.go:228: Video: pushed RTP packet seq=3800, ts=921047366
+2025/10/09 23:46:00.006677 main.go:228: Video: pushed RTP packet seq=3900, ts=921293284
+2025/10/09 23:46:02.205805 main.go:228: Video: pushed RTP packet seq=4000, ts=921491218
+2025/10/09 23:46:04.943694 main.go:228: Video: pushed RTP packet seq=4100, ts=921737136
+2025/10/09 23:46:07.139152 main.go:228: Video: pushed RTP packet seq=4200, ts=921935070
+2025/10/09 23:46:09.876863 main.go:228: Video: pushed RTP packet seq=4300, ts=922180988
+2025/10/09 23:46:12.143855 main.go:228: Video: pushed RTP packet seq=4400, ts=922384920
+2025/10/09 23:46:14.810709 main.go:228: Video: pushed RTP packet seq=4500, ts=922624840
+2025/10/09 23:46:17.143884 main.go:228: Video: pushed RTP packet seq=4600, ts=922834770
+2025/10/09 23:46:19.743908 main.go:228: Video: pushed RTP packet seq=4700, ts=923068692
+2025/10/09 23:46:22.110884 main.go:228: Video: pushed RTP packet seq=4800, ts=923281621
+2025/10/09 23:46:24.671911 main.go:228: Video: pushed RTP packet seq=4900, ts=923512544
+2025/10/09 23:46:27.107606 main.go:228: Video: pushed RTP packet seq=5000, ts=923731471
+2025/10/09 23:46:29.606055 main.go:228: Video: pushed RTP packet seq=5100, ts=923956396
+    main_test.go:199: ✓ Publishing complete
+    main_test.go:201: 
+        === Step 13: Allow time for segments to finalize ===
+    main_test.go:204: 
+        === Step 14: Stop publisher and recorder ===
+2025/10/09 23:46:36.165353 main.go:309: Stopping HLS recorder...
+2025/10/09 23:46:36.165402 main.go:213: Video track read error: EOF
+2025/10/09 23:46:36.165429 main.go:266: Audio track read error: EOF
+    main_test.go:77:   → Recorder ICE state: closed
+    main_test.go:67:   → Publisher ICE state: closed
+    main_test.go:207:   → Waiting for GStreamer pipeline to flush...
+    main_test.go:209: ✓ Recorder stopped
+    main_test.go:211: 
+        === Step 15: Validate HLS output ===
+    main_test.go:235:   → Output file exists: hls-gst-output/output.ts (size: 890556 bytes)
+    main_test.go:248:   → Recording duration: 59.96 seconds
+    main_test.go:255:   → Creating HLS segments from output.ts...
+    main_test.go:276:   → HLS playlist created: hls-gst-output/playlist.m3u8
+    main_test.go:290:   → Created 30 HLS segments
+    main_test.go:215: ✓ HLS output is valid
+    main_test.go:217: 
+        ✅ All tests passed!
+--- PASS: TestHLSRecorderGStreamer (75.35s)
+PASS
+ok  	github.com/am-sokolov/livekit-agent-sdk-go/examples/save-to-hls-gstreamer	75.561s

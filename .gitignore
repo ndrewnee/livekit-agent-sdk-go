@@ -45,3 +45,18 @@ examples/transcription-agent/transcription-agent
 /livekit/
 /go-astits/
 
+/gohlslib/
+/mediacommon/
+
+# Temporary example files
+/save-to-webm.go
+/play-from-disk.go
+/examples/participant-hls-recorder/test-recordings/
+/gohlslib/
+/go-astits/
+/livekit/
+/egress/
+/agents/
+/debug-hls-output/
+/examples/save-to-hls-gstreamer/hls-gst-output/
+/livekit/
