@@ -19,6 +19,8 @@ type GStreamerPublisher struct {
 	audioTrack *lksdk.LocalTrack
 	mu         sync.Mutex
 	stopped    bool
+	videoTotal time.Duration
+	audioTotal time.Duration
 }
 
 func NewGStreamerPublisher(filePath string, videoTrack, audioTrack *lksdk.LocalTrack) (*GStreamerPublisher, error) {
@@ -31,7 +33,7 @@ func NewGStreamerPublisher(filePath string, videoTrack, audioTrack *lksdk.LocalT
 
 	pipelineStr := fmt.Sprintf(`
 		filesrc location="%s" ! qtdemux name=demux
-		demux.video_0 ! queue ! h264parse ! video/x-h264,stream-format=byte-stream,alignment=au ! appsink name=videosink emit-signals=true
+	demux.video_0 ! queue ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au ! appsink name=videosink emit-signals=true
 		demux.audio_0 ! queue ! opusparse ! audio/x-opus ! appsink name=audiosink emit-signals=true
 	`, filePath)
 
@@ -90,6 +92,9 @@ func NewGStreamerPublisher(filePath string, videoTrack, audioTrack *lksdk.LocalT
 					log.Printf("failed to write video sample: %v", err)
 					return gst.FlowError
 				}
+				p.mu.Lock()
+				p.videoTotal += duration
+				p.mu.Unlock()
 			}
 			return gst.FlowOK
 		},
@@ -128,6 +133,9 @@ func NewGStreamerPublisher(filePath string, videoTrack, audioTrack *lksdk.LocalT
 					log.Printf("failed to write audio sample: %v", err)
 					return gst.FlowError
 				}
+				p.mu.Lock()
+				p.audioTotal += duration
+				p.mu.Unlock()
 			}
 			return gst.FlowOK
 		},
@@ -145,6 +153,33 @@ func (p *GStreamerPublisher) Stop() {
 	p.stopped = true
 	p.mu.Unlock()
 	p.pipeline.SetState(gst.StateNull)
+	p.mu.Lock()
+	log.Printf("publisher totals: video=%.3fs audio=%.3fs", p.videoTotal.Seconds(), p.audioTotal.Seconds())
+	p.mu.Unlock()
+}
+
+func (p *GStreamerPublisher) Restart() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pipeline == nil {
+		return fmt.Errorf("pipeline not initialized")
+	}
+	if err := p.pipeline.SetState(gst.StatePaused); err != nil {
+		return fmt.Errorf("failed to pause pipeline: %w", err)
+	}
+	if change, state := p.pipeline.GetState(gst.StatePaused, gst.ClockTimeNone); change == gst.StateChangeFailure {
+		return fmt.Errorf("pipeline failed to pause (state=%s)", state.String())
+	}
+	flags := gst.SeekFlagFlush | gst.SeekFlagKeyUnit
+	if ok := p.pipeline.SeekSimple(0, gst.FormatTime, flags); !ok {
+		return fmt.Errorf("failed to seek pipeline to start")
+	}
+	if err := p.pipeline.SetState(gst.StatePlaying); err != nil {
+		return fmt.Errorf("failed to resume pipeline: %w", err)
+	}
+	p.videoTotal = 0
+	p.audioTotal = 0
+	return nil
 }
 
 func (p *GStreamerPublisher) Wait() error {

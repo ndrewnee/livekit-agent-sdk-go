@@ -16,20 +16,36 @@ type PublisherHLSHandler struct {
 	agent.BaseHandler
 	cfg *Config
 
-	mu        sync.Mutex
-	sessions  map[string]*recordingSession
-	summaries []RecordingSummary
+	mu                  sync.Mutex
+	sessions            map[string]*recordingSession
+	summaries           []RecordingSummary
+	participantSessions map[string]*recordingSession
+	readyOnce           sync.Once
+	readyCh             chan struct{}
+}
+
+func (h *PublisherHLSHandler) WaitReady(ctx context.Context) error {
+	select {
+	case <-h.readyCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type recordingSession struct {
-	cancel   context.CancelFunc
-	recorder *ParticipantRecorder
+	cancel      context.CancelFunc
+	recorder    *ParticipantRecorder
+	participant string
+	tracksReady map[webrtc.RTPCodecType]bool
 }
 
 func NewPublisherHLSHandler(cfg *Config) *PublisherHLSHandler {
 	return &PublisherHLSHandler{
-		cfg:      cfg,
-		sessions: make(map[string]*recordingSession),
+		cfg:                 cfg,
+		sessions:            make(map[string]*recordingSession),
+		participantSessions: make(map[string]*recordingSession),
+		readyCh:             make(chan struct{}),
 	}
 }
 
@@ -72,11 +88,17 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 
 	sessionCtx, cancel := context.WithCancel(ctx)
 	session := &recordingSession{
-		cancel:   cancel,
-		recorder: recorder,
+		cancel:      cancel,
+		recorder:    recorder,
+		participant: participantIdentity,
+		tracksReady: make(map[webrtc.RTPCodecType]bool),
 	}
 
-	h.storeSession(jobCtx.Job.Id, session)
+	recorder.SetOnVideoReady(func() {
+		h.notifyReady()
+	})
+
+	h.storeSession(jobCtx.Job.Id, participantIdentity, session)
 
 	started := false
 	defer func() {
@@ -139,13 +161,26 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 			if info := publication.TrackInfo(); info != nil {
 				log.Printf("[%s/%s] track info: %s", roomName, targetIdentity, info.String())
 			}
+			if receiver := publication.Receiver(); receiver != nil {
+				if params := receiver.GetParameters(); params.Codecs != nil {
+					for _, codec := range params.Codecs {
+						log.Printf("[%s/%s] receiver codec: mime=%s fmtp=%s", roomName, targetIdentity, codec.MimeType, codec.SDPFmtpLine)
+					}
+				}
+			}
 		}
 		log.Printf("[%s/%s] track subscribed: sid=%s kind=%s codec=%s payloadType=%d", roomName, targetIdentity, publication.SID(), publication.Kind(), track.Codec().MimeType, track.PayloadType())
 		switch track.Kind() {
 		case webrtc.RTPCodecTypeVideo:
 			recorder.AttachVideoTrack(sessionCtx, track, rp.WritePLI)
+			if session, ok := h.getSessionByParticipant(targetIdentity); ok {
+				session.tracksReady[webrtc.RTPCodecTypeVideo] = true
+			}
 		case webrtc.RTPCodecTypeAudio:
 			recorder.AttachAudioTrack(sessionCtx, track)
+			if session, ok := h.getSessionByParticipant(targetIdentity); ok {
+				session.tracksReady[webrtc.RTPCodecTypeAudio] = true
+			}
 		default:
 			log.Printf("[%s/%s] unsupported track kind %s", roomName, targetIdentity, track.Kind().String())
 		}
@@ -250,15 +285,20 @@ func (h *PublisherHLSHandler) PrintSummary() {
 	}
 }
 
-func (h *PublisherHLSHandler) storeSession(jobID string, session *recordingSession) {
+func (h *PublisherHLSHandler) storeSession(jobID, participant string, session *recordingSession) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.sessions[jobID] = session
+	h.participantSessions[participant] = session
 }
 
 func (h *PublisherHLSHandler) removeSession(jobID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	session, ok := h.sessions[jobID]
+	if ok {
+		delete(h.participantSessions, session.participant)
+	}
 	delete(h.sessions, jobID)
 }
 
@@ -266,6 +306,30 @@ func (h *PublisherHLSHandler) addSummary(summary RecordingSummary) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.summaries = append(h.summaries, summary)
+}
+
+func (h *PublisherHLSHandler) getSessionByParticipant(participant string) (*recordingSession, bool) {
+	h.mu.Lock()
+	session, ok := h.participantSessions[participant]
+	h.mu.Unlock()
+	return session, ok
+}
+
+func (h *PublisherHLSHandler) notifyReady() {
+	h.readyOnce.Do(func() {
+		log.Println("handler ready: video track subscription acknowledged")
+		close(h.readyCh)
+	})
+}
+
+func (h *PublisherHLSHandler) ActivateRecording(participant string) error {
+	session, ok := h.getSessionByParticipant(participant)
+	if !ok {
+		return fmt.Errorf("no active session for participant %s", participant)
+	}
+	log.Printf("activating recording for participant %s", participant)
+	session.recorder.ActivateRecording()
+	return nil
 }
 
 type trackRegistry struct {

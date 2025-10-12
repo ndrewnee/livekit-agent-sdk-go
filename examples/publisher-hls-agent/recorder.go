@@ -2,15 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-gst/go-gst/gst"
 	"github.com/go-gst/go-gst/gst/app"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -28,13 +32,32 @@ type ParticipantRecorder struct {
 	videoEnded       bool
 	audioEnded       bool
 
+	videoReadyOnce           sync.Once
+	videoReadyCh             chan struct{}
+	videoReady               atomic.Bool
+	handshakeReady           atomic.Bool
+	recordingActive          atomic.Bool
+	recordingKeyframePending atomic.Bool
+	onVideoReady             func()
+
 	videoPacketCount      int
 	videoEmptyPacketCount int
 	videoKeyframeCount    int
+	videoSPSCount         int
+	videoPPSCount         int
+	videoPLIRequests      int
+	videoTimestampBase    uint32
+	videoTimestampInit    bool
+	videoLastPTS          gst.ClockTime
+	videoLastTimestamp    uint32
 	audioPacketCount      int
 	audioEmptyPacketCount int
 	videoBytesReceived    int64
 	audioBytesReceived    int64
+	audioTimestampBase    uint32
+	audioTimestampInit    bool
+	audioLastPTS          gst.ClockTime
+	audioLastTimestamp    uint32
 
 	mu        sync.Mutex
 	wg        sync.WaitGroup
@@ -69,23 +92,21 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	pipelineStr := fmt.Sprintf(`
 		filesink location=%s/output.ts name=sink
 
-		mpegtsmux name=mux alignment=7 ! sink.
+		mpegtsmux name=mux ! sink.
 
-		appsrc name=videosrc format=time is-live=true do-timestamp=true
+	appsrc name=videosrc format=time is-live=true do-timestamp=true
 		! rtpjitterbuffer latency=200
 		! rtph264depay
-		! h264parse
+		! h264parse config-interval=1
 		! video/x-h264,stream-format=byte-stream,alignment=au
 		! queue max-size-buffers=0 max-size-time=0 max-size-bytes=0
 		! mux.
 
-		appsrc name=audiosrc format=time is-live=true do-timestamp=true
+	appsrc name=audiosrc format=time is-live=true do-timestamp=true
 		! rtpjitterbuffer latency=200
 		! rtpopusdepay
 		! opusdec
 		! audioconvert
-		! audioresample
-		! audio/x-raw,rate=48000,channels=2
 		! avenc_aac bitrate=128000
 		! aacparse
 		! queue max-size-buffers=0 max-size-time=0 max-size-bytes=0
@@ -109,13 +130,127 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	_ = os.Setenv("GST_DEBUG_DUMP_DOT_DIR", absDir)
 
 	recorder := &ParticipantRecorder{
-		participant: participant,
-		room:        roomName,
-		outputDir:   absDir,
-		pipeline:    pipeline,
-		videoAppSrc: app.SrcFromElement(videoSrcElement),
-		audioAppSrc: app.SrcFromElement(audioSrcElement),
-		startTime:   time.Now(),
+		participant:  participant,
+		room:         roomName,
+		outputDir:    absDir,
+		pipeline:     pipeline,
+		videoAppSrc:  app.SrcFromElement(videoSrcElement),
+		audioAppSrc:  app.SrcFromElement(audioSrcElement),
+		startTime:    time.Now(),
+		videoReadyCh: make(chan struct{}),
+	}
+
+	if elems, err := pipeline.GetElements(); err == nil {
+		for _, elem := range elems {
+			log.Printf("[%s] pipeline element: %s", recorder.logPrefix(), elem.GetName())
+		}
+	}
+
+	parseNames := []string{"h264parse0", "h264parse1", "h264parse"}
+	for _, name := range parseNames {
+		parseElem, err := pipeline.GetElementByName(name)
+		if err != nil || parseElem == nil {
+			continue
+		}
+		if srcPad := parseElem.GetStaticPad("src"); srcPad != nil {
+			srcPad.AddProbe(gst.PadProbeTypeEventDownstream, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+				event := info.GetEvent()
+				if event != nil && event.Type() == gst.EventTypeCaps {
+					caps := event.ParseCaps()
+					log.Printf("[%s] %s caps: %v", recorder.logPrefix(), name, caps)
+				}
+				return gst.PadProbeOK
+			})
+		}
+	}
+
+	if depayElem, err := pipeline.GetElementByName("rtph264depay0"); err == nil && depayElem != nil {
+		if srcPad := depayElem.GetStaticPad("src"); srcPad != nil {
+			srcPad.AddProbe(gst.PadProbeTypeEventDownstream, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+				event := info.GetEvent()
+				if event != nil && event.Type() == gst.EventTypeCaps {
+					caps := event.ParseCaps()
+					log.Printf("[%s] rtph264depay produced caps: %v", recorder.logPrefix(), caps)
+				}
+				return gst.PadProbeOK
+			})
+			var depayLogged atomic.Int32
+			srcPad.AddProbe(gst.PadProbeTypeBuffer, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+				count := depayLogged.Add(1)
+				if count <= 5 {
+					if buffer := info.GetBuffer(); buffer != nil {
+						size, _, _ := buffer.GetSizes()
+						log.Printf("[%s] rtph264depay buffer size=%d flags=%v", recorder.logPrefix(), size, buffer.GetFlags())
+					}
+				}
+				return gst.PadProbeOK
+			})
+		}
+	}
+
+	if parseElem, err := pipeline.GetElementByName("h264parse1"); err == nil && parseElem != nil {
+		if srcPad := parseElem.GetStaticPad("src"); srcPad != nil {
+			log.Printf("[%s] attached h264parse src probes on %s", recorder.logPrefix(), parseElem.GetName())
+			var parseLogged atomic.Int32
+			srcPad.AddProbe(gst.PadProbeTypeEventDownstream, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+				event := info.GetEvent()
+				if event != nil && event.Type() == gst.EventTypeCaps {
+					if caps := event.ParseCaps(); caps != nil {
+						log.Printf("[%s] h264parse src caps: %v", recorder.logPrefix(), caps)
+					}
+				}
+				return gst.PadProbeOK
+			})
+			srcPad.AddProbe(gst.PadProbeTypeBuffer, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+				count := parseLogged.Add(1)
+				if count <= 5 {
+					if buffer := info.GetBuffer(); buffer != nil {
+						size, _, _ := buffer.GetSizes()
+						log.Printf("[%s] h264parse buffer size=%d flags=%v", recorder.logPrefix(), size, buffer.GetFlags())
+					}
+				}
+				return gst.PadProbeOK
+			})
+		}
+	} else if err == nil {
+		log.Printf("[%s] h264parse element %v has no src pad", recorder.logPrefix(), parseElem)
+	} else {
+		log.Printf("[%s] failed to get h264parse element: %v", recorder.logPrefix(), err)
+	}
+
+	if jitterElem, err := pipeline.GetElementByName("rtpjitterbuffer0"); err == nil && jitterElem != nil {
+		if srcPad := jitterElem.GetStaticPad("src"); srcPad != nil {
+			srcPad.AddProbe(gst.PadProbeTypeEventDownstream, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+				event := info.GetEvent()
+				if event != nil && event.Type() == gst.EventTypeCaps {
+					caps := event.ParseCaps()
+					log.Printf("[%s] rtpjitterbuffer produced caps: %v", recorder.logPrefix(), caps)
+				}
+				return gst.PadProbeOK
+			})
+		}
+	}
+
+	queueNames := []string{"queue0", "queue1", "queue2", "queue3"}
+	for _, qName := range queueNames {
+		queueElem, err := pipeline.GetElementByName(qName)
+		if err != nil || queueElem == nil {
+			continue
+		}
+		log.Printf("[%s] found queue element: %s", recorder.logPrefix(), qName)
+		if srcPad := queueElem.GetStaticPad("src"); srcPad != nil {
+			var logged atomic.Int32
+			srcPad.AddProbe(gst.PadProbeTypeBuffer, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+				count := logged.Add(1)
+				if count <= 5 {
+					if buffer := info.GetBuffer(); buffer != nil {
+						size, _, _ := buffer.GetSizes()
+						log.Printf("[%s] queue %s buffer size=%d flags=%v", recorder.logPrefix(), qName, size, buffer.GetFlags())
+					}
+				}
+				return gst.PadProbeOK
+			})
+		}
 	}
 
 	bus := pipeline.GetPipelineBus()
@@ -140,6 +275,38 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 
 func (r *ParticipantRecorder) logPrefix() string {
 	return fmt.Sprintf("%s/%s", r.room, r.participant)
+}
+
+func (r *ParticipantRecorder) SetOnVideoReady(cb func()) {
+	r.mu.Lock()
+	r.onVideoReady = cb
+	r.mu.Unlock()
+	if cb != nil && r.handshakeReady.Load() {
+		cb()
+	}
+}
+
+func (r *ParticipantRecorder) ActivateRecording() {
+	r.recordingActive.Store(true)
+	r.recordingKeyframePending.Store(true)
+	r.mu.Lock()
+	r.videoTimestampInit = false
+	r.audioTimestampInit = false
+	r.videoPacketCount = 0
+	r.videoEmptyPacketCount = 0
+	r.videoKeyframeCount = 0
+	r.videoSPSCount = 0
+	r.videoPPSCount = 0
+	r.videoPLIRequests = 0
+	r.videoBytesReceived = 0
+	r.videoLastPTS = 0
+	r.videoLastTimestamp = 0
+	r.audioPacketCount = 0
+	r.audioEmptyPacketCount = 0
+	r.audioBytesReceived = 0
+	r.audioLastPTS = 0
+	r.audioLastTimestamp = 0
+	r.mu.Unlock()
 }
 
 func (r *ParticipantRecorder) Start() error {
@@ -204,6 +371,230 @@ func isH264Keyframe(payload []byte) bool {
 	}
 }
 
+func parseSpropParameterSets(fmtp string) [][]byte {
+	if fmtp == "" {
+		return nil
+	}
+	params := strings.Split(fmtp, ";")
+	for _, param := range params {
+		param = strings.TrimSpace(param)
+		if !strings.HasPrefix(param, "sprop-parameter-sets=") {
+			continue
+		}
+		value := strings.TrimPrefix(param, "sprop-parameter-sets=")
+		parts := strings.Split(value, ",")
+		var nalUnits [][]byte
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			data, err := base64.StdEncoding.DecodeString(part)
+			if err != nil {
+				log.Printf("failed to decode sprop parameter set %q: %v", part, err)
+				continue
+			}
+			nalUnits = append(nalUnits, data)
+		}
+		return nalUnits
+	}
+	return nil
+}
+
+func classifyNALUnit(nal []byte) (bool, bool) {
+	if len(nal) == 0 {
+		return false, false
+	}
+	switch nal[0] & 0x1F {
+	case nalUnitTypeSPS:
+		return true, false
+	case nalUnitTypePPS:
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func detectParameterSets(payload []byte) (bool, bool) {
+	if len(payload) == 0 {
+		return false, false
+	}
+	switch payload[0] & 0x1F {
+	case nalUnitTypeSPS:
+		return true, false
+	case nalUnitTypePPS:
+		return false, true
+	case nalUnitTypeSTAPA:
+		var sps, pps bool
+		offset := 1
+		for offset+2 <= len(payload) {
+			nalSize := int(payload[offset])<<8 | int(payload[offset+1])
+			offset += 2
+			if nalSize <= 0 || offset+nalSize > len(payload) {
+				break
+			}
+			nsps, npps := classifyNALUnit(payload[offset : offset+nalSize])
+			sps = sps || nsps
+			pps = pps || npps
+			offset += nalSize
+		}
+		return sps, pps
+	case nalUnitTypeFUA:
+		if len(payload) < 2 {
+			return false, false
+		}
+		fuHeader := payload[1]
+		startBit := (fuHeader & 0x80) != 0
+		if !startBit {
+			return false, false
+		}
+		nalType := fuHeader & 0x1F
+		switch nalType {
+		case nalUnitTypeSPS:
+			return true, false
+		case nalUnitTypePPS:
+			return false, true
+		default:
+			return false, false
+		}
+	default:
+		return false, false
+	}
+}
+
+func (r *ParticipantRecorder) initVideoCaps(payloadType uint8) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.videoInitialized {
+		return
+	}
+	capsStr := fmt.Sprintf("application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,payload=%d", payloadType)
+	caps := gst.NewCapsFromString(capsStr)
+	r.videoAppSrc.SetProperty("caps", caps)
+	r.videoInitialized = true
+	log.Printf("[%s] video caps initialized: %s", r.logPrefix(), capsStr)
+}
+
+func (r *ParticipantRecorder) pushVideoPacket(pkt *rtp.Packet) error {
+	data, err := pkt.Marshal()
+	if err != nil {
+		return fmt.Errorf("marshal video RTP failed: %w", err)
+	}
+
+	buffer := gst.NewBufferFromBytes(data)
+	pts := r.videoClockTime(pkt.Timestamp)
+	buffer.SetPresentationTimestamp(pts)
+	r.mu.Lock()
+	r.videoLastPTS = pts
+	r.videoLastTimestamp = pkt.Timestamp
+	r.mu.Unlock()
+
+	if flow := r.videoAppSrc.PushBuffer(buffer); flow != gst.FlowOK {
+		if flow == gst.FlowFlushing {
+			return fmt.Errorf("video appsrc flushing")
+		}
+		return fmt.Errorf("video appsrc push failed: %s", flow.String())
+	}
+	return nil
+}
+
+func (r *ParticipantRecorder) injectParameterSets(reference *rtp.Packet, nalUnits [][]byte) (bool, bool, error) {
+	if len(nalUnits) == 0 {
+		return false, false, fmt.Errorf("no parameter sets to inject")
+	}
+
+	payload := []byte{0x78} // F=0, NRI=3, Type=24 (STAP-A)
+	var spsInjected, ppsInjected bool
+
+	for _, nal := range nalUnits {
+		if len(nal) == 0 {
+			continue
+		}
+		if len(nal) > 0xFFFF {
+			return false, false, fmt.Errorf("parameter set too large (%d bytes)", len(nal))
+		}
+		if sps, pps := classifyNALUnit(nal); sps || pps {
+			spsInjected = spsInjected || sps
+			ppsInjected = ppsInjected || pps
+		}
+		payload = append(payload, byte(len(nal)>>8), byte(len(nal)))
+		payload = append(payload, nal...)
+	}
+
+	if len(payload) <= 1 {
+		return false, false, fmt.Errorf("no valid parameter sets to inject")
+	}
+
+	packet := &rtp.Packet{
+		Header: rtp.Header{
+			Version:        2,
+			PayloadType:    reference.PayloadType,
+			SequenceNumber: reference.SequenceNumber - 1,
+			Timestamp:      reference.Timestamp,
+			SSRC:           reference.SSRC,
+			Marker:         false,
+		},
+		Payload: payload,
+	}
+
+	if err := r.pushVideoPacket(packet); err != nil {
+		return false, false, err
+	}
+
+	log.Printf("[%s] injected SPS/PPS via STAP-A (seq=%d)", r.logPrefix(), packet.SequenceNumber)
+	return spsInjected, ppsInjected, nil
+}
+
+func (r *ParticipantRecorder) videoClockTime(ts uint32) gst.ClockTime {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.videoTimestampInit {
+		r.videoTimestampInit = true
+		r.videoTimestampBase = ts
+	}
+	relative := uint32(ts - r.videoTimestampBase)
+	ptsNs := uint64(relative) * 1_000_000_000 / 90000
+	return gst.ClockTime(ptsNs)
+}
+
+func (r *ParticipantRecorder) audioClockTime(ts uint32) gst.ClockTime {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.audioTimestampInit {
+		r.audioTimestampInit = true
+		r.audioTimestampBase = ts
+	}
+	relative := uint32(ts - r.audioTimestampBase)
+	ptsNs := uint64(relative) * 1_000_000_000 / 48000
+	return gst.ClockTime(ptsNs)
+}
+
+func (r *ParticipantRecorder) signalVideoReady() {
+	if r.videoReady.CompareAndSwap(false, true) {
+		r.handshakeReady.Store(true)
+		r.videoReadyOnce.Do(func() {
+			close(r.videoReadyCh)
+		})
+		var cb func()
+		r.mu.Lock()
+		cb = r.onVideoReady
+		r.mu.Unlock()
+		if cb != nil {
+			cb()
+		}
+	}
+}
+
+func (r *ParticipantRecorder) requestPLI(writer func(webrtc.SSRC), ssrc webrtc.SSRC) {
+	if writer == nil {
+		return
+	}
+	r.mu.Lock()
+	r.videoPLIRequests++
+	r.mu.Unlock()
+	writer(ssrc)
+}
+
 func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrtc.TrackRemote, pliWriter func(webrtc.SSRC)) {
 	r.wg.Add(1)
 	go func() {
@@ -215,8 +606,18 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 			pliWriter = func(webrtc.SSRC) {}
 		}
 
-		videoReady := false
+		var debugPackets atomic.Int32
+		var handshakeWait, recordingWait int
 		firstPacket := true
+
+		fmtp := track.Codec().SDPFmtpLine
+		log.Printf("[%s] track fmtp: %q", r.logPrefix(), fmtp)
+		spropNALs := parseSpropParameterSets(fmtp)
+		if len(spropNALs) > 0 {
+			log.Printf("[%s] codec fmtp provided %d parameter set(s)", r.logPrefix(), len(spropNALs))
+		}
+		var spsSeen, ppsSeen bool
+		injectedSprop := false
 
 		for {
 			select {
@@ -233,67 +634,118 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 				return
 			}
 
-			r.mu.Lock()
-			r.videoPacketCount++
-			r.mu.Unlock()
 			if firstPacket {
 				firstPacket = false
 				log.Printf("[%s] requesting initial keyframe via PLI (seq=%d)", r.logPrefix(), rtpPacket.SequenceNumber)
-				pliWriter(track.SSRC())
+				r.requestPLI(pliWriter, track.SSRC())
 			}
 
 			if len(rtpPacket.Payload) == 0 {
-				r.mu.Lock()
-				r.videoEmptyPacketCount++
-				r.mu.Unlock()
 				continue
 			}
 
-			r.mu.Lock()
-			r.videoBytesReceived += int64(len(rtpPacket.Payload))
-			r.mu.Unlock()
+			if debugPackets.Add(1) <= 50 {
+				nalType := rtpPacket.Payload[0] & 0x1F
+				extra := ""
+				if nalType == nalUnitTypeFUA && len(rtpPacket.Payload) > 1 {
+					fuHeader := rtpPacket.Payload[1]
+					startBit := (fuHeader & 0x80) != 0
+					nalType = fuHeader & 0x1F
+					extra = fmt.Sprintf(" FU start=%v", startBit)
+				}
+				log.Printf("[%s] video RTP packet seq=%d ts=%d nalType=%d%s size=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp, nalType, extra, len(rtpPacket.Payload))
+			}
 
-			if !videoReady {
-				if isH264Keyframe(rtpPacket.Payload) {
-					videoReady = true
+			if sps, pps := detectParameterSets(rtpPacket.Payload); sps || pps {
+				if sps {
+					spsSeen = true
+				}
+				if pps {
+					ppsSeen = true
+				}
+				log.Printf("[%s] detected parameter set packet seq=%d sps=%v pps=%v", r.logPrefix(), rtpPacket.SequenceNumber, sps, pps)
+				if r.recordingActive.Load() {
+					r.mu.Lock()
+					if sps {
+						r.videoSPSCount++
+					}
+					if pps {
+						r.videoPPSCount++
+					}
+					r.mu.Unlock()
+				}
+			}
+
+			isKeyframe := isH264Keyframe(rtpPacket.Payload)
+
+			if !r.handshakeReady.Load() {
+				if isKeyframe {
 					r.mu.Lock()
 					r.videoKeyframeCount++
 					r.mu.Unlock()
-					log.Printf("[%s] received first video keyframe (seq=%d)", r.logPrefix(), rtpPacket.SequenceNumber)
+					r.signalVideoReady()
+					log.Printf("[%s] received warm-up keyframe (seq=%d ts=%d)", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
 				} else {
-					if r.videoBytesReceived == 0 {
-						pliWriter(track.SSRC())
+					handshakeWait++
+					if handshakeWait%200 == 0 {
+						log.Printf("[%s] warm-up waiting for keyframe, sending PLI (seq=%d)", r.logPrefix(), rtpPacket.SequenceNumber)
+						r.requestPLI(pliWriter, track.SSRC())
+					}
+				}
+				continue
+			}
+
+			if !r.recordingActive.Load() {
+				continue
+			}
+
+			if r.recordingKeyframePending.Load() {
+				if isKeyframe {
+					if (!spsSeen || !ppsSeen) && len(spropNALs) > 0 && !injectedSprop {
+						r.initVideoCaps(rtpPacket.PayloadType)
+						if injectedSPS, injectedPPS, injErr := r.injectParameterSets(rtpPacket, spropNALs); injErr != nil {
+							log.Printf("[%s] failed to inject codec parameter sets: %v", r.logPrefix(), injErr)
+						} else {
+							injectedSprop = true
+							if injectedSPS {
+								spsSeen = true
+								r.mu.Lock()
+								r.videoSPSCount++
+								r.mu.Unlock()
+							}
+							if injectedPPS {
+								ppsSeen = true
+								r.mu.Lock()
+								r.videoPPSCount++
+								r.mu.Unlock()
+							}
+						}
+					}
+					r.recordingKeyframePending.Store(false)
+					r.mu.Lock()
+					r.videoKeyframeCount++
+					r.mu.Unlock()
+					log.Printf("[%s] starting active recording with keyframe seq=%d ts=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
+				} else {
+					recordingWait++
+					if recordingWait%200 == 0 {
+						log.Printf("[%s] waiting for keyframe to begin recording, sending PLI (seq=%d)", r.logPrefix(), rtpPacket.SequenceNumber)
+						r.requestPLI(pliWriter, track.SSRC())
 					}
 					continue
 				}
 			}
 
-			r.mu.Lock()
-			if !r.videoInitialized {
-				capsStr := fmt.Sprintf("application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,payload=%d", rtpPacket.PayloadType)
-				caps := gst.NewCapsFromString(capsStr)
-				r.videoAppSrc.SetProperty("caps", caps)
-				r.videoInitialized = true
-				log.Printf("[%s] video caps initialized: %s", r.logPrefix(), capsStr)
-			}
-			r.mu.Unlock()
-
-			data, err := rtpPacket.Marshal()
-			if err != nil {
-				log.Printf("[%s] marshal video RTP failed: %v", r.logPrefix(), err)
-				continue
-			}
-
-			buffer := gst.NewBufferFromBytes(data)
-			ptsNs := uint64(rtpPacket.Timestamp) * 1_000_000_000 / 90000
-			buffer.SetPresentationTimestamp(gst.ClockTime(ptsNs))
-
-			if flow := r.videoAppSrc.PushBuffer(buffer); flow != gst.FlowOK {
-				if flow != gst.FlowFlushing {
-					log.Printf("[%s] video appsrc push failed: %s", r.logPrefix(), flow.String())
-				}
+			r.initVideoCaps(rtpPacket.PayloadType)
+			if err := r.pushVideoPacket(rtpPacket); err != nil {
+				log.Printf("[%s] video push error: %v", r.logPrefix(), err)
 				return
 			}
+
+			r.mu.Lock()
+			r.videoPacketCount++
+			r.videoBytesReceived += int64(len(rtpPacket.Payload))
+			r.mu.Unlock()
 		}
 	}()
 }
@@ -304,6 +756,7 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 		defer r.wg.Done()
 		log.Printf("[%s] audio track subscribed (sid=%s, codec=%s, payloadType=%d)",
 			r.logPrefix(), track.ID(), track.Codec().MimeType, track.PayloadType())
+		var audioDebug atomic.Int32
 		for {
 			select {
 			case <-ctx.Done():
@@ -317,6 +770,9 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 					log.Printf("[%s] audio track read error: %v", r.logPrefix(), err)
 				}
 				return
+			}
+			if !r.recordingActive.Load() || r.recordingKeyframePending.Load() {
+				continue
 			}
 			r.mu.Lock()
 			r.audioPacketCount++
@@ -335,6 +791,10 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 			}
 			r.mu.Unlock()
 
+			if audioDebug.Add(1) <= 10 {
+				log.Printf("[%s] audio RTP packet seq=%d ts=%d size=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp, len(rtpPacket.Payload))
+			}
+
 			data, err := rtpPacket.Marshal()
 			if err != nil {
 				log.Printf("[%s] marshal audio RTP failed: %v", r.logPrefix(), err)
@@ -342,8 +802,12 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 			}
 
 			buffer := gst.NewBufferFromBytes(data)
-			ptsNs := uint64(rtpPacket.Timestamp) * 1_000_000_000 / 48000
-			buffer.SetPresentationTimestamp(gst.ClockTime(ptsNs))
+			pts := r.audioClockTime(rtpPacket.Timestamp)
+			buffer.SetPresentationTimestamp(pts)
+			r.mu.Lock()
+			r.audioLastPTS = pts
+			r.audioLastTimestamp = rtpPacket.Timestamp
+			r.mu.Unlock()
 
 			if flow := r.audioAppSrc.PushBuffer(buffer); flow != gst.FlowOK {
 				if flow != gst.FlowFlushing {
@@ -390,17 +854,76 @@ func (r *ParticipantRecorder) Stop() {
 			if bus := r.pipeline.GetBus(); bus != nil {
 				bus.TimedPopFiltered(gst.ClockTime(5*1_000_000_000), gst.MessageEOS|gst.MessageError)
 			}
+
+			if cf, err := r.pipeline.GetElementByName("capsfilter2"); err == nil && cf != nil {
+				if pad := cf.GetStaticPad("sink"); pad != nil {
+					log.Printf("[%s] capsfilter2 sink caps: %v", r.logPrefix(), pad.CurrentCaps())
+				}
+				if pad := cf.GetStaticPad("src"); pad != nil {
+					log.Printf("[%s] capsfilter2 src caps: %v", r.logPrefix(), pad.CurrentCaps())
+				}
+			}
+
+			if queueElem, err := r.pipeline.GetElementByName("queue2"); err == nil && queueElem != nil {
+				if pad := queueElem.GetStaticPad("sink"); pad != nil {
+					log.Printf("[%s] queue2 sink caps: %v", r.logPrefix(), pad.CurrentCaps())
+				}
+				if pad := queueElem.GetStaticPad("src"); pad != nil {
+					log.Printf("[%s] queue2 src caps: %v", r.logPrefix(), pad.CurrentCaps())
+				}
+			}
+
+			if cf, err := r.pipeline.GetElementByName("capsfilter3"); err == nil && cf != nil {
+				if pad := cf.GetStaticPad("sink"); pad != nil {
+					log.Printf("[%s] capsfilter3 sink caps: %v", r.logPrefix(), pad.CurrentCaps())
+				}
+				if pad := cf.GetStaticPad("src"); pad != nil {
+					log.Printf("[%s] capsfilter3 src caps: %v", r.logPrefix(), pad.CurrentCaps())
+				}
+			}
+
+			if muxElem, err := r.pipeline.GetElementByName("mux"); err != nil {
+				log.Printf("[%s] failed to get mux element: %v", r.logPrefix(), err)
+			} else if muxElem != nil {
+				if pads, padErr := muxElem.GetPads(); padErr == nil {
+					for _, pad := range pads {
+						caps := pad.CurrentCaps()
+						capsStr := "<nil>"
+						if caps != nil {
+							capsStr = caps.String()
+						}
+						log.Printf("[%s] mux pad: %s direction=%s linked=%v caps=%s", r.logPrefix(), pad.GetName(), pad.Direction().String(), pad.IsLinked(), capsStr)
+					}
+				} else {
+					log.Printf("[%s] failed to enumerate mux pads: %v", r.logPrefix(), padErr)
+				}
+			} else {
+				log.Printf("[%s] mux element not found", r.logPrefix())
+			}
+
 			r.pipeline.SetState(gst.StateNull)
 		}
 
-		log.Printf("[%s] recorder stats: videoPackets=%d emptyVideo=%d videoBytes=%d audioPackets=%d emptyAudio=%d audioBytes=%d",
+		videoSeconds := float64(r.videoLastPTS) / 1_000_000_000
+		audioSeconds := float64(r.audioLastPTS) / 1_000_000_000
+		log.Printf("[%s] recorder stats: videoPackets=%d emptyVideo=%d videoBytes=%d keyframes=%d sps=%d pps=%d plis=%d audioPackets=%d emptyAudio=%d audioBytes=%d videoPTS=%.3fs audioPTS=%.3fs videoBase=%d audioBase=%d videoLastTS=%d audioLastTS=%d",
 			r.logPrefix(),
 			r.videoPacketCount,
 			r.videoEmptyPacketCount,
 			r.videoBytesReceived,
+			r.videoKeyframeCount,
+			r.videoSPSCount,
+			r.videoPPSCount,
+			r.videoPLIRequests,
 			r.audioPacketCount,
 			r.audioEmptyPacketCount,
-			r.audioBytesReceived)
+			r.audioBytesReceived,
+			videoSeconds,
+			audioSeconds,
+			r.videoTimestampBase,
+			r.audioTimestampBase,
+			r.videoLastTimestamp,
+			r.audioLastTimestamp)
 	})
 	r.wg.Wait()
 }

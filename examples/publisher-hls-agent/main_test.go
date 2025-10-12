@@ -132,8 +132,6 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 		}
 	})
 
-	time.Sleep(2 * time.Second)
-
 	roomClient := lksdk.NewRoomServiceClient("http://localhost:7880", cfg.APIKey, cfg.APISecret)
 	_, _ = roomClient.DeleteRoom(context.Background(), &livekit.DeleteRoomRequest{Room: testRoomName})
 
@@ -220,11 +218,29 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 		t.Fatal("audio track was not bound in time")
 	}
 
+	handshakePublisher, err := NewGStreamerPublisher(testVideo, videoTrack, audioTrack)
+	if err != nil {
+		t.Fatalf("failed to create handshake publisher: %v", err)
+	}
+	if err := handshakePublisher.Start(); err != nil {
+		t.Fatalf("failed to start handshake publisher: %v", err)
+	}
+
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer readyCancel()
+	if err := handler.WaitReady(readyCtx); err != nil {
+		t.Fatalf("recorder not ready: %v", err)
+	}
+	handshakePublisher.Stop()
+
+	if err := handler.ActivateRecording(testParticipant); err != nil {
+		t.Fatalf("failed to activate recording: %v", err)
+	}
+
 	publisher, err := NewGStreamerPublisher(testVideo, videoTrack, audioTrack)
 	if err != nil {
 		t.Fatalf("failed to create GStreamer publisher: %v", err)
 	}
-
 	if err := publisher.Start(); err != nil {
 		t.Fatalf("failed to start GStreamer publisher: %v", err)
 	}
@@ -234,7 +250,7 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 	}
 	publisher.Stop()
 
-	time.Sleep(4 * time.Second)
+	time.Sleep(8 * time.Second)
 
 	cancel()
 	worker.Stop()
@@ -401,6 +417,7 @@ func createHLSSegments(tsFile, playlistPath, segmentPattern string) (string, err
 
 	cmd := exec.Command("ffmpeg", "-y",
 		"-i", tsFile,
+		"-map", "0",
 		"-c", "copy",
 		"-f", "hls",
 		"-hls_time", "2",
@@ -468,15 +485,36 @@ func ffprobeStreamTiming(input, selector string) (start float64, duration float6
 		return 0, 0, fmt.Errorf("ffprobe failed: %w (output: %s)", err, string(out))
 	}
 
-	fields := strings.Split(strings.TrimSpace(string(out)), ",")
-	if len(fields) < 2 {
+	raw := strings.TrimSpace(string(out))
+	var line string
+	for _, candidate := range strings.Split(raw, "\n") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" {
+			line = candidate
+			break
+		}
+	}
+	if line == "" {
 		return 0, 0, fmt.Errorf("unexpected ffprobe output: %s", string(out))
 	}
 
-	if start, err = strconv.ParseFloat(fields[0], 64); err != nil {
+	fields := strings.Split(line, ",")
+	if len(fields) < 2 {
+		return 0, 0, fmt.Errorf("unexpected ffprobe output: %s", line)
+	}
+
+	parseValue := func(value string) (float64, error) {
+		value = strings.TrimSpace(value)
+		if value == "" || strings.EqualFold(value, "N/A") {
+			return 0, nil
+		}
+		return strconv.ParseFloat(value, 64)
+	}
+
+	if start, err = parseValue(fields[0]); err != nil {
 		return 0, 0, fmt.Errorf("failed to parse start time: %w", err)
 	}
-	if duration, err = strconv.ParseFloat(fields[1], 64); err != nil {
+	if duration, err = parseValue(fields[1]); err != nil {
 		return 0, 0, fmt.Errorf("failed to parse duration: %w", err)
 	}
 	return
