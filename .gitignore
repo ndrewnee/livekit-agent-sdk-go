@@ -60,3 +60,4 @@ examples/transcription-agent/transcription-agent
 /debug-hls-output/
 /examples/save-to-hls-gstreamer/hls-gst-output/
 /livekit/
+/examples/publisher-hls-agent/output/
