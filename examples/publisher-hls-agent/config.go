@@ -13,6 +13,7 @@ type Config struct {
 	APIKey              string
 	APISecret           string
 	OutputDir           string
+	AutoActivate        bool
 	SegmentDurationSecs int
 	MaxPlaylistEntries  int
 	AgentName           string
@@ -24,6 +25,7 @@ func loadConfig() *Config {
 		APIKey:              mustGetEnv("LIVEKIT_API_KEY"),
 		APISecret:           mustGetEnv("LIVEKIT_API_SECRET"),
 		OutputDir:           getEnv("OUTPUT_DIR", "publisher-hls-output"),
+		AutoActivate:        getEnvBool("AUTO_ACTIVATE_RECORDING", false),
 		SegmentDurationSecs: getEnvInt("HLS_SEGMENT_DURATION", 2),
 		MaxPlaylistEntries:  getEnvInt("HLS_MAX_SEGMENTS", 0),
 		AgentName:           getEnv("AGENT_NAME", "publisher-hls-recorder"),
@@ -48,6 +50,15 @@ func mustGetEnv(key string) string {
 func getEnvInt(key string, defaultValue int) int {
 	if str := os.Getenv(key); str != "" {
 		if value, err := strconv.Atoi(str); err == nil {
+			return value
+		}
+	}
+	return defaultValue
+}
+
+func getEnvBool(key string, defaultValue bool) bool {
+	if str := os.Getenv(key); str != "" {
+		if value, err := strconv.ParseBool(str); err == nil {
 			return value
 		}
 	}

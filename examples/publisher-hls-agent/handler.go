@@ -34,10 +34,12 @@ func (h *PublisherHLSHandler) WaitReady(ctx context.Context) error {
 }
 
 type recordingSession struct {
+	mu          sync.Mutex
 	cancel      context.CancelFunc
 	recorder    *ParticipantRecorder
 	participant string
 	tracksReady map[webrtc.RTPCodecType]bool
+	activated   bool
 }
 
 func NewPublisherHLSHandler(cfg *Config) *PublisherHLSHandler {
@@ -96,6 +98,7 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 
 	recorder.SetOnVideoReady(func() {
 		h.notifyReady()
+		h.tryAutoActivate(session)
 	})
 
 	h.storeSession(jobCtx.Job.Id, participantIdentity, session)
@@ -174,12 +177,14 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 		case webrtc.RTPCodecTypeVideo:
 			recorder.AttachVideoTrack(sessionCtx, track, rp.WritePLI)
 			if session, ok := h.getSessionByParticipant(targetIdentity); ok {
-				session.tracksReady[webrtc.RTPCodecTypeVideo] = true
+				session.setTrackReady(webrtc.RTPCodecTypeVideo)
+				h.tryAutoActivate(session)
 			}
 		case webrtc.RTPCodecTypeAudio:
 			recorder.AttachAudioTrack(sessionCtx, track)
 			if session, ok := h.getSessionByParticipant(targetIdentity); ok {
-				session.tracksReady[webrtc.RTPCodecTypeAudio] = true
+				session.setTrackReady(webrtc.RTPCodecTypeAudio)
+				h.tryAutoActivate(session)
 			}
 		default:
 			log.Printf("[%s/%s] unsupported track kind %s", roomName, targetIdentity, track.Kind().String())
@@ -330,6 +335,49 @@ func (h *PublisherHLSHandler) ActivateRecording(participant string) error {
 	log.Printf("activating recording for participant %s", participant)
 	session.recorder.ActivateRecording()
 	return nil
+}
+
+func (h *PublisherHLSHandler) tryAutoActivate(session *recordingSession) {
+	if !h.cfg.AutoActivate {
+		return
+	}
+
+	if !session.recorder.HandshakeReady() {
+		return
+	}
+
+	if !session.markActivatedIfReady() {
+		return
+	}
+
+	log.Printf("[%s/%s] auto-activating recording", session.recorder.room, session.participant)
+	session.recorder.ActivateRecording()
+}
+
+func (s *recordingSession) setTrackReady(kind webrtc.RTPCodecType) {
+	s.mu.Lock()
+	if s.tracksReady == nil {
+		s.tracksReady = make(map[webrtc.RTPCodecType]bool)
+	}
+	s.tracksReady[kind] = true
+	s.mu.Unlock()
+}
+
+func (s *recordingSession) markActivatedIfReady() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.activated {
+		return false
+	}
+	if !s.tracksReady[webrtc.RTPCodecTypeVideo] || !s.tracksReady[webrtc.RTPCodecTypeAudio] {
+		return false
+	}
+	if !s.recorder.HandshakeReady() {
+		return false
+	}
+	s.activated = true
+	return true
 }
 
 type trackRegistry struct {
