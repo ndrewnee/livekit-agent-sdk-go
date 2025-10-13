@@ -61,3 +61,4 @@ examples/transcription-agent/transcription-agent
 /examples/save-to-hls-gstreamer/hls-gst-output/
 /livekit/
 /examples/publisher-hls-agent/output/
+/examples/publisher-hls-agent/hls-agent-recordings/

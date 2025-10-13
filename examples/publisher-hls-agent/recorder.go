@@ -286,6 +286,10 @@ func (r *ParticipantRecorder) SetOnVideoReady(cb func()) {
 	}
 }
 
+func (r *ParticipantRecorder) HandshakeReady() bool {
+	return r.handshakeReady.Load()
+}
+
 func (r *ParticipantRecorder) ActivateRecording() {
 	r.recordingActive.Store(true)
 	r.recordingKeyframePending.Store(true)
@@ -687,7 +691,7 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 					log.Printf("[%s] received warm-up keyframe (seq=%d ts=%d)", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
 				} else {
 					handshakeWait++
-					if handshakeWait%200 == 0 {
+					if handshakeWait == 1 || handshakeWait%200 == 0 {
 						log.Printf("[%s] warm-up waiting for keyframe, sending PLI (seq=%d)", r.logPrefix(), rtpPacket.SequenceNumber)
 						r.requestPLI(pliWriter, track.SSRC())
 					}
@@ -728,7 +732,7 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 					log.Printf("[%s] starting active recording with keyframe seq=%d ts=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
 				} else {
 					recordingWait++
-					if recordingWait%200 == 0 {
+					if recordingWait == 1 || recordingWait%200 == 0 {
 						log.Printf("[%s] waiting for keyframe to begin recording, sending PLI (seq=%d)", r.logPrefix(), rtpPacket.SequenceNumber)
 						r.requestPLI(pliWriter, track.SSRC())
 					}
