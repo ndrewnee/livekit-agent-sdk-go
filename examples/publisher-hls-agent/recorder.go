@@ -38,6 +38,7 @@ type ParticipantRecorder struct {
 	handshakeReady           atomic.Bool
 	recordingActive          atomic.Bool
 	recordingKeyframePending atomic.Bool
+	pipelineStarted          atomic.Bool
 	onVideoReady             func()
 
 	videoPacketCount      int
@@ -472,11 +473,9 @@ func (r *ParticipantRecorder) ActivateRecording() {
 }
 
 func (r *ParticipantRecorder) Start() error {
-	log.Printf("[%s] starting GStreamer pipeline", r.logPrefix())
-	if err := r.pipeline.SetState(gst.StatePlaying); err != nil {
-		return fmt.Errorf("failed to start pipeline: %w", err)
-	}
-	r.pipeline.DebugBinToDotFileWithTs(gst.DebugGraphShowAll, "publisher_recorder")
+	log.Printf("[%s] GStreamer pipeline ready (will start on first recording keyframe)", r.logPrefix())
+	// Pipeline will be started when first recording keyframe arrives
+	// This prevents invalid HLS segments from being created before recording begins
 	return nil
 }
 
@@ -887,7 +886,19 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 					r.mu.Lock()
 					r.videoKeyframeCount++
 					r.mu.Unlock()
-					log.Printf("[%s] starting active recording with keyframe seq=%d ts=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
+
+					// Start pipeline on first recording keyframe to avoid invalid HLS segments
+					if !r.pipelineStarted.Load() {
+						log.Printf("[%s] starting GStreamer pipeline with first recording keyframe seq=%d ts=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
+						if err := r.pipeline.SetState(gst.StatePlaying); err != nil {
+							log.Printf("[%s] failed to start pipeline: %v", r.logPrefix(), err)
+							return
+						}
+						r.pipeline.DebugBinToDotFileWithTs(gst.DebugGraphShowAll, "publisher_recorder")
+						r.pipelineStarted.Store(true)
+					} else {
+						log.Printf("[%s] starting active recording with keyframe seq=%d ts=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
+					}
 				} else {
 					recordingWait++
 					if recordingWait == 1 || recordingWait%200 == 0 {
