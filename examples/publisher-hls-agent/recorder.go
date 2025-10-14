@@ -260,15 +260,16 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	if err := gst.ElementLinkMany(videoSrc, videoJitter, videoDepay, h264parse, videoCapsFilter, videoQueue); err != nil {
 		return nil, fmt.Errorf("failed to link video chain: %w", err)
 	}
-	if err := videoQueue.Link(mpegtsmux); err != nil {
-		return nil, fmt.Errorf("failed to link video queue to mux: %w", err)
-	}
 
 	if err := gst.ElementLinkMany(audioSrc, audioJitter, audioDepay, opusDec, audioConvert, aacEnc, aacParse, audioQueue); err != nil {
 		return nil, fmt.Errorf("failed to link audio chain: %w", err)
 	}
-	if err := audioQueue.Link(mpegtsmux); err != nil {
-		return nil, fmt.Errorf("failed to link audio queue to mux: %w", err)
+
+	if !videoQueue.Link(mpegtsmux) {
+		return nil, fmt.Errorf("failed to link video queue to mux")
+	}
+	if !audioQueue.Link(mpegtsmux) {
+		return nil, fmt.Errorf("failed to link audio queue to mux")
 	}
 
 	if err := gst.ElementLinkMany(mpegtsmux, muxQueue, outputTee); err != nil {
