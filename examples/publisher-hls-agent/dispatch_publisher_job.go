@@ -10,6 +10,26 @@ import (
 	lksdk "github.com/livekit/server-sdk-go/v2"
 )
 
+// dispatchJob creates a LiveKit room with automatic agent dispatch configuration.
+//
+// When called (via "go run . dispatch-job"), this function:
+//  1. Reads LiveKit connection settings from environment variables
+//  2. Creates a room with the specified name (default: publisher-hls-room)
+//  3. Configures automatic agent dispatch for the publisher-hls-recorder
+//  4. Prints room details and instructions
+//
+// The room is created with agent dispatch metadata, so when a participant
+// publishes audio/video tracks, the HLS recording agent will be dispatched
+// automatically by the LiveKit server.
+//
+// Required environment variables:
+//   - LIVEKIT_URL: LiveKit server URL (default: http://localhost:7880)
+//   - LIVEKIT_API_KEY: LiveKit API key
+//   - LIVEKIT_API_SECRET: LiveKit API secret
+//
+// Optional environment variables:
+//   - ROOM_NAME: Room name to create (default: publisher-hls-room)
+//   - AGENT_NAME: Agent name for dispatch (default: publisher-hls-recorder)
 func dispatchJob() {
 	host := getEnv("LIVEKIT_URL", "http://localhost:7880")
 	apiKey := mustGetEnv("LIVEKIT_API_KEY")

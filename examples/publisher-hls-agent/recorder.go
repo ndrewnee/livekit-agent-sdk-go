@@ -18,6 +18,16 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
+// ParticipantRecorder records a participant's audio and video streams to HLS format.
+//
+// It creates a GStreamer pipeline that:
+//   - Receives RTP packets (H.264 video, Opus audio)
+//   - Transcodes audio to AAC
+//   - Muxes to MPEG-TS format
+//   - Generates HLS playlists and segments via hlssink
+//
+// The recorder implements delayed pipeline start to ensure all HLS segments
+// begin with valid H.264 keyframes containing SPS/PPS headers.
 type ParticipantRecorder struct {
 	participant string
 	room        string
@@ -66,18 +76,27 @@ type ParticipantRecorder struct {
 	startTime time.Time
 }
 
+// RecordingSummary contains statistics and metadata about a completed recording.
 type RecordingSummary struct {
-	Participant  string
-	Room         string
-	OutputFile   string
-	SizeBytes    int64
-	Duration     time.Duration
-	Err          error
-	VideoPackets int
-	AudioPackets int
-	Remote       string
+	Participant  string        // Participant identity
+	Room         string        // Room name
+	OutputFile   string        // Local path to output.ts file
+	SizeBytes    int64         // Size of output.ts in bytes
+	Duration     time.Duration // Recording duration
+	Err          error         // Error if recording failed
+	VideoPackets int           // Number of video RTP packets processed
+	AudioPackets int           // Number of audio RTP packets processed
+	Remote       string        // S3 URL if uploaded, empty otherwise
 }
 
+// NewParticipantRecorder creates a new recorder for a participant.
+//
+// It initializes the GStreamer pipeline but does not start it.
+// The pipeline will start when the first recording keyframe arrives
+// (after ActivateRecording is called and a keyframe is received).
+//
+// Returns an error if the output directory cannot be created or
+// if any GStreamer element fails to initialize.
 func NewParticipantRecorder(cfg *Config, roomName, participant string) (*ParticipantRecorder, error) {
 	baseDir := filepath.Join(cfg.OutputDir, roomName, participant)
 	absDir, err := filepath.Abs(baseDir)
@@ -327,91 +346,6 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		videoReadyCh: make(chan struct{}),
 	}
 
-	if elems, err := pipeline.GetElements(); err == nil {
-		for _, elem := range elems {
-			log.Printf("[%s] pipeline element: %s", recorder.logPrefix(), elem.GetName())
-		}
-	}
-
-	if srcPad := h264parse.GetStaticPad("src"); srcPad != nil {
-		var parseLogged atomic.Int32
-		srcPad.AddProbe(gst.PadProbeTypeEventDownstream, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
-			event := info.GetEvent()
-			if event != nil && event.Type() == gst.EventTypeCaps {
-				if caps := event.ParseCaps(); caps != nil {
-					log.Printf("[%s] h264parse src caps: %v", recorder.logPrefix(), caps)
-				}
-			}
-			return gst.PadProbeOK
-		})
-		srcPad.AddProbe(gst.PadProbeTypeBuffer, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
-			count := parseLogged.Add(1)
-			if count <= 5 {
-				if buffer := info.GetBuffer(); buffer != nil {
-					size, _, _ := buffer.GetSizes()
-					log.Printf("[%s] h264parse buffer size=%d flags=%v", recorder.logPrefix(), size, buffer.GetFlags())
-				}
-			}
-			return gst.PadProbeOK
-		})
-	}
-
-	if srcPad := videoDepay.GetStaticPad("src"); srcPad != nil {
-		var depayLogged atomic.Int32
-		srcPad.AddProbe(gst.PadProbeTypeEventDownstream, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
-			event := info.GetEvent()
-			if event != nil && event.Type() == gst.EventTypeCaps {
-				caps := event.ParseCaps()
-				log.Printf("[%s] rtph264depay caps: %v", recorder.logPrefix(), caps)
-			}
-			return gst.PadProbeOK
-		})
-		srcPad.AddProbe(gst.PadProbeTypeBuffer, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
-			count := depayLogged.Add(1)
-			if count <= 5 {
-				if buffer := info.GetBuffer(); buffer != nil {
-					size, _, _ := buffer.GetSizes()
-					log.Printf("[%s] rtph264depay buffer size=%d flags=%v", recorder.logPrefix(), size, buffer.GetFlags())
-				}
-			}
-			return gst.PadProbeOK
-		})
-	}
-
-	if srcPad := videoJitter.GetStaticPad("src"); srcPad != nil {
-		srcPad.AddProbe(gst.PadProbeTypeEventDownstream, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
-			event := info.GetEvent()
-			if event != nil && event.Type() == gst.EventTypeCaps {
-				caps := event.ParseCaps()
-				log.Printf("[%s] rtpjitterbuffer caps: %v", recorder.logPrefix(), caps)
-			}
-			return gst.PadProbeOK
-		})
-	}
-
-	for idx, queueElem := range []*gst.Element{videoQueue, audioQueue, tsQueue, hlsQueue} {
-		if queueElem == nil {
-			continue
-		}
-		qName := queueElem.GetName()
-		if qName == "" {
-			qName = fmt.Sprintf("queue%d", idx)
-		}
-		if srcPad := queueElem.GetStaticPad("src"); srcPad != nil {
-			var logged atomic.Int32
-			srcPad.AddProbe(gst.PadProbeTypeBuffer, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
-				count := logged.Add(1)
-				if count <= 5 {
-					if buffer := info.GetBuffer(); buffer != nil {
-						size, _, _ := buffer.GetSizes()
-						log.Printf("[%s] queue %s buffer size=%d flags=%v", recorder.logPrefix(), qName, size, buffer.GetFlags())
-					}
-				}
-				return gst.PadProbeOK
-			})
-		}
-	}
-
 	bus := pipeline.GetPipelineBus()
 	bus.AddWatch(func(msg *gst.Message) bool {
 		switch msg.Type() {
@@ -436,6 +370,9 @@ func (r *ParticipantRecorder) logPrefix() string {
 	return fmt.Sprintf("%s/%s", r.room, r.participant)
 }
 
+// SetOnVideoReady sets a callback to be invoked when the first video keyframe
+// is received (handshake ready). If handshake is already complete, the callback
+// is invoked immediately.
 func (r *ParticipantRecorder) SetOnVideoReady(cb func()) {
 	r.mu.Lock()
 	r.onVideoReady = cb
@@ -445,10 +382,16 @@ func (r *ParticipantRecorder) SetOnVideoReady(cb func()) {
 	}
 }
 
+// HandshakeReady returns true if the recorder has received the first video keyframe.
+// This indicates that H.264 parameters (SPS/PPS) are established and recording can begin.
 func (r *ParticipantRecorder) HandshakeReady() bool {
 	return r.handshakeReady.Load()
 }
 
+// ActivateRecording enables recording. The GStreamer pipeline will start
+// at the next keyframe, and all subsequent packets will be recorded to HLS.
+//
+// This resets packet counters and timestamp bases.
 func (r *ParticipantRecorder) ActivateRecording() {
 	r.recordingActive.Store(true)
 	r.recordingKeyframePending.Store(true)
@@ -472,6 +415,11 @@ func (r *ParticipantRecorder) ActivateRecording() {
 	r.mu.Unlock()
 }
 
+// Start prepares the recorder for operation.
+//
+// Note: This does NOT start the GStreamer pipeline. The pipeline will be started
+// automatically when the first recording keyframe arrives after ActivateRecording.
+// This delayed start ensures all HLS segments begin with valid H.264 keyframes.
 func (r *ParticipantRecorder) Start() error {
 	log.Printf("[%s] GStreamer pipeline ready (will start on first recording keyframe)", r.logPrefix())
 	// Pipeline will be started when first recording keyframe arrives
@@ -481,13 +429,21 @@ func (r *ParticipantRecorder) Start() error {
 
 // H.264 NAL unit types used to detect keyframes.
 const (
-	nalUnitTypeSPS   = 7
-	nalUnitTypePPS   = 8
-	nalUnitTypeIDR   = 5
-	nalUnitTypeSTAPA = 24
-	nalUnitTypeFUA   = 28
+	nalUnitTypeSPS   = 7  // Sequence Parameter Set
+	nalUnitTypePPS   = 8  // Picture Parameter Set
+	nalUnitTypeIDR   = 5  // IDR (Instantaneous Decoder Refresh) keyframe
+	nalUnitTypeSTAPA = 24 // Single-time Aggregation Packet Type A (multiple NAL units)
+	nalUnitTypeFUA   = 28 // Fragmentation Unit Type A (fragmented NAL unit)
 )
 
+// isH264Keyframe detects whether an RTP payload contains or references an H.264 keyframe.
+//
+// This function inspects the NAL unit type indicator byte and handles:
+//   - Single NAL units: SPS (7), PPS (8), IDR (5)
+//   - STAP-A packets: Searches aggregated NAL units for SPS/PPS/IDR
+//   - FU-A packets: Checks if the start fragment contains an IDR NAL unit
+//
+// Returns true if the payload contains keyframe data (SPS, PPS, or IDR).
 func isH264Keyframe(payload []byte) bool {
 	if len(payload) == 0 {
 		return false
@@ -532,6 +488,12 @@ func isH264Keyframe(payload []byte) bool {
 	}
 }
 
+// parseSpropParameterSets extracts H.264 parameter sets (SPS/PPS) from the SDP fmtp line.
+//
+// The fmtp string (e.g., "sprop-parameter-sets=Z0IAH...=,aM4G8g==") contains base64-encoded
+// SPS and PPS NAL units. This function decodes them and returns the raw NAL unit bytes.
+//
+// Returns nil if fmtp is empty or if sprop-parameter-sets is not present.
 func parseSpropParameterSets(fmtp string) [][]byte {
 	if fmtp == "" {
 		return nil
@@ -562,6 +524,12 @@ func parseSpropParameterSets(fmtp string) [][]byte {
 	return nil
 }
 
+// classifyNALUnit determines if a NAL unit is an SPS or PPS.
+//
+// Returns:
+//   - (true, false) if the NAL unit is SPS
+//   - (false, true) if the NAL unit is PPS
+//   - (false, false) otherwise
 func classifyNALUnit(nal []byte) (bool, bool) {
 	if len(nal) == 0 {
 		return false, false
@@ -576,6 +544,15 @@ func classifyNALUnit(nal []byte) (bool, bool) {
 	}
 }
 
+// detectParameterSets scans an RTP payload for H.264 parameter sets (SPS/PPS).
+//
+// This function handles:
+//   - Single NAL units (SPS=7, PPS=8)
+//   - STAP-A packets containing aggregated NAL units
+//   - FU-A packets containing fragmented NAL units (only start fragments)
+//
+// Returns:
+//   - (sps bool, pps bool) indicating whether SPS and/or PPS were detected
 func detectParameterSets(payload []byte) (bool, bool) {
 	if len(payload) == 0 {
 		return false, false
@@ -756,6 +733,16 @@ func (r *ParticipantRecorder) requestPLI(writer func(webrtc.SSRC), ssrc webrtc.S
 	writer(ssrc)
 }
 
+// AttachVideoTrack attaches a video track for recording.
+//
+// It spawns a goroutine that:
+//   - Requests keyframes via PLI
+//   - Waits for handshake keyframe (to establish SPS/PPS)
+//   - Waits for recording activation
+//   - Starts pipeline on first recording keyframe
+//   - Pushes RTP packets to GStreamer
+//
+// The pliWriter function is called to request keyframes when needed.
 func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrtc.TrackRemote, pliWriter func(webrtc.SSRC)) {
 	r.wg.Add(1)
 	go func() {
@@ -767,7 +754,6 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 			pliWriter = func(webrtc.SSRC) {}
 		}
 
-		var debugPackets atomic.Int32
 		var handshakeWait, recordingWait int
 		firstPacket := true
 
@@ -803,18 +789,6 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 
 			if len(rtpPacket.Payload) == 0 {
 				continue
-			}
-
-			if debugPackets.Add(1) <= 50 {
-				nalType := rtpPacket.Payload[0] & 0x1F
-				extra := ""
-				if nalType == nalUnitTypeFUA && len(rtpPacket.Payload) > 1 {
-					fuHeader := rtpPacket.Payload[1]
-					startBit := (fuHeader & 0x80) != 0
-					nalType = fuHeader & 0x1F
-					extra = fmt.Sprintf(" FU start=%v", startBit)
-				}
-				log.Printf("[%s] video RTP packet seq=%d ts=%d nalType=%d%s size=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp, nalType, extra, len(rtpPacket.Payload))
 			}
 
 			if sps, pps := detectParameterSets(rtpPacket.Payload); sps || pps {
@@ -923,13 +897,16 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 	}()
 }
 
+// AttachAudioTrack attaches an audio track for recording.
+//
+// Audio packets are only pushed to GStreamer after recording is activated
+// and the pipeline has started (triggered by the first video keyframe).
 func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrtc.TrackRemote) {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
 		log.Printf("[%s] audio track subscribed (sid=%s, codec=%s, payloadType=%d)",
 			r.logPrefix(), track.ID(), track.Codec().MimeType, track.PayloadType())
-		var audioDebug atomic.Int32
 		for {
 			select {
 			case <-ctx.Done():
@@ -964,10 +941,6 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 			}
 			r.mu.Unlock()
 
-			if audioDebug.Add(1) <= 10 {
-				log.Printf("[%s] audio RTP packet seq=%d ts=%d size=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp, len(rtpPacket.Payload))
-			}
-
 			data, err := rtpPacket.Marshal()
 			if err != nil {
 				log.Printf("[%s] marshal audio RTP failed: %v", r.logPrefix(), err)
@@ -992,6 +965,8 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 	}()
 }
 
+// VideoStreamEnded signals that the video stream has ended.
+// Sends EOS to the video appsrc element.
 func (r *ParticipantRecorder) VideoStreamEnded() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1004,6 +979,8 @@ func (r *ParticipantRecorder) VideoStreamEnded() {
 	}
 }
 
+// AudioStreamEnded signals that the audio stream has ended.
+// Sends EOS to the audio appsrc element.
 func (r *ParticipantRecorder) AudioStreamEnded() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1016,6 +993,11 @@ func (r *ParticipantRecorder) AudioStreamEnded() {
 	}
 }
 
+// Stop stops the recorder and waits for all goroutines to complete.
+//
+// It sends EOS to both audio and video streams, waits for the GStreamer
+// pipeline to process the EOS event, and then sets the pipeline to NULL state.
+// Logs detailed statistics about the recording session.
 func (r *ParticipantRecorder) Stop() {
 	r.stopOnce.Do(func() {
 		log.Printf("[%s] stopping recorder", r.logPrefix())
@@ -1027,53 +1009,6 @@ func (r *ParticipantRecorder) Stop() {
 			if bus := r.pipeline.GetBus(); bus != nil {
 				bus.TimedPopFiltered(gst.ClockTime(5*1_000_000_000), gst.MessageEOS|gst.MessageError)
 			}
-
-			if cf, err := r.pipeline.GetElementByName("capsfilter2"); err == nil && cf != nil {
-				if pad := cf.GetStaticPad("sink"); pad != nil {
-					log.Printf("[%s] capsfilter2 sink caps: %v", r.logPrefix(), pad.CurrentCaps())
-				}
-				if pad := cf.GetStaticPad("src"); pad != nil {
-					log.Printf("[%s] capsfilter2 src caps: %v", r.logPrefix(), pad.CurrentCaps())
-				}
-			}
-
-			if queueElem, err := r.pipeline.GetElementByName("queue2"); err == nil && queueElem != nil {
-				if pad := queueElem.GetStaticPad("sink"); pad != nil {
-					log.Printf("[%s] queue2 sink caps: %v", r.logPrefix(), pad.CurrentCaps())
-				}
-				if pad := queueElem.GetStaticPad("src"); pad != nil {
-					log.Printf("[%s] queue2 src caps: %v", r.logPrefix(), pad.CurrentCaps())
-				}
-			}
-
-			if cf, err := r.pipeline.GetElementByName("capsfilter3"); err == nil && cf != nil {
-				if pad := cf.GetStaticPad("sink"); pad != nil {
-					log.Printf("[%s] capsfilter3 sink caps: %v", r.logPrefix(), pad.CurrentCaps())
-				}
-				if pad := cf.GetStaticPad("src"); pad != nil {
-					log.Printf("[%s] capsfilter3 src caps: %v", r.logPrefix(), pad.CurrentCaps())
-				}
-			}
-
-			if muxElem, err := r.pipeline.GetElementByName("mux"); err != nil {
-				log.Printf("[%s] failed to get mux element: %v", r.logPrefix(), err)
-			} else if muxElem != nil {
-				if pads, padErr := muxElem.GetPads(); padErr == nil {
-					for _, pad := range pads {
-						caps := pad.CurrentCaps()
-						capsStr := "<nil>"
-						if caps != nil {
-							capsStr = caps.String()
-						}
-						log.Printf("[%s] mux pad: %s direction=%s linked=%v caps=%s", r.logPrefix(), pad.GetName(), pad.Direction().String(), pad.IsLinked(), capsStr)
-					}
-				} else {
-					log.Printf("[%s] failed to enumerate mux pads: %v", r.logPrefix(), padErr)
-				}
-			} else {
-				log.Printf("[%s] mux element not found", r.logPrefix())
-			}
-
 			r.pipeline.SetState(gst.StateNull)
 		}
 
@@ -1101,10 +1036,14 @@ func (r *ParticipantRecorder) Stop() {
 	r.wg.Wait()
 }
 
+// OutputDirectory returns the absolute path to the directory containing
+// the recording files (output.ts, playlist.m3u8, segment*.ts).
 func (r *ParticipantRecorder) OutputDirectory() string {
 	return r.outputDir
 }
 
+// Summary returns a summary of the recording session including
+// file size, duration, and packet counts.
 func (r *ParticipantRecorder) Summary() RecordingSummary {
 	summary := RecordingSummary{
 		Participant: r.participant,
