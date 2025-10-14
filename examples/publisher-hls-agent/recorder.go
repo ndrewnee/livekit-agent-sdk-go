@@ -74,6 +74,7 @@ type RecordingSummary struct {
 	Err          error
 	VideoPackets int
 	AudioPackets int
+	Remote       string
 }
 
 func NewParticipantRecorder(cfg *Config, roomName, participant string) (*ParticipantRecorder, error) {
@@ -89,42 +90,208 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 
 	gst.Init(nil)
 
-	pipelineStr := fmt.Sprintf(`
-		filesink location=%s/output.ts name=sink
-
-		mpegtsmux name=mux ! sink.
-
-	appsrc name=videosrc format=time is-live=true do-timestamp=true
-		! rtpjitterbuffer latency=200
-		! rtph264depay
-		! h264parse config-interval=1
-		! video/x-h264,stream-format=byte-stream,alignment=au
-		! queue max-size-buffers=0 max-size-time=0 max-size-bytes=0
-		! mux.
-
-	appsrc name=audiosrc format=time is-live=true do-timestamp=true
-		! rtpjitterbuffer latency=200
-		! rtpopusdepay
-		! opusdec
-		! audioconvert
-		! avenc_aac bitrate=128000
-		! aacparse
-		! queue max-size-buffers=0 max-size-time=0 max-size-bytes=0
-		! mux.
-	`, absDir)
-
-	pipeline, err := gst.NewPipelineFromString(pipelineStr)
+	pipeline, err := gst.NewPipeline("participant-recorder")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GStreamer pipeline: %w", err)
 	}
 
-	videoSrcElement, err := pipeline.GetElementByName("videosrc")
+	videoSrc, err := gst.NewElement("appsrc")
 	if err != nil {
-		return nil, fmt.Errorf("failed to get videosrc: %w", err)
+		return nil, fmt.Errorf("failed to create video appsrc: %w", err)
 	}
-	audioSrcElement, err := pipeline.GetElementByName("audiosrc")
+	videoSrc.SetProperty("is-live", true)
+	videoSrc.SetProperty("format", gst.FormatTime)
+	videoSrc.SetProperty("do-timestamp", false)
+	videoSrc.SetProperty("emit-signals", true)
+	videoSrc.SetProperty("block", false)
+	videoSrc.SetProperty("stream-type", 0)
+	videoSrc.SetProperty("max-bytes", uint64(10*1024*1024))
+
+	videoJitter, err := gst.NewElement("rtpjitterbuffer")
 	if err != nil {
-		return nil, fmt.Errorf("failed to get audiosrc: %w", err)
+		return nil, fmt.Errorf("failed to create video jitterbuffer: %w", err)
+	}
+	videoJitter.SetProperty("latency", uint(200))
+
+	videoDepay, err := gst.NewElement("rtph264depay")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create rtph264depay: %w", err)
+	}
+
+	h264parse, err := gst.NewElement("h264parse")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create h264parse: %w", err)
+	}
+	// force SPS/PPS before every keyframe so the resulting HLS segments stay decodable
+	h264parse.SetProperty("disable-passthrough", true)
+	h264parse.SetProperty("config-interval", int32(-1))
+
+	videoCapsFilter, err := gst.NewElement("capsfilter")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create video capsfilter: %w", err)
+	}
+	videoCaps := gst.NewCapsFromString("video/x-h264,stream-format=avc,alignment=au")
+	videoCapsFilter.SetProperty("caps", videoCaps)
+
+	videoQueue, err := gst.NewElement("queue")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create video queue: %w", err)
+	}
+	videoQueue.SetProperty("max-size-buffers", uint(0))
+	videoQueue.SetProperty("max-size-bytes", uint(0))
+	videoQueue.SetProperty("max-size-time", uint64(0))
+
+	audioSrc, err := gst.NewElement("appsrc")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create audio appsrc: %w", err)
+	}
+	audioSrc.SetProperty("is-live", true)
+	audioSrc.SetProperty("format", gst.FormatTime)
+	audioSrc.SetProperty("do-timestamp", false)
+	audioSrc.SetProperty("emit-signals", true)
+	audioSrc.SetProperty("block", false)
+	audioSrc.SetProperty("stream-type", 0)
+	audioSrc.SetProperty("max-bytes", uint64(2*1024*1024))
+
+	audioJitter, err := gst.NewElement("rtpjitterbuffer")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create audio jitterbuffer: %w", err)
+	}
+	audioJitter.SetProperty("latency", uint(200))
+
+	audioDepay, err := gst.NewElement("rtpopusdepay")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create rtpopusdepay: %w", err)
+	}
+
+	opusDec, err := gst.NewElement("opusdec")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create opusdec: %w", err)
+	}
+
+	audioConvert, err := gst.NewElement("audioconvert")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create audioconvert: %w", err)
+	}
+
+	aacEnc, err := gst.NewElement("avenc_aac")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create avenc_aac: %w", err)
+	}
+	aacEnc.SetProperty("bitrate", uint(128000))
+
+	aacParse, err := gst.NewElement("aacparse")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create aacparse: %w", err)
+	}
+
+	audioQueue, err := gst.NewElement("queue")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create audio queue: %w", err)
+	}
+	audioQueue.SetProperty("max-size-buffers", uint(0))
+	audioQueue.SetProperty("max-size-bytes", uint(0))
+	audioQueue.SetProperty("max-size-time", uint64(0))
+
+	mpegtsmux, err := gst.NewElement("mpegtsmux")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create mpegtsmux: %w", err)
+	}
+	mpegtsmux.SetProperty("alignment", int64(7))
+	mpegtsmux.SetProperty("start-time-selection", int64(2))
+	mpegtsmux.SetProperty("start-time", uint64(0))
+
+	muxQueue, err := gst.NewElement("queue")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create mux queue: %w", err)
+	}
+
+	outputTee, err := gst.NewElement("tee")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tee: %w", err)
+	}
+
+	tsQueue, err := gst.NewElement("queue")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ts queue: %w", err)
+	}
+
+	tsSink, err := gst.NewElement("filesink")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create filesink: %w", err)
+	}
+	tsSink.SetProperty("location", filepath.Join(absDir, "output.ts"))
+	tsSink.SetProperty("sync", false)
+	tsSink.SetProperty("async", false)
+
+	hlsQueue, err := gst.NewElement("queue")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create hls queue: %w", err)
+	}
+
+	hlsSink, err := gst.NewElement("hlssink")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create hlssink: %w", err)
+	}
+	hlsSink.SetProperty("location", filepath.Join(absDir, "segment%05d.ts"))
+	hlsSink.SetProperty("playlist-location", filepath.Join(absDir, "playlist.m3u8"))
+	segmentDuration := cfg.SegmentDurationSecs
+	if segmentDuration <= 0 {
+		segmentDuration = 2
+	}
+	hlsSink.SetProperty("target-duration", uint(segmentDuration))
+	hlsSink.SetProperty("max-files", uint(0))
+	hlsSink.SetProperty("playlist-length", uint(0))
+
+	elements := []*gst.Element{
+		videoSrc, videoJitter, videoDepay, h264parse, videoCapsFilter, videoQueue,
+		audioSrc, audioJitter, audioDepay, opusDec, audioConvert, aacEnc, aacParse, audioQueue,
+		mpegtsmux, muxQueue, outputTee,
+		tsQueue, tsSink,
+		hlsQueue, hlsSink,
+	}
+
+	for _, elem := range elements {
+		if err := pipeline.Add(elem); err != nil {
+			return nil, fmt.Errorf("failed to add %s to pipeline: %w", elem.GetName(), err)
+		}
+	}
+
+	if err := gst.ElementLinkMany(videoSrc, videoJitter, videoDepay, h264parse, videoCapsFilter, videoQueue); err != nil {
+		return nil, fmt.Errorf("failed to link video chain: %w", err)
+	}
+	if err := videoQueue.Link(mpegtsmux); err != nil {
+		return nil, fmt.Errorf("failed to link video queue to mux: %w", err)
+	}
+
+	if err := gst.ElementLinkMany(audioSrc, audioJitter, audioDepay, opusDec, audioConvert, aacEnc, aacParse, audioQueue); err != nil {
+		return nil, fmt.Errorf("failed to link audio chain: %w", err)
+	}
+	if err := audioQueue.Link(mpegtsmux); err != nil {
+		return nil, fmt.Errorf("failed to link audio queue to mux: %w", err)
+	}
+
+	if err := gst.ElementLinkMany(mpegtsmux, muxQueue, outputTee); err != nil {
+		return nil, fmt.Errorf("failed to link mux branch: %w", err)
+	}
+
+	if err := gst.ElementLinkMany(tsQueue, tsSink); err != nil {
+		return nil, fmt.Errorf("failed to link ts branch: %w", err)
+	}
+	if err := gst.ElementLinkMany(hlsQueue, hlsSink); err != nil {
+		return nil, fmt.Errorf("failed to link hls branch: %w", err)
+	}
+
+	teePad1 := outputTee.GetRequestPad("src_%u")
+	tsQueueSink := tsQueue.GetStaticPad("sink")
+	if linkRet := teePad1.Link(tsQueueSink); linkRet != gst.PadLinkOK {
+		return nil, fmt.Errorf("failed to link tee to ts queue: %s", linkRet.String())
+	}
+
+	teePad2 := outputTee.GetRequestPad("src_%u")
+	hlsQueueSink := hlsQueue.GetStaticPad("sink")
+	if linkRet := teePad2.Link(hlsQueueSink); linkRet != gst.PadLinkOK {
+		return nil, fmt.Errorf("failed to link tee to hls queue: %s", linkRet.String())
 	}
 
 	_ = os.Setenv("GST_DEBUG_DUMP_DOT_DIR", absDir)
@@ -134,8 +301,8 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		room:         roomName,
 		outputDir:    absDir,
 		pipeline:     pipeline,
-		videoAppSrc:  app.SrcFromElement(videoSrcElement),
-		audioAppSrc:  app.SrcFromElement(audioSrcElement),
+		videoAppSrc:  app.SrcFromElement(videoSrc),
+		audioAppSrc:  app.SrcFromElement(audioSrc),
 		startTime:    time.Now(),
 		videoReadyCh: make(chan struct{}),
 	}
@@ -146,98 +313,70 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		}
 	}
 
-	parseNames := []string{"h264parse0", "h264parse1", "h264parse"}
-	for _, name := range parseNames {
-		parseElem, err := pipeline.GetElementByName(name)
-		if err != nil || parseElem == nil {
+	if srcPad := h264parse.GetStaticPad("src"); srcPad != nil {
+		var parseLogged atomic.Int32
+		srcPad.AddProbe(gst.PadProbeTypeEventDownstream, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+			event := info.GetEvent()
+			if event != nil && event.Type() == gst.EventTypeCaps {
+				if caps := event.ParseCaps(); caps != nil {
+					log.Printf("[%s] h264parse src caps: %v", recorder.logPrefix(), caps)
+				}
+			}
+			return gst.PadProbeOK
+		})
+		srcPad.AddProbe(gst.PadProbeTypeBuffer, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+			count := parseLogged.Add(1)
+			if count <= 5 {
+				if buffer := info.GetBuffer(); buffer != nil {
+					size, _, _ := buffer.GetSizes()
+					log.Printf("[%s] h264parse buffer size=%d flags=%v", recorder.logPrefix(), size, buffer.GetFlags())
+				}
+			}
+			return gst.PadProbeOK
+		})
+	}
+
+	if srcPad := videoDepay.GetStaticPad("src"); srcPad != nil {
+		var depayLogged atomic.Int32
+		srcPad.AddProbe(gst.PadProbeTypeEventDownstream, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+			event := info.GetEvent()
+			if event != nil && event.Type() == gst.EventTypeCaps {
+				caps := event.ParseCaps()
+				log.Printf("[%s] rtph264depay caps: %v", recorder.logPrefix(), caps)
+			}
+			return gst.PadProbeOK
+		})
+		srcPad.AddProbe(gst.PadProbeTypeBuffer, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+			count := depayLogged.Add(1)
+			if count <= 5 {
+				if buffer := info.GetBuffer(); buffer != nil {
+					size, _, _ := buffer.GetSizes()
+					log.Printf("[%s] rtph264depay buffer size=%d flags=%v", recorder.logPrefix(), size, buffer.GetFlags())
+				}
+			}
+			return gst.PadProbeOK
+		})
+	}
+
+	if srcPad := videoJitter.GetStaticPad("src"); srcPad != nil {
+		srcPad.AddProbe(gst.PadProbeTypeEventDownstream, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+			event := info.GetEvent()
+			if event != nil && event.Type() == gst.EventTypeCaps {
+				caps := event.ParseCaps()
+				log.Printf("[%s] rtpjitterbuffer caps: %v", recorder.logPrefix(), caps)
+			}
+			return gst.PadProbeOK
+		})
+	}
+
+	for idx, queueElem := range []*gst.Element{videoQueue, audioQueue, tsQueue, hlsQueue} {
+		if queueElem == nil {
 			continue
 		}
-		if srcPad := parseElem.GetStaticPad("src"); srcPad != nil {
-			srcPad.AddProbe(gst.PadProbeTypeEventDownstream, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
-				event := info.GetEvent()
-				if event != nil && event.Type() == gst.EventTypeCaps {
-					caps := event.ParseCaps()
-					log.Printf("[%s] %s caps: %v", recorder.logPrefix(), name, caps)
-				}
-				return gst.PadProbeOK
-			})
+		qName := queueElem.GetName()
+		if qName == "" {
+			qName = fmt.Sprintf("queue%d", idx)
 		}
-	}
-
-	if depayElem, err := pipeline.GetElementByName("rtph264depay0"); err == nil && depayElem != nil {
-		if srcPad := depayElem.GetStaticPad("src"); srcPad != nil {
-			srcPad.AddProbe(gst.PadProbeTypeEventDownstream, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
-				event := info.GetEvent()
-				if event != nil && event.Type() == gst.EventTypeCaps {
-					caps := event.ParseCaps()
-					log.Printf("[%s] rtph264depay produced caps: %v", recorder.logPrefix(), caps)
-				}
-				return gst.PadProbeOK
-			})
-			var depayLogged atomic.Int32
-			srcPad.AddProbe(gst.PadProbeTypeBuffer, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
-				count := depayLogged.Add(1)
-				if count <= 5 {
-					if buffer := info.GetBuffer(); buffer != nil {
-						size, _, _ := buffer.GetSizes()
-						log.Printf("[%s] rtph264depay buffer size=%d flags=%v", recorder.logPrefix(), size, buffer.GetFlags())
-					}
-				}
-				return gst.PadProbeOK
-			})
-		}
-	}
-
-	if parseElem, err := pipeline.GetElementByName("h264parse1"); err == nil && parseElem != nil {
-		if srcPad := parseElem.GetStaticPad("src"); srcPad != nil {
-			log.Printf("[%s] attached h264parse src probes on %s", recorder.logPrefix(), parseElem.GetName())
-			var parseLogged atomic.Int32
-			srcPad.AddProbe(gst.PadProbeTypeEventDownstream, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
-				event := info.GetEvent()
-				if event != nil && event.Type() == gst.EventTypeCaps {
-					if caps := event.ParseCaps(); caps != nil {
-						log.Printf("[%s] h264parse src caps: %v", recorder.logPrefix(), caps)
-					}
-				}
-				return gst.PadProbeOK
-			})
-			srcPad.AddProbe(gst.PadProbeTypeBuffer, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
-				count := parseLogged.Add(1)
-				if count <= 5 {
-					if buffer := info.GetBuffer(); buffer != nil {
-						size, _, _ := buffer.GetSizes()
-						log.Printf("[%s] h264parse buffer size=%d flags=%v", recorder.logPrefix(), size, buffer.GetFlags())
-					}
-				}
-				return gst.PadProbeOK
-			})
-		}
-	} else if err == nil {
-		log.Printf("[%s] h264parse element %v has no src pad", recorder.logPrefix(), parseElem)
-	} else {
-		log.Printf("[%s] failed to get h264parse element: %v", recorder.logPrefix(), err)
-	}
-
-	if jitterElem, err := pipeline.GetElementByName("rtpjitterbuffer0"); err == nil && jitterElem != nil {
-		if srcPad := jitterElem.GetStaticPad("src"); srcPad != nil {
-			srcPad.AddProbe(gst.PadProbeTypeEventDownstream, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
-				event := info.GetEvent()
-				if event != nil && event.Type() == gst.EventTypeCaps {
-					caps := event.ParseCaps()
-					log.Printf("[%s] rtpjitterbuffer produced caps: %v", recorder.logPrefix(), caps)
-				}
-				return gst.PadProbeOK
-			})
-		}
-	}
-
-	queueNames := []string{"queue0", "queue1", "queue2", "queue3"}
-	for _, qName := range queueNames {
-		queueElem, err := pipeline.GetElementByName(qName)
-		if err != nil || queueElem == nil {
-			continue
-		}
-		log.Printf("[%s] found queue element: %s", recorder.logPrefix(), qName)
 		if srcPad := queueElem.GetStaticPad("src"); srcPad != nil {
 			var logged atomic.Int32
 			srcPad.AddProbe(gst.PadProbeTypeBuffer, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {

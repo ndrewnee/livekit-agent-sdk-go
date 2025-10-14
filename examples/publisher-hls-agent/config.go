@@ -17,6 +17,7 @@ type Config struct {
 	SegmentDurationSecs int
 	MaxPlaylistEntries  int
 	AgentName           string
+	S3                  S3Config
 }
 
 func loadConfig() *Config {
@@ -29,6 +30,18 @@ func loadConfig() *Config {
 		SegmentDurationSecs: getEnvInt("HLS_SEGMENT_DURATION", 2),
 		MaxPlaylistEntries:  getEnvInt("HLS_MAX_SEGMENTS", 0),
 		AgentName:           getEnv("AGENT_NAME", "publisher-hls-recorder"),
+		S3: S3Config{
+			Endpoint:       getEnv("S3_ENDPOINT", ""),
+			Bucket:         getEnv("S3_BUCKET", ""),
+			Region:         getEnv("S3_REGION", "us-east-1"),
+			AccessKey:      getEnv("S3_ACCESS_KEY", ""),
+			SecretKey:      getEnv("S3_SECRET_KEY", ""),
+			SessionToken:   getEnv("S3_SESSION_TOKEN", ""),
+			Prefix:         getEnv("S3_PREFIX", ""),
+			UseSSL:         getEnvBool("S3_USE_SSL", false),
+			ForcePathStyle: getEnvBool("S3_FORCE_PATH_STYLE", true),
+			ACL:            getEnv("S3_OBJECT_ACL", ""),
+		},
 	}
 }
 
@@ -72,4 +85,21 @@ func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
 		}
 	}
 	return defaultValue
+}
+
+type S3Config struct {
+	Endpoint       string
+	Bucket         string
+	Region         string
+	AccessKey      string
+	SecretKey      string
+	SessionToken   string
+	Prefix         string
+	UseSSL         bool
+	ForcePathStyle bool
+	ACL            string
+}
+
+func (s S3Config) Enabled() bool {
+	return s.Endpoint != "" && s.Bucket != "" && s.AccessKey != "" && s.SecretKey != ""
 }
