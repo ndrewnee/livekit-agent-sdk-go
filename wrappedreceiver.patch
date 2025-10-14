@@ -1,0 +1,87 @@
+Index: pkg/rtc/wrappedreceiver.go
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/pkg/rtc/wrappedreceiver.go b/pkg/rtc/wrappedreceiver.go
+--- a/pkg/rtc/wrappedreceiver.go	(revision 01337ba7307c312f9e99a89cf9d29d99a73295d5)
++++ b/pkg/rtc/wrappedreceiver.go	(revision 4d2f4f2d43d428f6b49ea6f9d2d220ed604b3508)
+@@ -47,10 +47,11 @@
+ 	lock sync.Mutex
+ 
+ 	sfu.TrackReceiver
+-	params           WrappedReceiverParams
+-	receivers        []sfu.TrackReceiver
+-	codecs           []webrtc.RTPCodecParameters
+-	onReadyCallbacks []func()
++	params            WrappedReceiverParams
++	receivers         []sfu.TrackReceiver
++	codecs            []webrtc.RTPCodecParameters
++	onReadyCallbacks  []func()
++	pendingDownTracks []sfu.TrackSender
+ }
+ 
+ func NewWrappedReceiver(params WrappedReceiverParams) *WrappedReceiver {
+@@ -130,15 +131,62 @@
+ 
+ 	onReadyCallbacks := r.onReadyCallbacks
+ 	r.onReadyCallbacks = nil
++
++	// Process any pending downtracks that were queued before receiver was ready
++	pendingDownTracks := r.pendingDownTracks
++	r.pendingDownTracks = nil
+ 	r.lock.Unlock()
+ 
+ 	for _, f := range onReadyCallbacks {
+ 		trackReceiver.AddOnReady(f)
+ 	}
+ 
++	// Add all pending downtracks now that receiver is ready
++	for _, dt := range pendingDownTracks {
++		r.params.Logger.Infow("[DEBUG WrappedReceiver] Adding queued downtrack",
++			"subscriberID", dt.SubscriberID(),
++			"trackID", r.params.TrackID,
++		)
++		if err := trackReceiver.AddDownTrack(dt); err != nil {
++			r.params.Logger.Errorw("failed to add queued downtrack", err,
++				"subscriberID", dt.SubscriberID(),
++				"trackID", r.params.TrackID,
++			)
++		}
++	}
++
+ 	return
+ }
+ 
++func (r *WrappedReceiver) AddDownTrack(track sfu.TrackSender) error {
++	r.lock.Lock()
++	defer r.lock.Unlock()
++
++	receiverNil := r.TrackReceiver == nil
++	r.params.Logger.Infow("[DEBUG WrappedReceiver] AddDownTrack called",
++		"subscriberID", track.SubscriberID(),
++		"trackID", r.params.TrackID,
++		"receiverIsNil", receiverNil,
++	)
++
++	if r.TrackReceiver != nil {
++		// Receiver is ready, add downtrack directly
++		r.params.Logger.Infow("[DEBUG WrappedReceiver] Receiver ready, adding downtrack directly",
++			"subscriberID", track.SubscriberID(),
++			"trackID", r.params.TrackID,
++		)
++		return r.TrackReceiver.AddDownTrack(track)
++	}
++
++	// Receiver not ready yet, queue the downtrack
++	r.params.Logger.Infow("[DEBUG WrappedReceiver] Queuing downtrack until receiver is ready",
++		"subscriberID", track.SubscriberID(),
++		"trackID", r.params.TrackID,
++	)
++	r.pendingDownTracks = append(r.pendingDownTracks, track)
++	return nil
++}
++
+ func (r *WrappedReceiver) Codecs() []webrtc.RTPCodecParameters {
+ 	return slices.Clone(r.codecs)
+ }

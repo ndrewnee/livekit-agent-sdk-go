@@ -1,0 +1,27 @@
+Index: pkg/sfu/forwarder.go
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/pkg/sfu/forwarder.go b/pkg/sfu/forwarder.go
+--- a/pkg/sfu/forwarder.go	(revision 01337ba7307c312f9e99a89cf9d29d99a73295d5)
++++ b/pkg/sfu/forwarder.go	(revision 4d2f4f2d43d428f6b49ea6f9d2d220ed604b3508)
+@@ -556,7 +556,17 @@
+ 
+ 	f.logger.Debugw("setting max spatial layer", "layer", spatialLayer)
+ 	f.vls.SetMaxSpatial(spatialLayer)
+-	return true, f.vls.GetMax()
++	newMax := f.vls.GetMax()
++	if f.vls.GetTarget().Spatial == buffer.InvalidLayerSpatial {
++		f.logger.Infow("initializing target spatial layer", "layer", newMax.Spatial)
++		f.vls.SetTarget(newMax)
++		if f.vls.GetCurrent().Spatial == buffer.InvalidLayerSpatial {
++			f.logger.Infow("initializing current spatial layer", "layer", newMax.Spatial)
++			f.vls.SetCurrent(newMax)
++		}
++	}
++	f.logger.Infow("updated max spatial layer", "newMax", newMax)
++	return true, newMax
+ }
+ 
+ func (f *Forwarder) SetMaxTemporalLayer(temporalLayer int32) (bool, buffer.VideoLayer) {
