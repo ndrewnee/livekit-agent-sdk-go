@@ -130,7 +130,7 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	if err != nil {
 		return nil, fmt.Errorf("failed to create video capsfilter: %w", err)
 	}
-	videoCaps := gst.NewCapsFromString("video/x-h264,stream-format=avc,alignment=au")
+	videoCaps := gst.NewCapsFromString("video/x-h264,stream-format=byte-stream,alignment=au")
 	videoCapsFilter.SetProperty("caps", videoCaps)
 
 	videoQueue, err := gst.NewElement("queue")
@@ -265,11 +265,29 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		return nil, fmt.Errorf("failed to link audio chain: %w", err)
 	}
 
-	if !videoQueue.Link(mpegtsmux) {
-		return nil, fmt.Errorf("failed to link video queue to mux")
+	// mpegtsmux requires request pads, cannot use ElementLinkMany
+	videoMuxPad := mpegtsmux.GetRequestPad("sink_%d")
+	if videoMuxPad == nil {
+		return nil, fmt.Errorf("failed to get request pad from mpegtsmux for video")
 	}
-	if !audioQueue.Link(mpegtsmux) {
-		return nil, fmt.Errorf("failed to link audio queue to mux")
+	videoQueueSrc := videoQueue.GetStaticPad("src")
+	if videoQueueSrc == nil {
+		return nil, fmt.Errorf("failed to get src pad from video queue")
+	}
+	if linkRet := videoQueueSrc.Link(videoMuxPad); linkRet != gst.PadLinkOK {
+		return nil, fmt.Errorf("failed to link video queue to mux: %s", linkRet.String())
+	}
+
+	audioMuxPad := mpegtsmux.GetRequestPad("sink_%d")
+	if audioMuxPad == nil {
+		return nil, fmt.Errorf("failed to get request pad from mpegtsmux for audio")
+	}
+	audioQueueSrc := audioQueue.GetStaticPad("src")
+	if audioQueueSrc == nil {
+		return nil, fmt.Errorf("failed to get src pad from audio queue")
+	}
+	if linkRet := audioQueueSrc.Link(audioMuxPad); linkRet != gst.PadLinkOK {
+		return nil, fmt.Errorf("failed to link audio queue to mux: %s", linkRet.String())
 	}
 
 	if err := gst.ElementLinkMany(mpegtsmux, muxQueue, outputTee); err != nil {
