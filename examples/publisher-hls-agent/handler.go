@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/am-sokolov/livekit-agent-sdk-go/pkg/agent"
 	"github.com/livekit/protocol/livekit"
@@ -109,7 +110,21 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 		recorder.Stop()
 		h.removeSession(jobCtx.Job.Id)
 		if started {
-			h.addSummary(recorder.Summary())
+			summary := recorder.Summary()
+			if h.cfg.S3.Enabled() {
+				ctx, uploadCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer uploadCancel()
+				if remote, err := uploadRecordingToS3(ctx, h.cfg.S3, roomName, participantIdentity, recorder.OutputDirectory()); err != nil {
+					log.Printf("[%s/%s] failed to upload recording to S3: %v", roomName, participantIdentity, err)
+					if summary.Err == nil {
+						summary.Err = err
+					}
+				} else {
+					summary.Remote = remote
+					log.Printf("[%s/%s] uploaded recording to %s", roomName, participantIdentity, remote)
+				}
+			}
+			h.addSummary(summary)
 		}
 	}()
 
@@ -279,14 +294,14 @@ func (h *PublisherHLSHandler) PrintSummary() {
 			log.Printf("• %s in room %s → error: %v", summary.Participant, summary.Room, summary.Err)
 			continue
 		}
-		log.Printf("• %s in room %s → file %s (%.2f MB), captured for %.1fs, packets video=%d audio=%d",
-			summary.Participant,
-			summary.Room,
-			summary.OutputFile,
-			float64(summary.SizeBytes)/1_000_000,
-			summary.Duration.Seconds(),
-			summary.VideoPackets,
-			summary.AudioPackets)
+		logLine := fmt.Sprintf("• %s in room %s → file %s (%.2f MB), captured for %.1fs, packets video=%d audio=%d",
+			summary.Participant, summary.Room, summary.OutputFile,
+			float64(summary.SizeBytes)/1_000_000, summary.Duration.Seconds(),
+			summary.VideoPackets, summary.AudioPackets)
+		if summary.Remote != "" {
+			logLine = logLine + fmt.Sprintf(" uploaded to %s", summary.Remote)
+		}
+		log.Println(logLine)
 	}
 }
 
