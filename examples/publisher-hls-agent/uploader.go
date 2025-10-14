@@ -14,6 +14,31 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
+// uploadRecordingToS3 uploads all files from the recording directory to S3-compatible storage.
+//
+// This function:
+//  1. Creates a MinIO client with the provided credentials
+//  2. Ensures the target bucket exists (creates if missing)
+//  3. Walks the recording directory recursively
+//  4. Uploads each file with appropriate Content-Type headers:
+//     - .m3u8 files: application/vnd.apple.mpegurl
+//     - .ts files: video/MP2T
+//     - Other files: detected via MIME type or application/octet-stream
+//  5. Preserves directory structure under s3://{bucket}/{prefix}/{room}/{participant}/
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeout (2-minute overall timeout applied)
+//   - cfg: S3 configuration including endpoint, bucket, credentials, and options
+//   - room: LiveKit room name (used in S3 path)
+//   - participant: Participant identity (used in S3 path)
+//   - dir: Local directory containing recording files (output.ts, playlist.m3u8, segments)
+//
+// Returns:
+//   - string: S3 base URL (s3://{bucket}/{prefix}/{room}/{participant}) if upload succeeds
+//   - error: Upload error, or nil if cfg.Enabled() is false
+//
+// The function respects cfg.ACL to set object ACLs (e.g., "public-read").
+// Each individual file upload has a 30-second timeout.
 func uploadRecordingToS3(ctx context.Context, cfg S3Config, room, participant, dir string) (string, error) {
 	if !cfg.Enabled() {
 		return "", nil

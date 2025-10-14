@@ -13,6 +13,32 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
+// PublisherHLSHandler handles LiveKit JT_PUBLISHER jobs for HLS recording.
+//
+// It implements the agent.Handler interface and manages recording sessions
+// for target participants. Each session creates a GStreamer pipeline that
+// generates HLS playlists and segments from RTP media streams.
+//
+// The handler supports:
+//   - Auto-activation: Automatically start recording when tracks are ready
+//   - Manual control: Programmatic recording activation via ActivateRecording
+//   - Multi-session: Handle multiple concurrent recording jobs
+//   - S3 upload: Optional upload of completed recordings to S3
+//
+// Example usage:
+//
+//	cfg := loadConfig()
+//	handler := NewPublisherHLSHandler(cfg)
+//
+//	// Wait for first track subscription
+//	if err := handler.WaitReady(ctx); err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	// Manually activate recording if AUTO_ACTIVATE_RECORDING=false
+//	if err := handler.ActivateRecording("participant-identity"); err != nil {
+//	    log.Fatal(err)
+//	}
 type PublisherHLSHandler struct {
 	agent.BaseHandler
 	cfg *Config
@@ -25,6 +51,11 @@ type PublisherHLSHandler struct {
 	readyCh             chan struct{}
 }
 
+// WaitReady blocks until the handler has successfully subscribed to at least one track,
+// or until the context is cancelled. This is useful for synchronizing recording
+// activation in manual mode.
+//
+// Returns nil when ready, or ctx.Err() if the context is cancelled.
 func (h *PublisherHLSHandler) WaitReady(ctx context.Context) error {
 	select {
 	case <-h.readyCh:
@@ -43,6 +74,10 @@ type recordingSession struct {
 	activated   bool
 }
 
+// NewPublisherHLSHandler creates a new handler for JT_PUBLISHER jobs.
+//
+// The handler will use the provided configuration for all recording sessions,
+// including output directory, S3 upload settings, and auto-activation behavior.
 func NewPublisherHLSHandler(cfg *Config) *PublisherHLSHandler {
 	return &PublisherHLSHandler{
 		cfg:                 cfg,
@@ -279,6 +314,8 @@ func (h *PublisherHLSHandler) OnJobTerminated(ctx context.Context, jobID string)
 	session.cancel()
 }
 
+// PrintSummary logs a summary of all completed recordings in this session.
+// Called on shutdown to provide recording statistics.
 func (h *PublisherHLSHandler) PrintSummary() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -342,6 +379,12 @@ func (h *PublisherHLSHandler) notifyReady() {
 	})
 }
 
+// ActivateRecording manually activates recording for the specified participant.
+//
+// This is used when AUTO_ACTIVATE_RECORDING=false to programmatically control
+// when recording begins. Recording will start at the next keyframe after activation.
+//
+// Returns an error if no active session exists for the participant.
 func (h *PublisherHLSHandler) ActivateRecording(participant string) error {
 	session, ok := h.getSessionByParticipant(participant)
 	if !ok {

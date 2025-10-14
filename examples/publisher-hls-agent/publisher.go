@@ -13,6 +13,19 @@ import (
 )
 
 // GStreamerPublisher streams an MP4 file into LiveKit local tracks.
+//
+// This publisher reads an MP4 file containing H.264 video and Opus audio,
+// demuxes it with qtdemux, parses the streams, and writes samples to LiveKit
+// local tracks for transmission. It's primarily used for testing the HLS recorder
+// with known media content.
+//
+// The GStreamer pipeline:
+//
+//	filesrc → qtdemux → video: h264parse → appsink (H.264 byte-stream)
+//	                  → audio: opusparse → appsink (Opus)
+//
+// Video samples are tagged with keyframe metadata to help downstream recorders
+// identify I-frames for proper HLS segmentation.
 type GStreamerPublisher struct {
 	pipeline   *gst.Pipeline
 	videoTrack *lksdk.LocalTrack
@@ -23,6 +36,18 @@ type GStreamerPublisher struct {
 	audioTotal time.Duration
 }
 
+// NewGStreamerPublisher creates a new GStreamer-based publisher for the given MP4 file.
+//
+// The publisher demuxes the MP4 file and configures appsinks to pull H.264 video
+// and Opus audio samples, which are then written to the provided LiveKit local tracks.
+//
+// Parameters:
+//   - filePath: Path to MP4 file containing H.264 video and Opus audio
+//   - videoTrack: LiveKit local video track to publish H.264 samples
+//   - audioTrack: LiveKit local audio track to publish Opus samples
+//
+// Returns a configured GStreamerPublisher ready to Start(), or an error if
+// pipeline creation fails.
 func NewGStreamerPublisher(filePath string, videoTrack, audioTrack *lksdk.LocalTrack) (*GStreamerPublisher, error) {
 	gst.Init(nil)
 
@@ -144,10 +169,15 @@ func NewGStreamerPublisher(filePath string, videoTrack, audioTrack *lksdk.LocalT
 	return p, nil
 }
 
+// Start begins playing the MP4 file and streaming samples to LiveKit tracks.
+// The GStreamer pipeline transitions to the PLAYING state.
 func (p *GStreamerPublisher) Start() error {
 	return p.pipeline.SetState(gst.StatePlaying)
 }
 
+// Stop halts the publisher and stops writing samples to LiveKit tracks.
+// The pipeline transitions to the NULL state. Total video and audio
+// durations are logged.
 func (p *GStreamerPublisher) Stop() {
 	p.mu.Lock()
 	p.stopped = true
@@ -158,6 +188,11 @@ func (p *GStreamerPublisher) Stop() {
 	p.mu.Unlock()
 }
 
+// Restart seeks the pipeline back to the beginning and resumes playback.
+// This allows re-publishing the same MP4 file without recreating the pipeline.
+// Video and audio duration counters are reset to zero.
+//
+// Returns an error if the pipeline cannot be paused, seeked, or resumed.
 func (p *GStreamerPublisher) Restart() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -182,6 +217,10 @@ func (p *GStreamerPublisher) Restart() error {
 	return nil
 }
 
+// Wait blocks until the pipeline reaches EOS (end of stream) or encounters an error.
+// This is useful for synchronizing with the completion of file playback.
+//
+// Returns nil on EOS, or the pipeline error if one occurs.
 func (p *GStreamerPublisher) Wait() error {
 	bus := p.pipeline.GetBus()
 	for {
