@@ -218,7 +218,7 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		return nil, fmt.Errorf("failed to create mpegtsmux: %w", err)
 	}
 	mpegtsmux.SetProperty("alignment", int64(7))
-	mpegtsmux.SetProperty("start-time-selection", int64(2))
+	mpegtsmux.SetProperty("start-time-selection", int64(1)) // Use first buffer PTS
 	mpegtsmux.SetProperty("start-time", uint64(0))
 
 	muxQueue, err := gst.NewElement("queue")

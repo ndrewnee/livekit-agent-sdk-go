@@ -351,11 +351,30 @@ func validateRecordingOutput(t *testing.T, outputFile, referenceVideo string) er
 		t.Logf("ffmpeg HLS conversion output: %s", ffmpegOutput)
 	}
 
-	segments, durationSum, err := inspectPlaylist(playlistPath)
+	segments, durations, durationSum, err := inspectPlaylist(playlistPath)
 	if err != nil {
 		return err
 	}
-	t.Logf("playlist %s segments=%d durationSum=%.3fs", playlistPath, len(segments), durationSum)
+	maxSegmentDuration := 0.0
+	for idx, segment := range segments {
+		if idx >= len(durations) {
+			break
+		}
+		segmentDuration := durations[idx]
+		if math.IsNaN(segmentDuration) {
+			continue
+		}
+		if segmentDuration > maxSegmentDuration {
+			maxSegmentDuration = segmentDuration
+		}
+		if segmentDuration > 10 {
+			return fmt.Errorf("segment %s has unreasonable duration %.3fs", segment, segmentDuration)
+		}
+	}
+	if durationSum > 600 {
+		return fmt.Errorf("playlist durationSum=%.3fs exceeds expected bounds", durationSum)
+	}
+	t.Logf("playlist %s segments=%d durationSum=%.3fs maxSegment=%.3fs", playlistPath, len(segments), durationSum, maxSegmentDuration)
 	if len(segments) == 0 {
 		return fmt.Errorf("no HLS segments generated")
 	}
@@ -522,29 +541,37 @@ func createHLSSegments(tsFile, playlistPath, segmentPattern string) (string, err
 	return string(output), nil
 }
 
-func inspectPlaylist(playlistPath string) ([]string, float64, error) {
+func inspectPlaylist(playlistPath string) ([]string, []float64, float64, error) {
 	data, err := os.ReadFile(playlistPath)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to read playlist: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to read playlist: %w", err)
 	}
 
 	lines := strings.Split(string(data), "\n")
 	var segments []string
+	var durations []float64
 	var durationSum float64
 	for _, line := range lines {
-		if strings.HasPrefix(line, "#EXTINF:") {
-			info := strings.TrimPrefix(line, "#EXTINF:")
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#EXTINF:") {
+			info := strings.TrimPrefix(trimmed, "#EXTINF:")
 			if comma := strings.IndexByte(info, ','); comma >= 0 {
 				info = info[:comma]
 			}
 			if value, err := strconv.ParseFloat(strings.TrimSpace(info), 64); err == nil {
 				durationSum += value
+				durations = append(durations, value)
+			} else {
+				durations = append(durations, math.NaN())
 			}
-		} else if strings.HasSuffix(strings.TrimSpace(line), ".ts") {
-			segments = append(segments, strings.TrimSpace(line))
+		} else if strings.HasSuffix(trimmed, ".ts") && !strings.HasPrefix(trimmed, "#") {
+			segments = append(segments, trimmed)
+			if len(durations) < len(segments) {
+				durations = append(durations, math.NaN())
+			}
 		}
 	}
-	return segments, durationSum, nil
+	return segments, durations, durationSum, nil
 }
 
 func ffprobeStreams(input string) (map[string]bool, error) {
