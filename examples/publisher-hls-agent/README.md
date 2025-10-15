@@ -72,6 +72,22 @@ The Publisher HLS Agent is a specialized LiveKit agent that:
 
 ## Requirements
 
+### LiveKit Server
+
+**IMPORTANT**: This agent requires a patched LiveKit server with critical fixes for manual subscription and explicit video quality requests. The standard LiveKit server has bugs that prevent reliable video packet forwarding to recording agents.
+
+**Use the patched fork**:
+```bash
+git clone https://github.com/am-sokolov/livekit.git
+cd livekit
+git checkout agent-recording-fixes
+go build -o livekit-server ./cmd/server
+```
+
+**Why patches are needed**: See [../../LIVEKIT_ISSUES.md](../../LIVEKIT_ISSUES.md) for detailed technical analysis of the three server bugs affecting agent recording.
+
+**Upstream status**: These fixes have been submitted to the LiveKit maintainers for review. Once merged upstream, the standard LiveKit server can be used.
+
 ### System Dependencies
 
 - **Go 1.21+**

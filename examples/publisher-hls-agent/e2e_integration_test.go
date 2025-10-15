@@ -5,12 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -82,6 +84,7 @@ func TestPublisherHLSAgentUploadsToS3(t *testing.T) {
 			"S3_FORCE_PATH_STYLE":     "true",
 			"S3_USE_SSL":              "false",
 			"S3_PREFIX":               "publisher-tests",
+			"S3_OBJECT_ACL":           "public-read",
 			"AUTO_ACTIVATE_RECORDING": "true",
 		},
 	}
@@ -137,11 +140,14 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	t.Helper()
 
 	repoRoot := findRepoRoot(t)
-	serverBinary := filepath.Join(repoRoot, "livekit", "livekit-server")
+	//serverBinary := filepath.Join(repoRoot, "livekit", "livekit-server")
+	serverBinary, err := exec.LookPath("livekit-server")
+	if err != nil {
+		t.Fatalf("livekit-server not found in PATH: %v", err)
+	}
 	configPath := filepath.Join(repoRoot, "examples", "livekit-server-dev.yaml")
 	testVideo := filepath.Join(repoRoot, "examples", "publisher-hls-agent", "test", "test.mp4")
 
-	requireFileExists(t, serverBinary)
 	requireFileExists(t, testVideo)
 
 	agentName := scenario.agentName
@@ -172,7 +178,12 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		t.Fatalf("failed to create output dir: %v", err)
 	}
+	keepOutputs := os.Getenv("PUBLISHER_HLS_KEEP_MINIO") == "1"
 	t.Cleanup(func() {
+		if keepOutputs {
+			t.Logf("PUBLISHER_HLS_KEEP_MINIO=1 set; preserving output dir: %s", outputDir)
+			return
+		}
 		if !t.Failed() {
 			_ = os.RemoveAll(outputDir)
 		} else {
@@ -433,10 +444,12 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 		}
 		t.Log("observed S3 upload completion log")
 		t.Logf("validating S3 recording at s3://%s/%s", s3Bucket, remotePrefix)
-		if err := validateS3Recording(t, s3Client, s3Bucket, remotePrefix, testVideo); err != nil {
+		if err := validateS3Recording(t, s3Client, s3Bucket, remotePrefix, testVideo, outputDir); err != nil {
 			t.Fatalf("S3 validation failed: %v", err)
 		}
 		t.Logf("S3 validation succeeded for %s", remotePrefix)
+		playlistURL := fmt.Sprintf("http://%s/%s/%s/playlist.m3u8", ms.Endpoint, s3Bucket, remotePrefix)
+		t.Logf("S3 playlist URL: %s", playlistURL)
 	}
 
 	if participantRoom != nil {
@@ -694,7 +707,7 @@ func mustGetFreePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-func validateS3Recording(t *testing.T, client *minio.Client, bucket, prefix, referenceVideo string) error {
+func validateS3Recording(t *testing.T, client *minio.Client, bucket, prefix, referenceVideo, artifactDir string) error {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -741,23 +754,182 @@ func validateS3Recording(t *testing.T, client *minio.Client, bucket, prefix, ref
 	}
 	t.Logf("downloaded output.ts to %s", localOutput)
 
-	segments, _, err := inspectPlaylist(localPlaylist)
+	segments, _, _, err := inspectPlaylist(localPlaylist)
 	if err != nil {
 		return fmt.Errorf("inspect playlist: %w", err)
 	}
+	localSegments := make(map[string]string, len(segments))
 	for _, segment := range segments {
 		objectName := path.Join(prefix, segment)
 		if err := wait(objectName); err != nil {
 			return err
 		}
-		if err := client.FGetObject(ctx, bucket, objectName, filepath.Join(tempDir, segment), minio.GetObjectOptions{}); err != nil {
+		localPath := filepath.Join(tempDir, segment)
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			return fmt.Errorf("create segment dir for %s: %w", segment, err)
+		}
+		if err := client.FGetObject(ctx, bucket, objectName, localPath, minio.GetObjectOptions{}); err != nil {
 			return fmt.Errorf("download segment %s: %w", segment, err)
 		}
+		localSegments[segment] = localPath
 	}
 	t.Logf("downloaded %d HLS segments for validation", len(segments))
+
+	updated, err := normalizePlaylistDurations(localPlaylist, localSegments)
+	if err != nil {
+		return fmt.Errorf("normalize playlist: %w", err)
+	}
+	if updated {
+		t.Logf("normalized playlist durations for %s", playlistObj)
+		if _, err := client.FPutObject(ctx, bucket, playlistObj, localPlaylist, minio.PutObjectOptions{
+			ContentType: "application/vnd.apple.mpegurl",
+		}); err != nil {
+			return fmt.Errorf("upload normalized playlist: %w", err)
+		}
+		t.Logf("re-uploaded sanitized playlist to S3 at %s", playlistObj)
+	}
+
+	if artifactDir != "" && os.Getenv("PUBLISHER_HLS_KEEP_MINIO") == "1" {
+		trimmedPrefix := strings.Trim(prefix, "/")
+		debugDir := filepath.Join(artifactDir, "sanitized-playlists", filepath.FromSlash(trimmedPrefix))
+		if err := os.MkdirAll(debugDir, 0o755); err != nil {
+			t.Logf("failed to create sanitized playlist directory %s: %v", debugDir, err)
+		} else {
+			debugPlaylist := filepath.Join(debugDir, "playlist.m3u8")
+			if err := copyFile(localPlaylist, debugPlaylist); err != nil {
+				t.Logf("failed to copy sanitized playlist to %s: %v", debugPlaylist, err)
+			} else {
+				t.Logf("saved sanitized playlist copy to %s", debugPlaylist)
+			}
+		}
+	}
 
 	if err := validateRecordingOutput(t, localOutput, referenceVideo); err != nil {
 		return err
 	}
 	return nil
+}
+
+func normalizePlaylistDurations(playlistPath string, segmentPaths map[string]string) (bool, error) {
+	data, err := os.ReadFile(playlistPath)
+	if err != nil {
+		return false, fmt.Errorf("read playlist for normalization: %w", err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	changed := false
+	maxDuration := 0.0
+
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(line, "#EXTINF:") {
+			continue
+		}
+
+		if i+1 >= len(lines) {
+			continue
+		}
+		segmentLine := strings.TrimSpace(lines[i+1])
+		if segmentLine == "" || strings.HasPrefix(segmentLine, "#") {
+			continue
+		}
+
+		segmentPath, ok := segmentPaths[segmentLine]
+		if !ok {
+			segmentPath = filepath.Join(filepath.Dir(playlistPath), segmentLine)
+		}
+		actualDuration, err := ffprobeSegmentDuration(segmentPath)
+		if err != nil {
+			return false, err
+		}
+		normalized := sanitizeSegmentDuration(actualDuration)
+		if normalized < 0 {
+			normalized = 0
+		}
+		if normalized > maxDuration {
+			maxDuration = normalized
+		}
+		formatted := fmt.Sprintf("#EXTINF:%.3f,", normalized)
+		if line != formatted {
+			lines[i] = formatted
+			changed = true
+		}
+	}
+
+	if maxDuration > 0 {
+		target := int(math.Ceil(maxDuration))
+		if target < 1 {
+			target = 1
+		}
+		targetLine := fmt.Sprintf("#EXT-X-TARGETDURATION:%d", target)
+		targetUpdated := false
+		for i, raw := range lines {
+			if strings.HasPrefix(strings.TrimSpace(raw), "#EXT-X-TARGETDURATION:") {
+				targetUpdated = true
+				if strings.TrimSpace(raw) != targetLine {
+					lines[i] = targetLine
+					changed = true
+				}
+				break
+			}
+		}
+		if !targetUpdated {
+			insertIdx := 1
+			for i, raw := range lines {
+				if strings.HasPrefix(strings.TrimSpace(raw), "#EXTM3U") {
+					insertIdx = i + 1
+					break
+				}
+			}
+			lines = append(lines[:insertIdx], append([]string{targetLine}, lines[insertIdx:]...)...)
+			changed = true
+		}
+	}
+
+	if !changed {
+		return false, nil
+	}
+
+	if err := os.WriteFile(playlistPath, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		return false, fmt.Errorf("write normalized playlist: %w", err)
+	}
+	return true, nil
+}
+
+func ffprobeSegmentDuration(path string) (float64, error) {
+	cmd := exec.Command("ffprobe",
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=nokey=1:noprint_wrappers=1",
+		path,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("ffprobe duration for %s: %w (output: %s)", path, err, strings.TrimSpace(string(output)))
+	}
+	text := strings.TrimSpace(string(output))
+	if text == "" {
+		return 0, fmt.Errorf("ffprobe returned empty duration for %s", path)
+	}
+	value, err := strconv.ParseFloat(text, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse duration for %s: %w (value: %s)", path, err, text)
+	}
+	return value, nil
+}
+
+func sanitizeSegmentDuration(duration float64) float64 {
+	if math.IsNaN(duration) || math.IsInf(duration, 0) {
+		return 0
+	}
+	if duration < 0 {
+		duration = 0
+	}
+	if duration < 0.01 {
+		duration = 0.01
+	}
+	if duration > 60 {
+		duration = 60
+	}
+	return math.Round(duration*1000) / 1000
 }

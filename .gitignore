@@ -62,3 +62,5 @@ examples/transcription-agent/transcription-agent
 /livekit/
 /examples/publisher-hls-agent/output/
 /examples/publisher-hls-agent/hls-agent-recordings/
+/examples/publisher-hls-agent/hls-agent-recordings-local-output/
+/examples/publisher-hls-agent/hls-agent-recordings-s3-upload/
