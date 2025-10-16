@@ -97,14 +97,6 @@ func NewGStreamerPublisher(filePath string, videoTrack, audioTrack *lksdk.LocalT
 				flags := buffer.GetFlags()
 				isKeyFrame := (flags & gst.BufferFlagDeltaUnit) == 0
 
-				if isKeyFrame && len(data) > 0 {
-					preview := len(data)
-					if preview > 16 {
-						preview = 16
-					}
-					log.Printf("keyframe sample first bytes: % x", data[:preview])
-				}
-
 				sample := media.Sample{
 					Data:     append([]byte{}, data...),
 					Duration: duration,
