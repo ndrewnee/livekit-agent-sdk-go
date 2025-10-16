@@ -22,7 +22,7 @@ import (
 //
 // It creates a GStreamer pipeline that:
 //   - Receives RTP packets (H.264 video, Opus audio)
-//   - Transcodes audio to AAC
+//   - Optionally transcodes audio to AAC (or keeps Opus)
 //   - Muxes to MPEG-TS format
 //   - Generates HLS playlists and segments via hlssink
 //
@@ -32,6 +32,7 @@ type ParticipantRecorder struct {
 	participant string
 	room        string
 	outputDir   string
+	keepOpus    bool
 
 	pipeline    *gst.Pipeline
 	videoAppSrc *app.Source
@@ -132,6 +133,7 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		return nil, fmt.Errorf("failed to create video jitterbuffer: %w", err)
 	}
 	videoJitter.SetProperty("latency", uint(200))
+	videoJitter.SetProperty("mode", int(1)) // RTP_JITTER_BUFFER_MODE_NONE - don't try to resync timestamps
 
 	videoDepay, err := gst.NewElement("rtph264depay")
 	if err != nil {
@@ -178,31 +180,43 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		return nil, fmt.Errorf("failed to create audio jitterbuffer: %w", err)
 	}
 	audioJitter.SetProperty("latency", uint(200))
+	audioJitter.SetProperty("mode", int(1)) // RTP_JITTER_BUFFER_MODE_NONE - don't try to resync timestamps
 
 	audioDepay, err := gst.NewElement("rtpopusdepay")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create rtpopusdepay: %w", err)
 	}
 
-	opusDec, err := gst.NewElement("opusdec")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create opusdec: %w", err)
-	}
+	// Audio processing pipeline depends on KeepOpus configuration
+	var opusDec, audioConvert, aacEnc, aacParse, opusParse *gst.Element
+	if cfg.KeepOpus {
+		// Keep Opus without transcoding
+		opusParse, err = gst.NewElement("opusparse")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create opusparse: %w", err)
+		}
+	} else {
+		// Transcode Opus to AAC
+		opusDec, err = gst.NewElement("opusdec")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create opusdec: %w", err)
+		}
 
-	audioConvert, err := gst.NewElement("audioconvert")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create audioconvert: %w", err)
-	}
+		audioConvert, err = gst.NewElement("audioconvert")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create audioconvert: %w", err)
+		}
 
-	aacEnc, err := gst.NewElement("avenc_aac")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create avenc_aac: %w", err)
-	}
-	aacEnc.SetProperty("bitrate", uint(128000))
+		aacEnc, err = gst.NewElement("avenc_aac")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create avenc_aac: %w", err)
+		}
+		aacEnc.SetProperty("bitrate", uint(128000))
 
-	aacParse, err := gst.NewElement("aacparse")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create aacparse: %w", err)
+		aacParse, err = gst.NewElement("aacparse")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create aacparse: %w", err)
+		}
 	}
 
 	audioQueue, err := gst.NewElement("queue")
@@ -218,8 +232,8 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		return nil, fmt.Errorf("failed to create mpegtsmux: %w", err)
 	}
 	mpegtsmux.SetProperty("alignment", int64(7))
-	mpegtsmux.SetProperty("start-time-selection", int64(1)) // Use first buffer PTS
-	mpegtsmux.SetProperty("start-time", uint64(0))
+	mpegtsmux.SetProperty("start-time-selection", int64(2)) // 2 = set (use explicit start-time value)
+	mpegtsmux.SetProperty("start-time", uint64(0))          // Start from timestamp 0
 
 	muxQueue, err := gst.NewElement("queue")
 	if err != nil {
@@ -263,13 +277,22 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	hlsSink.SetProperty("max-files", uint(0))
 	hlsSink.SetProperty("playlist-length", uint(0))
 
+	// Build elements list based on audio codec configuration
 	elements := []*gst.Element{
 		videoSrc, videoJitter, videoDepay, h264parse, videoCapsFilter, videoQueue,
-		audioSrc, audioJitter, audioDepay, opusDec, audioConvert, aacEnc, aacParse, audioQueue,
+		audioSrc, audioJitter, audioDepay,
+	}
+	if cfg.KeepOpus {
+		elements = append(elements, opusParse)
+	} else {
+		elements = append(elements, opusDec, audioConvert, aacEnc, aacParse)
+	}
+	elements = append(elements,
+		audioQueue,
 		mpegtsmux, muxQueue, outputTee,
 		tsQueue, tsSink,
 		hlsQueue, hlsSink,
-	}
+	)
 
 	for _, elem := range elements {
 		if err := pipeline.Add(elem); err != nil {
@@ -281,8 +304,15 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		return nil, fmt.Errorf("failed to link video chain: %w", err)
 	}
 
-	if err := gst.ElementLinkMany(audioSrc, audioJitter, audioDepay, opusDec, audioConvert, aacEnc, aacParse, audioQueue); err != nil {
-		return nil, fmt.Errorf("failed to link audio chain: %w", err)
+	// Link audio pipeline based on codec configuration
+	if cfg.KeepOpus {
+		if err := gst.ElementLinkMany(audioSrc, audioJitter, audioDepay, opusParse, audioQueue); err != nil {
+			return nil, fmt.Errorf("failed to link audio chain (opus): %w", err)
+		}
+	} else {
+		if err := gst.ElementLinkMany(audioSrc, audioJitter, audioDepay, opusDec, audioConvert, aacEnc, aacParse, audioQueue); err != nil {
+			return nil, fmt.Errorf("failed to link audio chain (aac): %w", err)
+		}
 	}
 
 	// mpegtsmux requires request pads, cannot use ElementLinkMany
@@ -339,12 +369,19 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		participant:  participant,
 		room:         roomName,
 		outputDir:    absDir,
+		keepOpus:     cfg.KeepOpus,
 		pipeline:     pipeline,
 		videoAppSrc:  app.SrcFromElement(videoSrc),
 		audioAppSrc:  app.SrcFromElement(audioSrc),
 		startTime:    time.Now(),
 		videoReadyCh: make(chan struct{}),
 	}
+
+	audioCodec := "AAC"
+	if cfg.KeepOpus {
+		audioCodec = "Opus"
+	}
+	log.Printf("[%s/%s] recorder initialized with H.264 + %s", roomName, participant, audioCodec)
 
 	bus := pipeline.GetPipelineBus()
 	bus.AddWatch(func(msg *gst.Message) bool {
@@ -614,17 +651,29 @@ func (r *ParticipantRecorder) initVideoCaps(payloadType uint8) {
 }
 
 func (r *ParticipantRecorder) pushVideoPacket(pkt *rtp.Packet) error {
+	// Normalize RTP timestamp BEFORE marshaling to prevent 3600s offset in MPEG-TS
+	r.mu.Lock()
+	if !r.videoTimestampInit {
+		r.videoTimestampInit = true
+		r.videoTimestampBase = pkt.Timestamp
+	}
+	normalizedTimestamp := pkt.Timestamp - r.videoTimestampBase
+	r.mu.Unlock()
+
+	// Modify packet timestamp to normalized value before marshaling
+	pkt.Timestamp = normalizedTimestamp
+
 	data, err := pkt.Marshal()
 	if err != nil {
 		return fmt.Errorf("marshal video RTP failed: %w", err)
 	}
 
 	buffer := gst.NewBufferFromBytes(data)
-	pts := r.videoClockTime(pkt.Timestamp)
+	pts := gst.ClockTime(uint64(normalizedTimestamp) * 1_000_000_000 / 90000)
 	buffer.SetPresentationTimestamp(pts)
 	r.mu.Lock()
 	r.videoLastPTS = pts
-	r.videoLastTimestamp = pkt.Timestamp
+	r.videoLastTimestamp = normalizedTimestamp
 	r.mu.Unlock()
 
 	if flow := r.videoAppSrc.PushBuffer(buffer); flow != gst.FlowOK {
@@ -683,29 +732,8 @@ func (r *ParticipantRecorder) injectParameterSets(reference *rtp.Packet, nalUnit
 	return spsInjected, ppsInjected, nil
 }
 
-func (r *ParticipantRecorder) videoClockTime(ts uint32) gst.ClockTime {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.videoTimestampInit {
-		r.videoTimestampInit = true
-		r.videoTimestampBase = ts
-	}
-	relative := uint32(ts - r.videoTimestampBase)
-	ptsNs := uint64(relative) * 1_000_000_000 / 90000
-	return gst.ClockTime(ptsNs)
-}
-
-func (r *ParticipantRecorder) audioClockTime(ts uint32) gst.ClockTime {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.audioTimestampInit {
-		r.audioTimestampInit = true
-		r.audioTimestampBase = ts
-	}
-	relative := uint32(ts - r.audioTimestampBase)
-	ptsNs := uint64(relative) * 1_000_000_000 / 48000
-	return gst.ClockTime(ptsNs)
-}
+// videoClockTime and audioClockTime removed - timestamp normalization
+// now happens in pushVideoPacket before marshaling the RTP packet
 
 func (r *ParticipantRecorder) signalVideoReady() {
 	if r.videoReady.CompareAndSwap(false, true) {
@@ -836,8 +864,23 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 
 			if r.recordingKeyframePending.Load() {
 				if isKeyframe {
-					if (!spsSeen || !ppsSeen) && len(spropNALs) > 0 && !injectedSprop {
+					// Start pipeline on first recording keyframe BEFORE pushing any packets
+					// to avoid buffering packets with stale timestamps
+					if !r.pipelineStarted.Load() {
+						log.Printf("[%s] starting GStreamer pipeline with first recording keyframe seq=%d ts=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
 						r.initVideoCaps(rtpPacket.PayloadType)
+						if err := r.pipeline.SetState(gst.StatePlaying); err != nil {
+							log.Printf("[%s] failed to start pipeline: %v", r.logPrefix(), err)
+							return
+						}
+						r.pipeline.DebugBinToDotFileWithTs(gst.DebugGraphShowAll, "publisher_recorder")
+						r.pipelineStarted.Store(true)
+					} else {
+						log.Printf("[%s] starting active recording with keyframe seq=%d ts=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
+					}
+
+					// Now inject parameter sets if needed, AFTER pipeline is playing
+					if (!spsSeen || !ppsSeen) && len(spropNALs) > 0 && !injectedSprop {
 						if injectedSPS, injectedPPS, injErr := r.injectParameterSets(rtpPacket, spropNALs); injErr != nil {
 							log.Printf("[%s] failed to inject codec parameter sets: %v", r.logPrefix(), injErr)
 						} else {
@@ -856,23 +899,11 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 							}
 						}
 					}
+
 					r.recordingKeyframePending.Store(false)
 					r.mu.Lock()
 					r.videoKeyframeCount++
 					r.mu.Unlock()
-
-					// Start pipeline on first recording keyframe to avoid invalid HLS segments
-					if !r.pipelineStarted.Load() {
-						log.Printf("[%s] starting GStreamer pipeline with first recording keyframe seq=%d ts=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
-						if err := r.pipeline.SetState(gst.StatePlaying); err != nil {
-							log.Printf("[%s] failed to start pipeline: %v", r.logPrefix(), err)
-							return
-						}
-						r.pipeline.DebugBinToDotFileWithTs(gst.DebugGraphShowAll, "publisher_recorder")
-						r.pipelineStarted.Store(true)
-					} else {
-						log.Printf("[%s] starting active recording with keyframe seq=%d ts=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
-					}
 				} else {
 					recordingWait++
 					if recordingWait == 1 || recordingWait%200 == 0 {
@@ -941,6 +972,18 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 			}
 			r.mu.Unlock()
 
+			// Normalize RTP timestamp BEFORE marshaling to prevent 3600s offset in MPEG-TS
+			r.mu.Lock()
+			if !r.audioTimestampInit {
+				r.audioTimestampInit = true
+				r.audioTimestampBase = rtpPacket.Timestamp
+			}
+			normalizedTimestamp := rtpPacket.Timestamp - r.audioTimestampBase
+			r.mu.Unlock()
+
+			// Modify packet timestamp to normalized value before marshaling
+			rtpPacket.Timestamp = normalizedTimestamp
+
 			data, err := rtpPacket.Marshal()
 			if err != nil {
 				log.Printf("[%s] marshal audio RTP failed: %v", r.logPrefix(), err)
@@ -948,11 +991,11 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 			}
 
 			buffer := gst.NewBufferFromBytes(data)
-			pts := r.audioClockTime(rtpPacket.Timestamp)
+			pts := gst.ClockTime(uint64(normalizedTimestamp) * 1_000_000_000 / 48000)
 			buffer.SetPresentationTimestamp(pts)
 			r.mu.Lock()
 			r.audioLastPTS = pts
-			r.audioLastTimestamp = rtpPacket.Timestamp
+			r.audioLastTimestamp = normalizedTimestamp
 			r.mu.Unlock()
 
 			if flow := r.audioAppSrc.PushBuffer(buffer); flow != gst.FlowOK {

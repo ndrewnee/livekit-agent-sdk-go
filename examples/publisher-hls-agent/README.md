@@ -14,7 +14,9 @@ The Publisher HLS Agent is a specialized LiveKit agent that:
 ## Features
 
 - **Real-time HLS Generation**: Creates live HLS playlists and segments as the stream progresses
-- **H.264 + AAC Encoding**: Transcodes video to H.264 and audio to AAC for broad compatibility
+- **Flexible Audio Codec**: Choose between AAC (broad compatibility) or Opus (no transcoding)
+  - **H.264 + AAC** (default): Transcodes Opus to AAC for maximum player compatibility
+  - **H.264 + Opus**: Preserves original Opus audio without transcoding (lower CPU, modern players)
 - **S3 Upload**: Automatically uploads completed recordings to S3/MinIO/compatible storage
 - **Auto-Activation**: Optionally start recording automatically when tracks are ready
 - **Manual Control**: Programmatic API to control recording activation
@@ -46,8 +48,11 @@ The Publisher HLS Agent is a specialized LiveKit agent that:
 │  │  └──────────┬───────────────┘  │  │
 │  │  ┌──────────▼───────────────┐  │  │
 │  │  │ Audio: rtpjitterbuffer → │  │  │
-│  │  │ rtpopusdepay → opusdec → │  │  │
-│  │  │ audioconvert → avenc_aac │  │  │
+│  │  │ rtpopusdepay →           │  │  │
+│  │  │   ┌─ AAC: opusdec →      │  │  │
+│  │  │   │  audioconvert →      │  │  │
+│  │  │   │  avenc_aac           │  │  │
+│  │  │   └─ Opus: opusparse     │  │  │
 │  │  └──────────┬───────────────┘  │  │
 │  │  ┌──────────▼───────────────┐  │  │
 │  │  │ mpegtsmux → tee          │  │  │
@@ -152,6 +157,7 @@ All configuration is done via environment variables:
 | `AGENT_NAME` | `publisher-hls-recorder` | Agent name for job matching |
 | `OUTPUT_DIR` | `publisher-hls-output` | Local directory for recordings |
 | `AUTO_ACTIVATE_RECORDING` | `false` | Auto-start recording when tracks ready |
+| `KEEP_OPUS` | `false` | Keep Opus audio without transcoding to AAC |
 | `HLS_SEGMENT_DURATION` | `2` | HLS segment duration in seconds |
 | `HLS_MAX_SEGMENTS` | `0` | Max segments in playlist (0 = unlimited) |
 
@@ -256,6 +262,27 @@ export S3_FORCE_PATH_STYLE="true"
 ./publisher-hls-agent
 ```
 
+### With Opus Audio (No Transcoding)
+
+To preserve Opus audio without transcoding to AAC:
+
+```bash
+export KEEP_OPUS="true"
+./publisher-hls-agent
+```
+
+**Benefits**:
+- Lower CPU usage (no audio transcoding)
+- Preserves original audio quality
+- Faster processing
+
+**Compatibility Note**: Not all HLS players support Opus audio in MPEG-TS containers. Use this option when targeting:
+- Modern browsers with hls.js
+- VLC (recent versions)
+- FFmpeg-based players
+
+For maximum compatibility (iOS Safari, older devices), use the default AAC mode.
+
 ## Output Files
 
 For each recording, the agent creates:
@@ -321,10 +348,16 @@ The repository includes end-to-end tests that:
 - Start a local LiveKit server
 - Create a synthetic publisher with H.264 video + Opus audio
 - Verify HLS recording and S3 upload
+- Test both AAC and Opus audio codecs
 
 ```bash
-# Run E2E test
-go test -v -run TestPublisherHLSAgentUploadsToS3
+# Run all E2E tests
+go test -v -run 'TestPublisherHLSAgent.*'
+
+# Run specific tests
+go test -v -run TestPublisherHLSAgentEndToEnd          # Local recording (AAC)
+go test -v -run TestPublisherHLSAgentUploadsToS3       # S3 upload (AAC)
+go test -v -run TestPublisherHLSAgentWithOpus          # Local recording (Opus)
 
 # Keep MinIO running after test for inspection
 PUBLISHER_HLS_KEEP_MINIO=1 go test -v -run TestPublisherHLSAgentUploadsToS3
@@ -461,10 +494,14 @@ sudo journalctl -u publisher-hls-agent -f
 
 ## Performance Considerations
 
-- **CPU**: ~50-100% of one core per active recording (H.264 encoding)
+- **CPU**:
+  - With AAC transcoding (default): ~50-100% of one core per active recording
+  - With Opus passthrough (`KEEP_OPUS=true`): ~30-50% of one core (no audio transcoding overhead)
 - **Memory**: ~100-200 MB per recording session
 - **Disk I/O**: Writes HLS segments every 2 seconds (configurable)
 - **Network**: Minimal (only receives RTP, uploads to S3 at end)
+
+**Recommendation**: Use `KEEP_OPUS=true` when CPU resources are limited and targeting modern HLS players.
 
 ## Architecture Details
 

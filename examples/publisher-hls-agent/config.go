@@ -40,6 +40,13 @@ type Config struct {
 	// Environment variable: HLS_MAX_SEGMENTS (default: 0)
 	MaxPlaylistEntries int
 
+	// KeepOpus determines whether to preserve Opus audio without transcoding.
+	// When true, HLS output contains H.264 + Opus (no AAC transcoding).
+	// When false, audio is transcoded from Opus to AAC.
+	// Note: Not all HLS players support Opus audio in MPEG-TS containers.
+	// Environment variable: KEEP_OPUS (default: false)
+	KeepOpus bool
+
 	// AgentName is the name used for job matching and identification.
 	// Environment variable: AGENT_NAME (default: publisher-hls-recorder)
 	AgentName string
@@ -60,6 +67,7 @@ func loadConfig() *Config {
 		AutoActivate:        getEnvBool("AUTO_ACTIVATE_RECORDING", false),
 		SegmentDurationSecs: getEnvInt("HLS_SEGMENT_DURATION", 2),
 		MaxPlaylistEntries:  getEnvInt("HLS_MAX_SEGMENTS", 0),
+		KeepOpus:            getEnvBool("KEEP_OPUS", false),
 		AgentName:           getEnv("AGENT_NAME", "publisher-hls-recorder"),
 		S3: S3Config{
 			Endpoint:       getEnv("S3_ENDPOINT", ""),

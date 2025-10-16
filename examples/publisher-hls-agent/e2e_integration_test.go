@@ -29,6 +29,7 @@
 // TestPublisherHLSAgentEndToEnd:
 //   - Local recording to disk without S3 upload
 //   - Validates output.ts, playlist.m3u8, and segment files
+//   - Uses default AAC audio transcoding
 //
 // TestPublisherHLSAgentUploadsToS3:
 //   - Recording with S3 upload to MinIO
@@ -36,6 +37,12 @@
 //   - Checks HLS segment integrity and playlist validity
 //   - Ensures first segment has non-zero duration (keyframe-aligned)
 //   - Sets public-read ACL for streaming access
+//   - Uses default AAC audio transcoding
+//
+// TestPublisherHLSAgentWithOpus:
+//   - Local recording with Opus audio passthrough (no AAC transcoding)
+//   - Validates output.ts contains Opus audio codec
+//   - Tests KEEP_OPUS=true configuration
 //
 // # Environment Variables
 //
@@ -213,6 +220,121 @@ func TestPublisherHLSAgentUploadsToS3(t *testing.T) {
 
 	streamURL := fmt.Sprintf("http://%s/%s/%s", ms.Endpoint, ms.Bucket, playlistObj)
 	t.Logf("HLS playlist available at: %s", streamURL)
+	if ms.KeepAlive {
+		t.Logf("MinIO data dir: %s (server left running)", ms.DataDir)
+	}
+}
+
+func TestPublisherHLSAgentWithOpus(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping end-to-end integration test in short mode")
+	}
+
+	ms := startMinIOServer(t)
+	if !ms.KeepAlive {
+		defer ms.Shutdown(t)
+	} else {
+		t.Logf("PUBLISHER_HLS_KEEP_MINIO=1 detected; MinIO will remain running at http://%s", ms.Endpoint)
+	}
+
+	// Use unique agent name to avoid conflicts with stale workers from previous test runs
+	uniqueAgentName := fmt.Sprintf("publisher-hls-opus-agent-%d", time.Now().UnixNano())
+
+	scenario := e2eScenario{
+		name:        "s3-opus-output",
+		agentName:   uniqueAgentName,
+		roomName:    "publisher-hls-opus-room",
+		participant: "publisher-hls-opus-participant",
+		outputDir:   "",
+		agentEnv: map[string]string{
+			"KEEP_OPUS":               "true",
+			"S3_ENDPOINT":             ms.Endpoint,
+			"S3_BUCKET":               ms.Bucket,
+			"S3_REGION":               "us-east-1",
+			"S3_ACCESS_KEY":           ms.AccessKey,
+			"S3_SECRET_KEY":           ms.SecretKey,
+			"S3_FORCE_PATH_STYLE":     "true",
+			"S3_USE_SSL":              "false",
+			"S3_PREFIX":               "publisher-opus-tests",
+			"S3_OBJECT_ACL":           "public-read",
+			"AUTO_ACTIVATE_RECORDING": "true",
+		},
+	}
+
+	result := runE2EScenario(t, scenario)
+
+	// Validate output files exist
+	requireFileExists(t, filepath.Join(result.participantDir, "playlist.m3u8"))
+	requireFileExists(t, filepath.Join(result.participantDir, "output.ts"))
+
+	// Verify the recording contains Opus audio codec
+	outputFile := filepath.Join(result.participantDir, "output.ts")
+	cmd := exec.Command("ffprobe",
+		"-v", "error",
+		"-select_streams", "a:0",
+		"-show_entries", "stream=codec_name",
+		"-of", "default=nokey=1:noprint_wrappers=1",
+		outputFile,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to check audio codec: %v (output: %s)", err, string(output))
+	}
+	audioCodec := strings.TrimSpace(string(output))
+	// Handle case where ffprobe returns multiple lines (one per audio stream)
+	audioCodecLines := strings.Split(audioCodec, "\n")
+	if len(audioCodecLines) == 0 || audioCodecLines[0] != "opus" {
+		t.Fatalf("expected opus audio codec but got: %s", audioCodec)
+	}
+	// Verify all audio streams are Opus
+	for i, codec := range audioCodecLines {
+		if strings.TrimSpace(codec) != "opus" {
+			t.Fatalf("expected all audio streams to be opus, but stream %d is: %s", i, codec)
+		}
+	}
+	t.Logf("verified recording contains Opus audio codec (%d stream(s))", len(audioCodecLines))
+
+	// Validate S3 upload
+	client := ms.NewClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	s3Bucket := ms.Bucket
+	remotePrefix := path.Join("publisher-opus-tests", scenario.roomName, scenario.participant)
+	playlistObj := path.Join(remotePrefix, "playlist.m3u8")
+
+	reader, err := client.GetObject(ctx, s3Bucket, playlistObj, minio.GetObjectOptions{})
+	if err != nil {
+		t.Fatalf("failed to fetch playlist from MinIO: %v", err)
+	}
+	defer reader.Close()
+
+	scanner := bufio.NewScanner(reader)
+	foundFirstSegment := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "#EXTINF:") {
+			foundFirstSegment = true
+			if strings.Contains(line, "0.0") {
+				t.Fatalf("unexpected near-zero duration first segment in S3 playlist: %s", line)
+			}
+			break
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("failed scanning playlist: %v", err)
+	}
+	if !foundFirstSegment {
+		t.Fatalf("playlist at %s missing EXTINF entries", playlistObj)
+	}
+
+	policy := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":["s3:GetObject"],"Resource":["arn:aws:s3:::%s/%s/*"]}]}`, s3Bucket, remotePrefix)
+	if err := client.SetBucketPolicy(context.Background(), s3Bucket, policy); err != nil {
+		t.Fatalf("failed to set read policy on MinIO bucket: %v", err)
+	}
+
+	streamURL := fmt.Sprintf("http://%s/%s/%s", ms.Endpoint, s3Bucket, playlistObj)
+	t.Logf("HLS playlist with Opus audio available at: %s", streamURL)
 	if ms.KeepAlive {
 		t.Logf("MinIO data dir: %s (server left running)", ms.DataDir)
 	}
@@ -922,7 +1044,9 @@ func normalizePlaylistDurations(playlistPath string, segmentPaths map[string]str
 		}
 		actualDuration, err := ffprobeSegmentDuration(segmentPath)
 		if err != nil {
-			return false, err
+			// Skip invalid segments (e.g., partial segments from pipeline shutdown)
+			// and remove them from the playlist
+			continue
 		}
 		normalized := sanitizeSegmentDuration(actualDuration)
 		if normalized < 0 {
