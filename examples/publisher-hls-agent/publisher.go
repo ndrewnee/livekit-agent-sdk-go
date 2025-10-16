@@ -186,26 +186,37 @@ func (p *GStreamerPublisher) Stop() {
 //
 // Returns an error if the pipeline cannot be paused, seeked, or resumed.
 func (p *GStreamerPublisher) Restart() error {
+	// Check pipeline exists (with lock)
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.pipeline == nil {
+	pipeline := p.pipeline
+	p.mu.Unlock()
+
+	if pipeline == nil {
 		return fmt.Errorf("pipeline not initialized")
 	}
-	if err := p.pipeline.SetState(gst.StatePaused); err != nil {
+
+	// Pause, seek, and resume pipeline WITHOUT holding lock
+	// (GStreamer callbacks may still be running and need to acquire the lock)
+	if err := pipeline.SetState(gst.StatePaused); err != nil {
 		return fmt.Errorf("failed to pause pipeline: %w", err)
 	}
-	if change, state := p.pipeline.GetState(gst.StatePaused, gst.ClockTimeNone); change == gst.StateChangeFailure {
-		return fmt.Errorf("pipeline failed to pause (state=%s)", state.String())
-	}
+
+	// Seek to beginning
 	flags := gst.SeekFlagFlush | gst.SeekFlagKeyUnit
-	if ok := p.pipeline.SeekSimple(0, gst.FormatTime, flags); !ok {
+	if ok := pipeline.SeekSimple(0, gst.FormatTime, flags); !ok {
 		return fmt.Errorf("failed to seek pipeline to start")
 	}
-	if err := p.pipeline.SetState(gst.StatePlaying); err != nil {
+
+	if err := pipeline.SetState(gst.StatePlaying); err != nil {
 		return fmt.Errorf("failed to resume pipeline: %w", err)
 	}
+
+	// Reset counters (with lock)
+	p.mu.Lock()
 	p.videoTotal = 0
 	p.audioTotal = 0
+	p.mu.Unlock()
+
 	return nil
 }
 
