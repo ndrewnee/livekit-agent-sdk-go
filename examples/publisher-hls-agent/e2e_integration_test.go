@@ -1,3 +1,79 @@
+// Package main provides end-to-end integration tests for the publisher HLS agent.
+//
+// These tests validate the complete recording workflow including S3 uploads:
+//   - LiveKit server startup and agent worker registration
+//   - Agent dispatch on room creation
+//   - Test participant connection and track publication
+//   - GStreamer-based H.264/Opus track playback from MP4 file
+//   - HLS recording with delayed pipeline start (keyframe-aligned)
+//   - Local recording output validation
+//   - S3/MinIO upload and remote recording validation
+//   - HLS playlist integrity checks
+//
+// The tests use unique agent names per run to avoid conflicts with stale
+// worker registrations from previous test runs.
+//
+// # Test Architecture
+//
+// Each test scenario:
+//  1. Starts a local LiveKit server (from PATH or ../../livekit/)
+//  2. Starts the publisher-hls-agent worker (via go run)
+//  3. Creates a room with agent dispatch configuration
+//  4. Connects a test participant and publishes H.264/Opus tracks
+//  5. Uses GStreamerPublisher to stream test.mp4 content
+//  6. Waits for recording completion and validates outputs
+//  7. For S3 tests: starts MinIO, validates uploads, checks HLS playlists
+//
+// # Test Scenarios
+//
+// TestPublisherHLSAgentEndToEnd:
+//   - Local recording to disk without S3 upload
+//   - Validates output.ts, playlist.m3u8, and segment files
+//
+// TestPublisherHLSAgentUploadsToS3:
+//   - Recording with S3 upload to MinIO
+//   - Validates both local and remote recordings
+//   - Checks HLS segment integrity and playlist validity
+//   - Ensures first segment has non-zero duration (keyframe-aligned)
+//   - Sets public-read ACL for streaming access
+//
+// # Environment Variables
+//
+//   - PUBLISHER_HLS_KEEP_MINIO=1: Keep MinIO server running after tests
+//     (Enables manual inspection of S3 uploads and HLS playlists)
+//
+// # Required Dependencies
+//
+// Binaries in PATH:
+//   - livekit-server: LiveKit SFU server
+//   - ffmpeg: HLS validation and transcoding
+//   - ffprobe: Stream inspection and timing validation
+//   - minio or docker: S3-compatible storage (optional, will use docker fallback)
+//
+// Test data:
+//   - test.mp4: H.264 video + Opus audio test file
+//
+// # Running Tests
+//
+// Run both E2E tests:
+//
+//	go test -v -run 'TestPublisherHLSAgent.*'
+//
+// Run only local recording test:
+//
+//	go test -v -run TestPublisherHLSAgentEndToEnd
+//
+// Run only S3 upload test:
+//
+//	go test -v -run TestPublisherHLSAgentUploadsToS3
+//
+// Keep MinIO running for manual inspection:
+//
+//	PUBLISHER_HLS_KEEP_MINIO=1 go test -v -run TestPublisherHLSAgentUploadsToS3
+//
+// Skip E2E tests in short mode:
+//
+//	go test -short
 package main
 
 import (
@@ -47,9 +123,12 @@ func TestPublisherHLSAgentEndToEnd(t *testing.T) {
 		t.Skip("skipping end-to-end integration test in short mode")
 	}
 
+	// Use unique agent name to avoid conflicts with stale workers from previous test runs
+	uniqueAgentName := fmt.Sprintf("publisher-hls-e2e-agent-%d", time.Now().UnixNano())
+
 	runE2EScenario(t, e2eScenario{
 		name:        "local-output",
-		agentName:   "publisher-hls-e2e-agent",
+		agentName:   uniqueAgentName,
 		roomName:    "publisher-hls-e2e-room",
 		participant: "publisher-hls-e2e-participant",
 		outputDir:   "",
@@ -69,9 +148,12 @@ func TestPublisherHLSAgentUploadsToS3(t *testing.T) {
 		t.Logf("PUBLISHER_HLS_KEEP_MINIO=1 detected; MinIO will remain running at http://%s", ms.Endpoint)
 	}
 
+	// Use unique agent name to avoid conflicts with stale workers from previous test runs
+	uniqueAgentName := fmt.Sprintf("publisher-hls-s3-agent-%d", time.Now().UnixNano())
+
 	scenario := e2eScenario{
 		name:        "s3-upload",
-		agentName:   "publisher-hls-s3-agent",
+		agentName:   uniqueAgentName,
 		roomName:    "publisher-hls-s3-room",
 		participant: "publisher-hls-s3-participant",
 		outputDir:   "",
@@ -448,7 +530,7 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 			t.Fatalf("S3 validation failed: %v", err)
 		}
 		t.Logf("S3 validation succeeded for %s", remotePrefix)
-		playlistURL := fmt.Sprintf("http://%s/%s/%s/playlist.m3u8", ms.Endpoint, s3Bucket, remotePrefix)
+		playlistURL := fmt.Sprintf("http://%s/%s/%s/playlist.m3u8", scenario.agentEnv["S3_ENDPOINT"], s3Bucket, remotePrefix)
 		t.Logf("S3 playlist URL: %s", playlistURL)
 	}
 

@@ -1,3 +1,41 @@
+// Package main provides integration tests for the publisher HLS agent.
+//
+// These tests verify the full agent workflow:
+//   - Agent registration with LiveKit server
+//   - Room creation with agent dispatch
+//   - Publisher track subscription
+//   - H.264/Opus RTP stream processing
+//   - HLS segment generation via GStreamer
+//   - Recording output validation with ffprobe
+//
+// Tests start a local LiveKit server, create a test room, publish synthetic
+// H.264/Opus tracks using GStreamer, and verify the agent produces valid HLS
+// recordings with synchronized audio/video.
+//
+// # Test Environment
+//
+// Required binaries in PATH:
+//   - livekit-server (or built at ../../livekit/livekit-server)
+//   - ffmpeg (for HLS validation)
+//   - ffprobe (for stream inspection)
+//
+// Test data:
+//   - test.mp4 (H.264 + Opus) in test/ subdirectory
+//
+// # Environment Variables
+//
+//   - PUBLISHER_HLS_DEBUG_OUTPUT: Preserve test outputs in this directory
+//   - PUBLISHER_HLS_KEEP_MINIO: Keep MinIO server running after tests
+//
+// # Running Tests
+//
+// Run integration test (requires LiveKit server binary):
+//
+//	go test -v -run TestPublisherHLSAgentRecordsHLS
+//
+// Skip integration tests in short mode:
+//
+//	go test -short
 package main
 
 import (
