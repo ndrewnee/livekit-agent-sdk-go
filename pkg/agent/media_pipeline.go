@@ -49,7 +49,7 @@ type MediaPipeline struct {
 	bufferFactory    *MediaBufferFactory
 	metricsCollector *MediaMetricsCollector
 	room             *lksdk.Room  // Room reference (for SifTrailer and future use)
-	encryptionKey    []byte       // Decoded AES-128-GCM key bytes (16 bytes) for decrypting E2EE audio frames
+	encryptionKey    []byte       // HKDF-derived AES-128-GCM key bytes (16 bytes) for decrypting E2EE audio frames
 	encryptionCipher cipher.Block // Pre-created AES cipher block for E2EE decryption (used by lksdk.DecryptGCMAudioSampleCustomCipher)
 }
 
@@ -343,8 +343,14 @@ func NewMediaPipeline() *MediaPipeline {
 // This method performs all expensive cryptographic setup operations once:
 //   - Decodes base64 key to raw bytes
 //   - Validates key size (must be 16 bytes for AES-128-GCM)
+//   - Derives encryption key using HKDF (matching LiveKit client SDK behavior)
 //   - Creates AES cipher block
 //   - Stores room reference for SIF trailer access
+//
+// The HKDF derivation uses the same parameters as LiveKit client SDK:
+//   - Salt: "LKFrameEncryptionKey"
+//   - Info: 128 zero bytes
+//   - Hash: SHA-256
 //
 // The cipher block is cached and reused for all frame decryptions via the SDK,
 // providing significant performance improvement (30% faster) over per-frame cipher creation.
@@ -366,17 +372,25 @@ func (mp *MediaPipeline) SetEncryptionKey(room *lksdk.Room, encodedKey string) e
 		return fmt.Errorf("invalid key size: expected 16 bytes for AES-128-GCM, got %d", len(keyBytes))
 	}
 
-	// Create AES cipher block from decoded key bytes
+	// Derive encryption key using HKDF (same as LiveKit client SDK)
+	// This matches the key derivation in livekit-client's createKeyMaterialFromBuffer + deriveKeys
+	// Using salt "LKFrameEncryptionKey", info 128 bytes, SHA-256 → 16-byte output
+	derivedKey, err := lksdk.DeriveKeyFromBytes(keyBytes)
+	if err != nil {
+		return fmt.Errorf("derive encryption key: %w", err)
+	}
+
+	// Create AES cipher block from HKDF-derived key
 	// This will be used by lksdk.DecryptGCMAudioSampleCustomCipher for decryption
-	block, err := aes.NewCipher(keyBytes)
+	block, err := aes.NewCipher(derivedKey)
 	if err != nil {
 		return fmt.Errorf("create AES cipher: %w", err)
 	}
 
-	// Store room reference, decoded key and pre-created cipher block for reuse
+	// Store room reference, HKDF-derived key and pre-created cipher block for reuse
 	mp.mu.Lock()
 	mp.room = room
-	mp.encryptionKey = keyBytes
+	mp.encryptionKey = derivedKey  // Store derived key, not raw bytes
 	mp.encryptionCipher = block
 	mp.mu.Unlock()
 
