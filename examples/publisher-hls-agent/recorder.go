@@ -37,6 +37,8 @@ type ParticipantRecorder struct {
 	pipeline    *gst.Pipeline
 	videoAppSrc *app.Source
 	audioAppSrc *app.Source
+	videoDepay  *gst.Element
+	audioDepay  *gst.Element
 
 	videoInitialized bool
 	audioInitialized bool
@@ -133,7 +135,7 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		return nil, fmt.Errorf("failed to create video jitterbuffer: %w", err)
 	}
 	videoJitter.SetProperty("latency", uint(200))
-	videoJitter.SetProperty("mode", int(1)) // RTP_JITTER_BUFFER_MODE_NONE - don't try to resync timestamps
+	videoJitter.SetProperty("mode", int(1)) // RTP_JITTER_BUFFER_MODE_NONE to keep RTP timestamps unmodified
 
 	videoDepay, err := gst.NewElement("rtph264depay")
 	if err != nil {
@@ -180,7 +182,7 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		return nil, fmt.Errorf("failed to create audio jitterbuffer: %w", err)
 	}
 	audioJitter.SetProperty("latency", uint(200))
-	audioJitter.SetProperty("mode", int(1)) // RTP_JITTER_BUFFER_MODE_NONE - don't try to resync timestamps
+	audioJitter.SetProperty("mode", int(1)) // Disable jitterbuffer resync to preserve relative timestamps
 
 	audioDepay, err := gst.NewElement("rtpopusdepay")
 	if err != nil {
@@ -232,8 +234,8 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		return nil, fmt.Errorf("failed to create mpegtsmux: %w", err)
 	}
 	mpegtsmux.SetProperty("alignment", int64(7))
-	mpegtsmux.SetProperty("start-time-selection", int64(2)) // 2 = set (use explicit start-time value)
-	mpegtsmux.SetProperty("start-time", uint64(0))          // Start from timestamp 0
+	mpegtsmux.SetProperty("start-time-selection", int64(0)) // Force timestamps to start at zero
+	mpegtsmux.SetProperty("start-time", uint64(0))
 
 	muxQueue, err := gst.NewElement("queue")
 	if err != nil {
@@ -373,6 +375,8 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		pipeline:     pipeline,
 		videoAppSrc:  app.SrcFromElement(videoSrc),
 		audioAppSrc:  app.SrcFromElement(audioSrc),
+		videoDepay:   videoDepay,
+		audioDepay:   audioDepay,
 		startTime:    time.Now(),
 		videoReadyCh: make(chan struct{}),
 	}
@@ -651,17 +655,8 @@ func (r *ParticipantRecorder) initVideoCaps(payloadType uint8) {
 }
 
 func (r *ParticipantRecorder) pushVideoPacket(pkt *rtp.Packet) error {
-	// Normalize RTP timestamp BEFORE marshaling to prevent 3600s offset in MPEG-TS
-	r.mu.Lock()
-	if !r.videoTimestampInit {
-		r.videoTimestampInit = true
-		r.videoTimestampBase = pkt.Timestamp
-	}
-	normalizedTimestamp := pkt.Timestamp - r.videoTimestampBase
-	r.mu.Unlock()
-
-	// Modify packet timestamp to normalized value before marshaling
-	pkt.Timestamp = normalizedTimestamp
+	pts, relative := r.videoClockTime(pkt.Timestamp)
+	pkt.Timestamp = relative
 
 	data, err := pkt.Marshal()
 	if err != nil {
@@ -669,11 +664,10 @@ func (r *ParticipantRecorder) pushVideoPacket(pkt *rtp.Packet) error {
 	}
 
 	buffer := gst.NewBufferFromBytes(data)
-	pts := gst.ClockTime(uint64(normalizedTimestamp) * 1_000_000_000 / 90000)
 	buffer.SetPresentationTimestamp(pts)
 	r.mu.Lock()
 	r.videoLastPTS = pts
-	r.videoLastTimestamp = normalizedTimestamp
+	r.videoLastTimestamp = relative
 	r.mu.Unlock()
 
 	if flow := r.videoAppSrc.PushBuffer(buffer); flow != gst.FlowOK {
@@ -732,8 +726,29 @@ func (r *ParticipantRecorder) injectParameterSets(reference *rtp.Packet, nalUnit
 	return spsInjected, ppsInjected, nil
 }
 
-// videoClockTime and audioClockTime removed - timestamp normalization
-// now happens in pushVideoPacket before marshaling the RTP packet
+func (r *ParticipantRecorder) videoClockTime(ts uint32) (gst.ClockTime, uint32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.videoTimestampInit {
+		r.videoTimestampInit = true
+		r.videoTimestampBase = ts
+	}
+	relative := uint32(ts - r.videoTimestampBase)
+	ptsNs := uint64(relative) * 1_000_000_000 / 90000
+	return gst.ClockTime(ptsNs), relative
+}
+
+func (r *ParticipantRecorder) audioClockTime(ts uint32) (gst.ClockTime, uint32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.audioTimestampInit {
+		r.audioTimestampInit = true
+		r.audioTimestampBase = ts
+	}
+	relative := uint32(ts - r.audioTimestampBase)
+	ptsNs := uint64(relative) * 1_000_000_000 / 48000
+	return gst.ClockTime(ptsNs), relative
+}
 
 func (r *ParticipantRecorder) signalVideoReady() {
 	if r.videoReady.CompareAndSwap(false, true) {
@@ -864,23 +879,8 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 
 			if r.recordingKeyframePending.Load() {
 				if isKeyframe {
-					// Start pipeline on first recording keyframe BEFORE pushing any packets
-					// to avoid buffering packets with stale timestamps
-					if !r.pipelineStarted.Load() {
-						log.Printf("[%s] starting GStreamer pipeline with first recording keyframe seq=%d ts=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
-						r.initVideoCaps(rtpPacket.PayloadType)
-						if err := r.pipeline.SetState(gst.StatePlaying); err != nil {
-							log.Printf("[%s] failed to start pipeline: %v", r.logPrefix(), err)
-							return
-						}
-						r.pipeline.DebugBinToDotFileWithTs(gst.DebugGraphShowAll, "publisher_recorder")
-						r.pipelineStarted.Store(true)
-					} else {
-						log.Printf("[%s] starting active recording with keyframe seq=%d ts=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
-					}
-
-					// Now inject parameter sets if needed, AFTER pipeline is playing
 					if (!spsSeen || !ppsSeen) && len(spropNALs) > 0 && !injectedSprop {
+						r.initVideoCaps(rtpPacket.PayloadType)
 						if injectedSPS, injectedPPS, injErr := r.injectParameterSets(rtpPacket, spropNALs); injErr != nil {
 							log.Printf("[%s] failed to inject codec parameter sets: %v", r.logPrefix(), injErr)
 						} else {
@@ -899,11 +899,24 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 							}
 						}
 					}
-
 					r.recordingKeyframePending.Store(false)
 					r.mu.Lock()
 					r.videoKeyframeCount++
 					r.mu.Unlock()
+
+					// Start pipeline on first recording keyframe to avoid invalid HLS segments
+					if !r.pipelineStarted.Load() {
+						log.Printf("[%s] starting GStreamer pipeline with first recording keyframe seq=%d ts=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
+						r.initVideoCaps(rtpPacket.PayloadType)
+						if err := r.pipeline.SetState(gst.StatePlaying); err != nil {
+							log.Printf("[%s] failed to start pipeline: %v", r.logPrefix(), err)
+							return
+						}
+						r.pipeline.DebugBinToDotFileWithTs(gst.DebugGraphShowAll, "publisher_recorder")
+						r.pipelineStarted.Store(true)
+					} else {
+						log.Printf("[%s] starting active recording with keyframe seq=%d ts=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
+					}
 				} else {
 					recordingWait++
 					if recordingWait == 1 || recordingWait%200 == 0 {
@@ -972,17 +985,8 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 			}
 			r.mu.Unlock()
 
-			// Normalize RTP timestamp BEFORE marshaling to prevent 3600s offset in MPEG-TS
-			r.mu.Lock()
-			if !r.audioTimestampInit {
-				r.audioTimestampInit = true
-				r.audioTimestampBase = rtpPacket.Timestamp
-			}
-			normalizedTimestamp := rtpPacket.Timestamp - r.audioTimestampBase
-			r.mu.Unlock()
-
-			// Modify packet timestamp to normalized value before marshaling
-			rtpPacket.Timestamp = normalizedTimestamp
+			pts, relative := r.audioClockTime(rtpPacket.Timestamp)
+			rtpPacket.Timestamp = relative
 
 			data, err := rtpPacket.Marshal()
 			if err != nil {
@@ -991,11 +995,10 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 			}
 
 			buffer := gst.NewBufferFromBytes(data)
-			pts := gst.ClockTime(uint64(normalizedTimestamp) * 1_000_000_000 / 48000)
 			buffer.SetPresentationTimestamp(pts)
 			r.mu.Lock()
 			r.audioLastPTS = pts
-			r.audioLastTimestamp = normalizedTimestamp
+			r.audioLastTimestamp = relative
 			r.mu.Unlock()
 
 			if flow := r.audioAppSrc.PushBuffer(buffer); flow != gst.FlowOK {
@@ -1053,6 +1056,12 @@ func (r *ParticipantRecorder) Stop() {
 				bus.TimedPopFiltered(gst.ClockTime(5*1_000_000_000), gst.MessageEOS|gst.MessageError)
 			}
 			r.pipeline.SetState(gst.StateNull)
+		}
+
+		if err := normalizeHLSTimestamps(r.outputDir); err != nil {
+			log.Printf("[%s] failed to normalize HLS timestamps: %v", r.logPrefix(), err)
+		} else {
+			log.Printf("[%s] normalized HLS timestamps", r.logPrefix())
 		}
 
 		videoSeconds := float64(r.videoLastPTS) / 1_000_000_000
