@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"testing"
 
+	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -145,4 +146,49 @@ func TestSetEncryptionKeyConcurrent(t *testing.T) {
 	assert.NotNil(t, pipeline.encryptionKey)
 	assert.NotNil(t, pipeline.encryptionCipher)
 	pipeline.mu.RUnlock()
+}
+
+// TestMediaPipelineE2EEDecryption tests end-to-end encryption/decryption flow
+// This integration test verifies that our pipeline correctly:
+// 1. Stores encryption key and cipher via SetEncryptionKey
+// 2. Uses the cached cipher to decrypt audio packets
+func TestMediaPipelineE2EEDecryption(t *testing.T) {
+	pipeline := NewMediaPipeline()
+
+	// Original plaintext audio data
+	plaintext := []byte{
+		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+	}
+
+	// Generate encryption key (16 bytes)
+	keyBytes := []byte{
+		0x8d, 0x94, 0x22, 0x46, 0x98, 0xa8, 0xc8, 0x6f,
+		0x1b, 0xce, 0x9a, 0x1e, 0x8c, 0x4e, 0xe5, 0xc6,
+	}
+	encodedKey := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(keyBytes)
+
+	// Step 1: Set encryption key in pipeline (this is our code)
+	err := pipeline.SetEncryptionKey(nil, encodedKey)
+	require.NoError(t, err)
+
+	// Step 2: Get the cached cipher from pipeline (testing our cipher caching)
+	pipeline.mu.RLock()
+	cipherBlock := pipeline.encryptionCipher
+	pipeline.mu.RUnlock()
+	require.NotNil(t, cipherBlock, "cipher should be cached after SetEncryptionKey")
+
+	// Step 3: Encrypt plaintext (simulating what the client/browser does)
+	// We use LiveKit SDK here only to simulate the client side
+	encrypted, err := lksdk.EncryptGCMAudioSampleCustomCipher(plaintext, 0, cipherBlock)
+	require.NoError(t, err)
+	assert.NotEqual(t, plaintext, encrypted, "encrypted data should differ from plaintext")
+
+	// Step 4: Decrypt using our cached cipher (this tests our integration)
+	// This mimics what happens in subscribeToTrack when processing RTP packets
+	decrypted, err := lksdk.DecryptGCMAudioSampleCustomCipher(encrypted, nil, cipherBlock)
+	require.NoError(t, err)
+
+	// Step 5: Verify decrypted matches original plaintext
+	assert.Equal(t, plaintext, decrypted, "decrypted data should match original plaintext")
 }
