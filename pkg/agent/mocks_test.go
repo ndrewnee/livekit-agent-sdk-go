@@ -22,6 +22,7 @@ type MockRoom struct {
 	connectionState      lksdk.ConnectionState
 	dataReceivedCallback func(data []byte, participant *lksdk.RemoteParticipant, kind livekit.DataPacket_Kind)
 	callbacks            *lksdk.RoomCallback
+	sifTrailer           []byte // Server Injected Frame trailer for E2EE testing
 }
 
 func NewMockRoom() *MockRoom {
@@ -104,6 +105,20 @@ func (r *MockRoom) OnDataReceived(callback func(data []byte, participant *lksdk.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.dataReceivedCallback = callback
+}
+
+// SifTrailer returns the Server Injected Frame trailer for E2EE
+func (r *MockRoom) SifTrailer() []byte {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.sifTrailer
+}
+
+// SetSifTrailer sets the SIF trailer for testing
+func (r *MockRoom) SetSifTrailer(trailer []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sifTrailer = trailer
 }
 
 // Helper method to add a mock participant
