@@ -77,7 +77,17 @@ type ParticipantRecorder struct {
 	wg        sync.WaitGroup
 	stopOnce  sync.Once
 	startTime time.Time
+
+	preVideoMu      sync.Mutex
+	preVideoPackets []*rtp.Packet
+	preAudioMu      sync.Mutex
+	preAudioPackets []*rtp.Packet
 }
+
+const (
+	preVideoBufferMax = 300
+	preAudioBufferMax = 500
+)
 
 // RecordingSummary contains statistics and metadata about a completed recording.
 type RecordingSummary struct {
@@ -654,6 +664,82 @@ func (r *ParticipantRecorder) initVideoCaps(payloadType uint8) {
 	log.Printf("[%s] video caps initialized: %s", r.logPrefix(), capsStr)
 }
 
+func (r *ParticipantRecorder) enqueuePreVideoPacket(pkt *rtp.Packet) {
+	if pkt == nil {
+		return
+	}
+	clone := pkt.Clone()
+	if clone == nil {
+		return
+	}
+	r.preVideoMu.Lock()
+	if len(r.preVideoPackets) >= preVideoBufferMax {
+		r.preVideoPackets[0] = nil
+		r.preVideoPackets = r.preVideoPackets[1:]
+	}
+	r.preVideoPackets = append(r.preVideoPackets, clone)
+	r.preVideoMu.Unlock()
+}
+
+func (r *ParticipantRecorder) dequeuePreVideoPacket() *rtp.Packet {
+	r.preVideoMu.Lock()
+	defer r.preVideoMu.Unlock()
+	if len(r.preVideoPackets) == 0 {
+		return nil
+	}
+	pkt := r.preVideoPackets[0]
+	r.preVideoPackets[0] = nil
+	r.preVideoPackets = r.preVideoPackets[1:]
+	return pkt
+}
+
+func (r *ParticipantRecorder) clearPreVideoBuffer() {
+	r.preVideoMu.Lock()
+	for i := range r.preVideoPackets {
+		r.preVideoPackets[i] = nil
+	}
+	r.preVideoPackets = nil
+	r.preVideoMu.Unlock()
+}
+
+func (r *ParticipantRecorder) enqueuePreAudioPacket(pkt *rtp.Packet) {
+	if pkt == nil {
+		return
+	}
+	clone := pkt.Clone()
+	if clone == nil {
+		return
+	}
+	r.preAudioMu.Lock()
+	if len(r.preAudioPackets) >= preAudioBufferMax {
+		r.preAudioPackets[0] = nil
+		r.preAudioPackets = r.preAudioPackets[1:]
+	}
+	r.preAudioPackets = append(r.preAudioPackets, clone)
+	r.preAudioMu.Unlock()
+}
+
+func (r *ParticipantRecorder) dequeuePreAudioPacket() *rtp.Packet {
+	r.preAudioMu.Lock()
+	defer r.preAudioMu.Unlock()
+	if len(r.preAudioPackets) == 0 {
+		return nil
+	}
+	pkt := r.preAudioPackets[0]
+	r.preAudioPackets[0] = nil
+	r.preAudioPackets = r.preAudioPackets[1:]
+	return pkt
+}
+
+func (r *ParticipantRecorder) clearPreAudioBuffer() {
+	r.preAudioMu.Lock()
+	for i := range r.preAudioPackets {
+		r.preAudioPackets[i] = nil
+	}
+	r.preAudioPackets = nil
+	r.preAudioMu.Unlock()
+}
+
 func (r *ParticipantRecorder) pushVideoPacket(pkt *rtp.Packet) error {
 	pts, relative := r.videoClockTime(pkt.Timestamp)
 	pkt.Timestamp = relative
@@ -810,27 +896,47 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 		injectedSprop := false
 
 		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
+			var rtpPacket *rtp.Packet
+			var fromBuffer bool
 
-			rtpPacket, _, err := track.ReadRTP()
-			if err != nil {
-				if ctx.Err() == nil {
-					log.Printf("[%s] video track read error: %v", r.logPrefix(), err)
+			if r.recordingActive.Load() {
+				if buffered := r.dequeuePreVideoPacket(); buffered != nil {
+					rtpPacket = buffered
+					fromBuffer = true
 				}
-				return
 			}
 
-			if firstPacket {
-				firstPacket = false
-				log.Printf("[%s] requesting initial keyframe via PLI (seq=%d)", r.logPrefix(), rtpPacket.SequenceNumber)
-				r.requestPLI(pliWriter, track.SSRC())
+			if rtpPacket == nil {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				var err error
+				rtpPacket, _, err = track.ReadRTP()
+				if err != nil {
+					if ctx.Err() == nil {
+						log.Printf("[%s] video track read error: %v", r.logPrefix(), err)
+					}
+					return
+				}
+
+				if firstPacket {
+					firstPacket = false
+					log.Printf("[%s] requesting initial keyframe via PLI (seq=%d)", r.logPrefix(), rtpPacket.SequenceNumber)
+					r.requestPLI(pliWriter, track.SSRC())
+				}
+			}
+
+			if rtpPacket == nil {
+				continue
 			}
 
 			if len(rtpPacket.Payload) == 0 {
+				if !fromBuffer {
+					continue
+				}
 				continue
 			}
 
@@ -858,6 +964,9 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 
 			if !r.handshakeReady.Load() {
 				if isKeyframe {
+					if !fromBuffer {
+						r.enqueuePreVideoPacket(rtpPacket)
+					}
 					r.mu.Lock()
 					r.videoKeyframeCount++
 					r.mu.Unlock()
@@ -874,6 +983,9 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 			}
 
 			if !r.recordingActive.Load() {
+				if !fromBuffer {
+					r.enqueuePreVideoPacket(rtpPacket)
+				}
 				continue
 			}
 
@@ -923,6 +1035,9 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 						log.Printf("[%s] waiting for keyframe to begin recording, sending PLI (seq=%d)", r.logPrefix(), rtpPacket.SequenceNumber)
 						r.requestPLI(pliWriter, track.SSRC())
 					}
+					if !fromBuffer {
+						r.enqueuePreVideoPacket(rtpPacket)
+					}
 					continue
 				}
 			}
@@ -952,20 +1067,41 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 		log.Printf("[%s] audio track subscribed (sid=%s, codec=%s, payloadType=%d)",
 			r.logPrefix(), track.ID(), track.Codec().MimeType, track.PayloadType())
 		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
+			var rtpPacket *rtp.Packet
+			var fromBuffer bool
+
+			if r.recordingActive.Load() && !r.recordingKeyframePending.Load() {
+				if buffered := r.dequeuePreAudioPacket(); buffered != nil {
+					rtpPacket = buffered
+					fromBuffer = true
+				}
 			}
 
-			rtpPacket, _, err := track.ReadRTP()
-			if err != nil {
-				if ctx.Err() == nil {
-					log.Printf("[%s] audio track read error: %v", r.logPrefix(), err)
+			if rtpPacket == nil {
+				select {
+				case <-ctx.Done():
+					return
+				default:
 				}
-				return
+
+				var err error
+				rtpPacket, _, err = track.ReadRTP()
+				if err != nil {
+					if ctx.Err() == nil {
+						log.Printf("[%s] audio track read error: %v", r.logPrefix(), err)
+					}
+					return
+				}
 			}
+
+			if rtpPacket == nil {
+				continue
+			}
+
 			if !r.recordingActive.Load() || r.recordingKeyframePending.Load() {
+				if !fromBuffer {
+					r.enqueuePreAudioPacket(rtpPacket)
+				}
 				continue
 			}
 			r.mu.Lock()
@@ -1057,6 +1193,9 @@ func (r *ParticipantRecorder) Stop() {
 			}
 			r.pipeline.SetState(gst.StateNull)
 		}
+
+		r.clearPreVideoBuffer()
+		r.clearPreAudioBuffer()
 
 		if err := normalizeHLSTimestamps(r.outputDir); err != nil {
 			log.Printf("[%s] failed to normalize HLS timestamps: %v", r.logPrefix(), err)
