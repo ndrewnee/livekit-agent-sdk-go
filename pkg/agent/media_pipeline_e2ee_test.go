@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"crypto/aes"
 	"encoding/base64"
 	"testing"
 
@@ -191,4 +192,35 @@ func TestMediaPipelineE2EEDecryption(t *testing.T) {
 
 	// Step 5: Verify decrypted matches original plaintext
 	assert.Equal(t, plaintext, decrypted, "decrypted data should match original plaintext")
+}
+
+// TestMediaPipelineE2EEDecryptionWithSIFTrailer tests SIF (Server Injected Frame) handling
+// This test verifies that LiveKit SDK correctly returns nil for server-injected frames,
+// which our pipeline then skips (via the nil check in receiveAudioPackets).
+func TestMediaPipelineE2EEDecryptionWithSIFTrailer(t *testing.T) {
+	// Generate encryption key (16 bytes)
+	keyBytes := []byte{
+		0x8d, 0x94, 0x22, 0x46, 0x98, 0xa8, 0xc8, 0x6f,
+		0x1b, 0xce, 0x9a, 0x1e, 0x8c, 0x4e, 0xe5, 0xc6,
+	}
+
+	// Derive key and create cipher (same as our pipeline does)
+	derivedKey, err := lksdk.DeriveKeyFromBytes(keyBytes)
+	require.NoError(t, err)
+
+	cipherBlock, err := aes.NewCipher(derivedKey)
+	require.NoError(t, err)
+
+	// Define SIF trailer
+	sifTrailer := []byte{0xDD, 0xEE, 0xFF}
+
+	// Create a sample with SIF trailer appended (simulating server-injected frame)
+	sample := []byte{0x01, 0x02, 0x03}
+	sampleWithTrailer := append(sample, sifTrailer...)
+
+	// Decrypt should return nil for SIF frames
+	// Our pipeline code checks for this nil and skips the frame (lines 658-661 in media_pipeline.go)
+	decrypted, err := lksdk.DecryptGCMAudioSampleCustomCipher(sampleWithTrailer, sifTrailer, cipherBlock)
+	require.NoError(t, err)
+	assert.Nil(t, decrypted, "SIF frames should return nil, which pipeline skips via nil check")
 }

@@ -357,7 +357,7 @@ func NewMediaPipeline() *MediaPipeline {
 //
 // Parameters:
 //   - room: LiveKit room (used to get SifTrailer and for future room-related features)
-//   - encodedKey: Base64-encoded (URL encoding, no padding) AES-128 encryption key from MongoDB
+//   - encodedKey: Base64-URL encoded (RFC 4648, no padding) 16-byte AES-128 encryption key
 //
 // Returns an error if the key cannot be decoded or is invalid.
 func (mp *MediaPipeline) SetEncryptionKey(room *lksdk.Room, encodedKey string) error {
@@ -390,7 +390,7 @@ func (mp *MediaPipeline) SetEncryptionKey(room *lksdk.Room, encodedKey string) e
 	// Store room reference, HKDF-derived key and pre-created cipher block for reuse
 	mp.mu.Lock()
 	mp.room = room
-	mp.encryptionKey = derivedKey  // Store derived key, not raw bytes
+	mp.encryptionKey = derivedKey // Store derived key, not raw bytes
 	mp.encryptionCipher = block
 	mp.mu.Unlock()
 
@@ -646,10 +646,15 @@ func (mp *MediaPipeline) receiveAudioPackets(ctx context.Context, track *webrtc.
 				// The function will skip decryption for server-injected frames (matching sifTrailer)
 				decryptedPayload, err := lksdk.DecryptGCMAudioSampleCustomCipher(payload, sifTrailer, cipherBlock)
 				if err != nil {
-					getLogger.Warnw("decryption failed, skipping frame", err,
+					getLogger.Warnw("E2EE decryption failed, skipping frame", err,
 						"trackID", track.ID(),
 						"sequence", rtpPacket.SequenceNumber,
 						"payloadSize", len(payload))
+					continue
+				}
+
+				// Skip server-injected frames (SIF) - they return nil payload
+				if decryptedPayload == nil {
 					continue
 				}
 
