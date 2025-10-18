@@ -275,40 +275,13 @@ func TestPublisherHLSAgentWithOpus(t *testing.T) {
 		},
 	}
 
-	result := runE2EScenario(t, scenario)
+	_ = runE2EScenario(t, scenario)
 
-	// Validate output files exist
-	requireFileExists(t, filepath.Join(result.participantDir, "playlist.m3u8"))
-	requireFileExists(t, filepath.Join(result.participantDir, "output.ts"))
+	// Skip local file validation when S3 upload is enabled
+	// (local files are cleaned up after successful S3 upload)
+	// Verify Opus codec from S3 segments instead
 
-	// Verify the recording contains Opus audio codec
-	outputFile := filepath.Join(result.participantDir, "output.ts")
-	cmd := exec.Command("ffprobe",
-		"-v", "error",
-		"-select_streams", "a:0",
-		"-show_entries", "stream=codec_name",
-		"-of", "default=nokey=1:noprint_wrappers=1",
-		outputFile,
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("failed to check audio codec: %v (output: %s)", err, string(output))
-	}
-	audioCodec := strings.TrimSpace(string(output))
-	// Handle case where ffprobe returns multiple lines (one per audio stream)
-	audioCodecLines := strings.Split(audioCodec, "\n")
-	if len(audioCodecLines) == 0 || audioCodecLines[0] != "opus" {
-		t.Fatalf("expected opus audio codec but got: %s", audioCodec)
-	}
-	// Verify all audio streams are Opus
-	for i, codec := range audioCodecLines {
-		if strings.TrimSpace(codec) != "opus" {
-			t.Fatalf("expected all audio streams to be opus, but stream %d is: %s", i, codec)
-		}
-	}
-	t.Logf("verified recording contains Opus audio codec (%d stream(s))", len(audioCodecLines))
-
-	// Validate S3 upload
+	// Validate S3 upload and verify Opus codec
 	client := ms.NewClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -341,6 +314,27 @@ func TestPublisherHLSAgentWithOpus(t *testing.T) {
 	if !foundFirstSegment {
 		t.Fatalf("playlist at %s missing EXTINF entries", playlistObj)
 	}
+
+	// Download first segment from S3 to verify Opus codec
+	firstSegment := path.Join(remotePrefix, "segment00000.ts")
+	tempSegment := filepath.Join(os.TempDir(), "opus-verify-segment.ts")
+	if err := client.FGetObject(ctx, s3Bucket, firstSegment, tempSegment, minio.GetObjectOptions{}); err != nil {
+		t.Fatalf("failed to download segment for codec verification: %v", err)
+	}
+	defer os.Remove(tempSegment)
+
+	// Verify Opus codec in segment
+	cmd := exec.Command("ffprobe", "-v", "error", "-select_streams", "a:0",
+		"-show_entries", "stream=codec_name", "-of", "default=nokey=1:noprint_wrappers=1", tempSegment)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to check audio codec: %v (output: %s)", err, string(output))
+	}
+	audioCodec := strings.TrimSpace(string(output))
+	if !strings.Contains(audioCodec, "opus") {
+		t.Fatalf("expected opus audio codec but got: %s", audioCodec)
+	}
+	t.Logf("✓ verified recording contains Opus audio codec from S3 segment")
 
 	policy := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":["s3:GetObject"],"Resource":["arn:aws:s3:::%s/%s/*"]}]}`, s3Bucket, remotePrefix)
 	if err := client.SetBucketPolicy(context.Background(), s3Bucket, policy); err != nil {
