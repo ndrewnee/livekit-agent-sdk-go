@@ -269,7 +269,10 @@ func (s *RecordingSession) initializeComponents() error {
 			segmentDuration = 6 * time.Second // Default
 		}
 
-		hlsSaver, err := NewHLSSaver(sessionID, s.config.PipelineConfig.OutputDir, segmentDuration)
+		// S3 config disabled by default (can be enabled via Config in future)
+		s3Config := S3Config{Enabled: false}
+
+		hlsSaver, err := NewHLSSaver(sessionID, s.config.PipelineConfig.OutputDir, segmentDuration, s3Config)
 		if err != nil {
 			return fmt.Errorf("failed to create HLS saver: %w", err)
 		}

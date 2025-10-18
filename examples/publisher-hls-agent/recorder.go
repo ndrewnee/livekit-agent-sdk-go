@@ -82,6 +82,8 @@ type ParticipantRecorder struct {
 	preVideoPackets []*rtp.Packet
 	preAudioMu      sync.Mutex
 	preAudioPackets []*rtp.Packet
+
+	s3Uploader *RealtimeS3Uploader // Real-time S3 uploader (nil if disabled)
 }
 
 const (
@@ -110,8 +112,15 @@ type RecordingSummary struct {
 //
 // Returns an error if the output directory cannot be created or
 // if any GStreamer element fails to initialize.
+//
+// Each recorder creates a unique temporary directory to support concurrent recordings.
+// Directory format: OUTPUT_DIR/room_participant_timestamp
 func NewParticipantRecorder(cfg *Config, roomName, participant string) (*ParticipantRecorder, error) {
-	baseDir := filepath.Join(cfg.OutputDir, roomName, participant)
+	// Create single unique directory for this recording session
+	// Format: room_participant_timestamp (flat structure for easy cleanup)
+	timestamp := time.Now().Format("20060102-150405.000")
+	sessionDir := fmt.Sprintf("%s_%s_%s", roomName, participant, timestamp)
+	baseDir := filepath.Join(cfg.OutputDir, sessionDir)
 	absDir, err := filepath.Abs(baseDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve output directory: %w", err)
@@ -119,6 +128,18 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 
 	if err := os.MkdirAll(absDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create output directory %s: %w", absDir, err)
+	}
+
+	log.Printf("[%s/%s] created session directory: %s", roomName, participant, absDir)
+
+	// Initialize real-time S3 uploader if enabled
+	var s3Uploader *RealtimeS3Uploader
+	if cfg.S3RealTimeUpload && cfg.S3.Enabled() {
+		uploader, err := NewRealtimeS3Uploader(cfg.S3, roomName, participant, absDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create real-time S3 uploader: %w", err)
+		}
+		s3Uploader = uploader
 	}
 
 	gst.Init(nil)
@@ -389,6 +410,7 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		audioDepay:   audioDepay,
 		startTime:    time.Now(),
 		videoReadyCh: make(chan struct{}),
+		s3Uploader:   s3Uploader,
 	}
 
 	audioCodec := "AAC"
@@ -1201,6 +1223,13 @@ func (r *ParticipantRecorder) Stop() {
 			log.Printf("[%s] failed to normalize HLS timestamps: %v", r.logPrefix(), err)
 		} else {
 			log.Printf("[%s] normalized HLS timestamps", r.logPrefix())
+		}
+
+		// Close real-time S3 uploader if enabled
+		if r.s3Uploader != nil {
+			if err := r.s3Uploader.Close(); err != nil {
+				log.Printf("[%s] failed to close S3 uploader: %v", r.logPrefix(), err)
+			}
 		}
 
 		videoSeconds := float64(r.videoLastPTS) / 1_000_000_000

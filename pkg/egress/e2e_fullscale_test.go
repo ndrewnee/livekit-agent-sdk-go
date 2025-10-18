@@ -456,7 +456,7 @@ func (s *TestRecordingSession) Start(ctx context.Context) error {
 
 	// Create HLSSaver (no GStreamer!)
 	// Use 2 second segments so we get multiple complete segments during 20s recording
-	saver, err := NewHLSSaver(s.job.Id, s.outputDir, 2*time.Second)
+	saver, err := NewHLSSaver(s.job.Id, s.outputDir, 2*time.Second, S3Config{Enabled: false})
 	if err != nil {
 		return fmt.Errorf("failed to create HLS saver: %w", err)
 	}

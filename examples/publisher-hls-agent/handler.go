@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -144,22 +145,51 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 		cancel()
 		recorder.Stop()
 		h.removeSession(jobCtx.Job.Id)
+
+		outputDir := recorder.OutputDirectory()
+		cleanupDir := false
+
 		if started {
 			summary := recorder.Summary()
+			// Handle S3 upload based on upload mode
 			if h.cfg.S3.Enabled() {
-				ctx, uploadCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				defer uploadCancel()
-				if remote, err := uploadRecordingToS3(ctx, h.cfg.S3, roomName, participantIdentity, recorder.OutputDirectory()); err != nil {
-					log.Printf("[%s/%s] failed to upload recording to S3: %v", roomName, participantIdentity, err)
-					if summary.Err == nil {
-						summary.Err = err
+				if h.cfg.S3RealTimeUpload {
+					// Real-time upload: files already uploaded during recording
+					// Get S3 URL from the recorder's uploader
+					if recorder.s3Uploader != nil {
+						summary.Remote = recorder.s3Uploader.GetS3URL()
+						log.Printf("[%s/%s] uploaded recording to %s (real-time S3)", roomName, participantIdentity, summary.Remote)
+						cleanupDir = true // S3 upload successful, safe to clean up
 					}
 				} else {
-					summary.Remote = remote
-					log.Printf("[%s/%s] uploaded recording to %s", roomName, participantIdentity, remote)
+					// Post-processing upload: upload all files after recording completes
+					ctx, uploadCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+					defer uploadCancel()
+					if remote, err := uploadRecordingToS3(ctx, h.cfg.S3, roomName, participantIdentity, recorder.OutputDirectory()); err != nil {
+						log.Printf("[%s/%s] failed to upload recording to S3: %v", roomName, participantIdentity, err)
+						if summary.Err == nil {
+							summary.Err = err
+						}
+					} else {
+						summary.Remote = remote
+						log.Printf("[%s/%s] uploaded recording to %s", roomName, participantIdentity, remote)
+						cleanupDir = true // S3 upload successful, safe to clean up
+					}
 				}
 			}
 			h.addSummary(summary)
+		} else {
+			// Recording was stopped before it started (e.g., cancellation, early failure)
+			cleanupDir = true
+		}
+
+		// Clean up temporary directory
+		if cleanupDir && outputDir != "" {
+			if err := os.RemoveAll(outputDir); err != nil {
+				log.Printf("[%s/%s] warning: failed to remove temporary directory %s: %v", roomName, participantIdentity, outputDir, err)
+			} else {
+				log.Printf("[%s/%s] cleaned up temporary directory: %s", roomName, participantIdentity, outputDir)
+			}
 		}
 	}()
 

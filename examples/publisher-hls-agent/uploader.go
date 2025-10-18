@@ -25,13 +25,14 @@ import (
 //     - .ts files: video/MP2T
 //     - Other files: detected via MIME type or application/octet-stream
 //  5. Preserves directory structure under s3://{bucket}/{prefix}/{room}/{participant}/
+//  6. Skips output.ts as it's redundant (HLS segments contain all data)
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeout (2-minute overall timeout applied)
 //   - cfg: S3 configuration including endpoint, bucket, credentials, and options
 //   - room: LiveKit room name (used in S3 path)
 //   - participant: Participant identity (used in S3 path)
-//   - dir: Local directory containing recording files (output.ts, playlist.m3u8, segments)
+//   - dir: Local directory containing recording files (playlist.m3u8, segments)
 //
 // Returns:
 //   - string: S3 base URL (s3://{bucket}/{prefix}/{room}/{participant}) if upload succeeds
@@ -84,6 +85,11 @@ func uploadRecordingToS3(ctx context.Context, cfg S3Config, room, participant, d
 			return walkErr
 		}
 		if d.IsDir() {
+			return nil
+		}
+
+		// Skip output.ts - it's redundant when we have HLS segments
+		if d.Name() == "output.ts" {
 			return nil
 		}
 
