@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -42,24 +43,6 @@ type e2eResult struct {
 	roomName        string
 	participantName string
 }
-
-//func TestPublisherHLSAgentEndToEnd(t *testing.T) {
-//	if testing.Short() {
-//		t.Skip("skipping end-to-end integration test in short mode")
-//	}
-//
-//	// Use unique agent name to avoid conflicts with stale workers from previous test runs
-//	uniqueAgentName := fmt.Sprintf("publisher-hls-e2e-agent-%d", time.Now().UnixNano())
-//
-//	runE2EScenario(t, e2eScenario{
-//		name:        "local-output",
-//		agentName:   uniqueAgentName,
-//		roomName:    "publisher-hls-e2e-room",
-//		participant: "publisher-hls-e2e-participant",
-//		outputDir:   "",
-//		agentEnv:    map[string]string{},
-//	})
-//}
 
 func TestPublisherHLSAgentUploadsToS3(t *testing.T) {
 	if testing.Short() {
@@ -146,11 +129,367 @@ func TestPublisherHLSAgentUploadsToS3(t *testing.T) {
 	}
 }
 
+// TestPublisherHLSAgentMultipleParticipants tests the agent's behavior with multiple simultaneous
+// participants joining the room and publishing tracks. This full-scale test validates:
+//   - Concurrent participant connections
+//   - Multiple simultaneous HLS recordings
+//   - S3 uploads for all participants
+//   - Agent stability under load
+//
+// By default, this test creates 3 participants. Set PARTICIPANT_COUNT environment variable
+// to test with a different number of participants.
+func TestPublisherHLSAgentMultipleParticipants(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping end-to-end integration test in short mode")
+	}
+
+	// Configure test parameters
+	participantCount := 3
+	if countStr := os.Getenv("PARTICIPANT_COUNT"); countStr != "" {
+		if count, err := strconv.Atoi(countStr); err == nil && count > 0 {
+			participantCount = count
+		}
+	}
+
+	t.Logf("Testing with %d simultaneous participants", participantCount)
+
+	ms := startMinIOServer(t)
+	if !ms.KeepAlive {
+		defer ms.Shutdown(t)
+	} else {
+		t.Logf("PUBLISHER_HLS_KEEP_MINIO=1 detected; MinIO will remain running at http://%s", ms.Endpoint)
+	}
+
+	uniqueAgentName := fmt.Sprintf("publisher-hls-multi-agent-%d", time.Now().UnixNano())
+	roomName := "publisher-hls-multi-room"
+
+	// Set up infrastructure (server, agent, room)
+	repoRoot := findRepoRoot(t)
+	serverBinary, err := exec.LookPath("livekit-server")
+	if err != nil {
+		t.Fatalf("livekit-server not found in PATH: %v", err)
+	}
+	configPath := filepath.Join(repoRoot, "examples", "livekit-server-dev.yaml")
+	testVideo := filepath.Join(repoRoot, "examples", "publisher-hls-agent", "test", "test.mp4")
+	requireFileExists(t, testVideo)
+
+	outputDir := filepath.Join(repoRoot, "examples", "publisher-hls-agent", "hls-agent-recordings-multi-participant")
+	if err := os.RemoveAll(outputDir); err != nil {
+		t.Fatalf("failed to clean output dir: %v", err)
+	}
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		t.Fatalf("failed to create output dir: %v", err)
+	}
+	keepOutputs := os.Getenv("PUBLISHER_HLS_KEEP_MINIO") == "1"
+	t.Cleanup(func() {
+		if keepOutputs {
+			t.Logf("PUBLISHER_HLS_KEEP_MINIO=1 set; preserving output dir: %s", outputDir)
+			return
+		}
+		if !t.Failed() {
+			_ = os.RemoveAll(outputDir)
+		} else {
+			t.Logf("preserving output dir for failed test: %s", outputDir)
+		}
+	})
+
+	tempRoot := t.TempDir()
+	serverLogPath := filepath.Join(tempRoot, "livekit-server.log")
+	agentLogPath := filepath.Join(tempRoot, "publisher-hls-agent.log")
+	t.Logf("livekit server log: %s", serverLogPath)
+	t.Logf("publisher agent log: %s", agentLogPath)
+
+	// Start LiveKit server
+	serverLogFile, err := os.Create(serverLogPath)
+	if err != nil {
+		t.Fatalf("failed to create server log file: %v", err)
+	}
+	defer serverLogFile.Close()
+
+	serverCmd := exec.Command(serverBinary, "--dev", "--config", configPath, "--node-ip", "127.0.0.1")
+	serverCmd.Dir = repoRoot
+	serverCmd.Stdout = serverLogFile
+	serverCmd.Stderr = serverLogFile
+
+	if err := serverCmd.Start(); err != nil {
+		t.Fatalf("failed to start livekit server: %v", err)
+	}
+	t.Cleanup(func() {
+		shutdownProcess(t, serverCmd, "livekit-server", 10*time.Second)
+	})
+
+	if err := waitForLiveKitServer("localhost:7880", 25*time.Second); err != nil {
+		t.Fatalf("livekit server not ready: %v", err)
+	}
+
+	// Start publisher-hls-agent
+	agentLogFile, err := os.Create(agentLogPath)
+	if err != nil {
+		t.Fatalf("failed to create agent log file: %v", err)
+	}
+	defer agentLogFile.Close()
+
+	agentDir := filepath.Join(repoRoot, "examples", "publisher-hls-agent")
+	agentCmd := exec.Command("go", "run", ".")
+	agentCmd.Dir = agentDir
+	agentCmd.Stdout = agentLogFile
+	agentCmd.Stderr = agentLogFile
+	agentCmd.Env = append(os.Environ(),
+		fmt.Sprintf("LIVEKIT_URL=%s", testLiveKitURL),
+		fmt.Sprintf("LIVEKIT_API_KEY=%s", testAPIKey),
+		fmt.Sprintf("LIVEKIT_API_SECRET=%s", testAPISecret),
+		fmt.Sprintf("OUTPUT_DIR=%s", outputDir),
+		fmt.Sprintf("AGENT_NAME=%s", uniqueAgentName),
+		"HLS_SEGMENT_DURATION=2",
+		"HLS_MAX_SEGMENTS=0",
+		"KEEP_OPUS=true",
+		fmt.Sprintf("S3_ENDPOINT=%s", ms.Endpoint),
+		fmt.Sprintf("S3_BUCKET=%s", ms.Bucket),
+		"S3_REGION=us-east-1",
+		fmt.Sprintf("S3_ACCESS_KEY=%s", ms.AccessKey),
+		fmt.Sprintf("S3_SECRET_KEY=%s", ms.SecretKey),
+		"S3_FORCE_PATH_STYLE=true",
+		"S3_USE_SSL=false",
+		"S3_PREFIX=multi-participant-tests",
+		"S3_OBJECT_ACL=public-read",
+		"AUTO_ACTIVATE_RECORDING=true",
+	)
+
+	if err := agentCmd.Start(); err != nil {
+		t.Fatalf("failed to start publisher agent: %v", err)
+	}
+	t.Cleanup(func() {
+		shutdownProcess(t, agentCmd, "publisher-hls-agent", 15*time.Second)
+	})
+
+	if err := waitForLogContains(agentLogPath, "Worker registered", 20*time.Second); err != nil {
+		t.Fatalf("agent failed to register: %v", err)
+	}
+
+	// Create room with agent dispatch
+	roomClient := lksdk.NewRoomServiceClient("http://localhost:7880", testAPIKey, testAPISecret)
+	_, _ = roomClient.DeleteRoom(context.Background(), &livekit.DeleteRoomRequest{Room: roomName})
+
+	_, err = roomClient.CreateRoom(context.Background(), &livekit.CreateRoomRequest{
+		Name: roomName,
+		Agents: []*livekit.RoomAgentDispatch{
+			{
+				AgentName: uniqueAgentName,
+				Metadata:  `{"record_audio":true,"record_video":true}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create test room: %v", err)
+	}
+	defer func() {
+		_, _ = roomClient.DeleteRoom(context.Background(), &livekit.DeleteRoomRequest{Room: roomName})
+	}()
+
+	// Launch multiple participants concurrently
+	var wg sync.WaitGroup
+	participantErrors := make(chan error, participantCount)
+	participantNames := make([]string, participantCount)
+
+	for i := 0; i < participantCount; i++ {
+		participantIdentity := fmt.Sprintf("multi-participant-%d", i+1)
+		participantNames[i] = participantIdentity
+
+		wg.Add(1)
+		go func(idx int, identity string) {
+			defer wg.Done()
+
+			if err := runParticipant(t, roomName, identity, testVideo, agentLogPath); err != nil {
+				participantErrors <- fmt.Errorf("participant %s failed: %w", identity, err)
+			} else {
+				t.Logf("✓ participant %s completed successfully", identity)
+			}
+		}(i, participantIdentity)
+
+		// Stagger participant joins slightly to simulate realistic conditions
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Wait for all participants to complete
+	t.Logf("Waiting for all %d participants to complete...", participantCount)
+	wg.Wait()
+	close(participantErrors)
+
+	// Check for any participant errors
+	for err := range participantErrors {
+		t.Errorf("Participant error: %v", err)
+	}
+
+	// Wait for S3 uploads to complete
+	t.Logf("Waiting for S3 uploads to complete...")
+	time.Sleep(10 * time.Second)
+
+	// Validate S3 recordings for all participants
+	client := ms.NewClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	successCount := 0
+	for _, participantName := range participantNames {
+		prefix := path.Join("multi-participant-tests", roomName, participantName)
+		playlistObj := path.Join(prefix, "playlist.m3u8")
+
+		t.Logf("Validating S3 recording for %s...", participantName)
+
+		// Wait for playlist to appear in S3
+		found := false
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			_, err := client.StatObject(ctx, ms.Bucket, playlistObj, minio.StatObjectOptions{})
+			if err == nil {
+				found = true
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		if !found {
+			t.Errorf("playlist not found in S3 for participant %s at %s", participantName, playlistObj)
+			continue
+		}
+
+		// Validate playlist content
+		reader, err := client.GetObject(ctx, ms.Bucket, playlistObj, minio.GetObjectOptions{})
+		if err != nil {
+			t.Errorf("failed to fetch playlist for %s: %v", participantName, err)
+			continue
+		}
+
+		scanner := bufio.NewScanner(reader)
+		foundSegments := 0
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "#EXTINF:") {
+				foundSegments++
+			}
+		}
+		reader.Close()
+
+		if foundSegments == 0 {
+			t.Errorf("playlist for %s has no segments", participantName)
+			continue
+		}
+
+		t.Logf("✓ participant %s: validated S3 recording with %d segments", participantName, foundSegments)
+		successCount++
+	}
+
+	if successCount != participantCount {
+		t.Fatalf("Only %d/%d participants had valid S3 recordings", successCount, participantCount)
+	}
+
+	t.Logf("✓ All %d participants successfully recorded to S3", participantCount)
+	t.Logf("S3 bucket: http://%s/%s/multi-participant-tests/%s/", ms.Endpoint, ms.Bucket, roomName)
+
+	if ms.KeepAlive {
+		t.Logf("MinIO data dir: %s (server left running)", ms.DataDir)
+	}
+}
+
+// runParticipant connects a single participant, publishes tracks, and waits for recording
+func runParticipant(t *testing.T, roomName, participantIdentity, testVideo, agentLogPath string) error {
+	t.Helper()
+
+	participantRoom, err := lksdk.ConnectToRoom(testLiveKitURL, lksdk.ConnectInfo{
+		APIKey:              testAPIKey,
+		APISecret:           testAPISecret,
+		RoomName:            roomName,
+		ParticipantIdentity: participantIdentity,
+		ParticipantName:     fmt.Sprintf("Publisher %s", participantIdentity),
+	}, &lksdk.RoomCallback{}, lksdk.WithAutoSubscribe(true))
+	if err != nil {
+		return fmt.Errorf("failed to connect: %w", err)
+	}
+	defer participantRoom.Disconnect()
+
+	// Create and publish video track
+	videoTrack, err := lksdk.NewLocalTrack(webrtc.RTPCodecCapability{
+		MimeType:    webrtc.MimeTypeH264,
+		ClockRate:   90000,
+		SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create video track: %w", err)
+	}
+
+	// Create and publish audio track
+	audioTrack, err := lksdk.NewLocalTrack(webrtc.RTPCodecCapability{
+		MimeType:  webrtc.MimeTypeOpus,
+		ClockRate: 48000,
+		Channels:  2,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create audio track: %w", err)
+	}
+
+	videoReady := make(chan struct{})
+	audioReady := make(chan struct{})
+
+	videoTrack.OnBind(func() { close(videoReady) })
+	audioTrack.OnBind(func() { close(audioReady) })
+
+	if _, err := participantRoom.LocalParticipant.PublishTrack(videoTrack, &lksdk.TrackPublicationOptions{
+		Name:   fmt.Sprintf("%s-video", participantIdentity),
+		Source: livekit.TrackSource_CAMERA,
+	}); err != nil {
+		return fmt.Errorf("failed to publish video track: %w", err)
+	}
+
+	if _, err := participantRoom.LocalParticipant.PublishTrack(audioTrack, &lksdk.TrackPublicationOptions{
+		Name: fmt.Sprintf("%s-audio", participantIdentity),
+	}); err != nil {
+		return fmt.Errorf("failed to publish audio track: %w", err)
+	}
+
+	// Wait for tracks to be bound
+	select {
+	case <-videoReady:
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("video track not bound within timeout")
+	}
+
+	select {
+	case <-audioReady:
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("audio track not bound within timeout")
+	}
+
+	// Start publishing media
+	publisher, err := NewGStreamerPublisher(testVideo, videoTrack, audioTrack)
+	if err != nil {
+		return fmt.Errorf("failed to create GStreamer publisher: %w", err)
+	}
+
+	if err := publisher.Start(); err != nil {
+		return fmt.Errorf("failed to start GStreamer publisher: %w", err)
+	}
+
+	// Wait a bit for recording to start
+	time.Sleep(2 * time.Second)
+
+	// Restart publisher to simulate real usage (optional, can be removed for faster tests)
+	if err := publisher.Restart(); err != nil {
+		return fmt.Errorf("failed to restart GStreamer publisher: %w", err)
+	}
+
+	if err := publisher.Wait(); err != nil {
+		return fmt.Errorf("publisher error: %w", err)
+	}
+
+	publisher.Stop()
+
+	return nil
+}
+
 func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	t.Helper()
 
 	repoRoot := findRepoRoot(t)
-	//serverBinary := filepath.Join(repoRoot, "livekit", "livekit-server")
 	serverBinary, err := exec.LookPath("livekit-server")
 	if err != nil {
 		t.Fatalf("livekit-server not found in PATH: %v", err)
