@@ -464,7 +464,8 @@ func (r *ParticipantRecorder) HandshakeReady() bool {
 // ActivateRecording enables recording. The GStreamer pipeline will start
 // at the next keyframe, and all subsequent packets will be recorded to HLS.
 //
-// This resets packet counters and timestamp bases.
+// This resets packet counters and timestamp bases, and clears pre-buffers
+// to ensure recording starts from the next keyframe (not a stale buffered one).
 func (r *ParticipantRecorder) ActivateRecording() {
 	r.recordingActive.Store(true)
 	r.recordingKeyframePending.Store(true)
@@ -486,6 +487,11 @@ func (r *ParticipantRecorder) ActivateRecording() {
 	r.audioLastPTS = 0
 	r.audioLastTimestamp = 0
 	r.mu.Unlock()
+
+	// Clear pre-buffers to prevent stale packets from being recorded
+	// This ensures recording starts cleanly from the next keyframe
+	r.clearPreVideoBuffer()
+	r.clearPreAudioBuffer()
 }
 
 // Start prepares the recorder for operation.

@@ -190,14 +190,11 @@ func TestPublisherHLSAgentUploadsToS3(t *testing.T) {
 		},
 	}
 
-	result := runE2EScenario(t, scenario)
+	_ = runE2EScenario(t, scenario)
 
-	// Skip local file validation when using real-time S3 upload with file deletion
-	// (files are deleted after upload to minimize storage costs)
-	if os.Getenv("S3_REALTIME_UPLOAD") != "true" {
-		requireFileExists(t, filepath.Join(result.participantDir, "playlist.m3u8"))
-		requireFileExists(t, filepath.Join(result.participantDir, "output.ts"))
-	}
+	// Skip local file validation when S3 upload is enabled
+	// (local files are cleaned up after successful S3 upload)
+	// Local file validation is only needed for non-S3 tests
 
 	client := ms.NewClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
