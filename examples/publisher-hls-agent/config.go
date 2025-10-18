@@ -51,6 +51,12 @@ type Config struct {
 	// Environment variable: AGENT_NAME (default: publisher-hls-recorder)
 	AgentName string
 
+	// S3RealTimeUpload enables real-time upload of HLS segments to S3 as they're created.
+	// When enabled, segments are uploaded during recording instead of after completion.
+	// Requires S3 configuration (S3.Enabled() must return true).
+	// Environment variable: S3_REALTIME_UPLOAD (default: false)
+	S3RealTimeUpload bool
+
 	// S3 contains S3-compatible storage configuration for uploads.
 	S3 S3Config
 }
@@ -69,6 +75,7 @@ func loadConfig() *Config {
 		MaxPlaylistEntries:  getEnvInt("HLS_MAX_SEGMENTS", 0),
 		KeepOpus:            getEnvBool("KEEP_OPUS", false),
 		AgentName:           getEnv("AGENT_NAME", "publisher-hls-recorder"),
+		S3RealTimeUpload:    getEnvBool("S3_REALTIME_UPLOAD", false),
 		S3: S3Config{
 			Endpoint:       getEnv("S3_ENDPOINT", ""),
 			Bucket:         getEnv("S3_BUCKET", ""),
