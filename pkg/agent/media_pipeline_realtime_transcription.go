@@ -38,16 +38,10 @@ type RealtimeTranscriptionStage struct {
 	name     string
 	priority int
 
-	// OpenAI configuration
-	apiKey                   string
-	model                    string //
-	voiceMode                string // e.g., "text" for transcription only
-	inputAudioNoiseReduction *NoiseReduction
+	// Configuration
+	config                   *RealtimeTranscriptionConfig
 	audioTranscriptionConfig *AudioTranscriptionConfig
-	instruction              string  // Custom instruction for transcription
-	temperature              float64 // Custom temperature for transcription
 	turnDetection            *TurnDetection
-	voice                    string
 
 	// Connection state
 	mu             sync.RWMutex
@@ -59,10 +53,12 @@ type RealtimeTranscriptionStage struct {
 	ephemeralKey string
 
 	// Transcription handling
-	transcriptionCallbacks []TranscriptionCallback
-	eventChan              chan RealtimeEvent
-	closeChan              chan struct{}
-	wg                     sync.WaitGroup
+	transcriptionCallbacks       []TranscriptionCallback
+	beforeTranscriptionCallbacks []BeforeTranscriptionCallback
+	eventChan                    chan RealtimeEvent
+	closeChan                    chan struct{}
+	closeOnce                    sync.Once
+	wg                           sync.WaitGroup
 
 	// Connection state
 	connected     bool
@@ -71,6 +67,14 @@ type RealtimeTranscriptionStage struct {
 
 	// Statistics
 	stats *RealtimeTranscriptionStats
+
+	// Latest transcription for pipeline output
+	latestTranscription *TranscriptionEvent
+
+	// RTP packet tracking
+	sequenceNumber uint16
+	timestampBase  uint32
+	ssrc           uint32
 }
 
 type NoiseReduction struct {
@@ -86,24 +90,45 @@ type AudioTranscriptionConfig struct {
 type TurnDetection struct {
 	Type              string  `json:"type,omitempty"`
 	Threshold         float64 `json:"threshold,omitempty"`
-	SilenceDuration   float64 `json:"silence_duration_ms,omitempty"`
-	PreffixPadding    float64 `json:"prefix_padding_ms,omitempty"`
+	SilenceDurationMs float64 `json:"silence_duration_ms,omitempty"`
+	PrefixPaddingMs   float64 `json:"prefix_padding_ms,omitempty"`
 	InterruptResponse bool    `json:"interrupt_response,omitempty"`
 	Eagerness         string  `json:"eagerness,omitempty"`
 	CreateResponse    bool    `json:"create_response,omitempty"`
 }
 
+// RealtimeTranscriptionConfig contains configuration for creating a RealtimeTranscriptionStage.
+type RealtimeTranscriptionConfig struct {
+	Name      string         // Unique identifier for this stage
+	Priority  int            // Execution order (lower runs first)
+	APIKey    string         // OpenAI API key for authentication
+	Model     string         // Model to use (defaults to "gpt-4o-mini-transcribe" - fastest and most cost-effective)
+	Language  string         // Language code (e.g., "en", "ru", "zh", "ar")
+	Prompt    string         // Context prompt for better transcription accuracy
+	Voice     string         // Voice to use (e.g., "alloy", "echo", "fable", "onyx", "nova", "shimmer")
+	Timeout   time.Duration  // Timeout for API calls (empty for default 5s)
+	VADConfig *TurnDetection // Optional VAD configuration (auto-configured if nil)
+}
+
 // TranscriptionCallback is called when transcription events occur.
 type TranscriptionCallback func(event TranscriptionEvent)
 
+// BeforeTranscriptionCallback is called before transcription processing starts.
+// It can modify the MediaData, particularly metadata, to inject participant data or other information.
+type BeforeTranscriptionCallback func(data *MediaData)
+
 // TranscriptionEvent represents a transcription event from the Realtime API.
+// This unified event structure is used by both transcription and translation stages.
 type TranscriptionEvent struct {
-	Type      string    // "partial", "final", "error"
-	Text      string    // Transcribed text
-	Timestamp time.Time // When the transcription was received
-	Language  string    // Detected language (if available)
-	IsFinal   bool      // Whether this is a final transcription
-	Error     error     // Error if Type is "error"
+	Type      string    `json:"type,omitempty"`      // "partial", "final", "error"
+	Text      string    `json:"text,omitempty"`      // Transcribed text
+	Timestamp time.Time `json:"timestamp,omitempty"` // When the transcription was received
+	Language  string    `json:"language,omitempty"`  // Detected language (if available)
+	IsFinal   bool      `json:"isFinal"`             // Whether this is a final transcription
+	Error     error     `json:"error,omitempty"`     // Error if Type is "error"
+
+	// Translation data (populated by TranslationStage if enabled)
+	Translations map[string]string `json:"translations,omitempty"` // targetLang -> translatedText
 }
 
 // RealtimeEvent represents an event from OpenAI Realtime API.
@@ -194,47 +219,138 @@ type RealtimeTranscriptionStats struct {
 	AverageLatencyMs    float64
 	LastTranscriptionAt time.Time
 	BytesTranscribed    uint64
+
+	// Latency tracking (for per-transcription latency measurement)
+	CurrentSegmentStartTime time.Time // When the current audio segment started (reset after each transcription)
 }
 
 // NewRealtimeTranscriptionStage creates a new OpenAI Realtime transcription stage.
 //
-// Parameters:
-//   - name: Unique identifier for this stage
-//   - priority: Execution order (lower runs first)
-//   - apiKey: OpenAI API key for authentication
-//   - model: Model to use
-//
 // The stage will establish a WebRTC connection to OpenAI's Realtime API
-// and stream audio for transcription.
-func NewRealtimeTranscriptionStage(name string, priority int, apiKey string, model string) *RealtimeTranscriptionStage {
-	if model == "" {
-		// Use the transcription model for WebRTC connection
-		model = "gpt-4o-transcribe"
+// and stream audio for transcription with optimized settings based on language.
+func NewRealtimeTranscriptionStage(config *RealtimeTranscriptionConfig) *RealtimeTranscriptionStage {
+	if config == nil {
+		panic("config cannot be nil")
 	}
 
-	return &RealtimeTranscriptionStage{
-		name:      name,
-		priority:  priority,
-		apiKey:    apiKey,
-		model:     model,
-		voiceMode: "alloy", // Default voice (required even for transcription)
-		audioTranscriptionConfig: &AudioTranscriptionConfig{
-			Model: model,
-		},
-		transcriptionCallbacks: make([]TranscriptionCallback, 0),
-		eventChan:              make(chan RealtimeEvent, 100),
-		closeChan:              make(chan struct{}),
-		stats:                  &RealtimeTranscriptionStats{},
-		turnDetection: &TurnDetection{
-			Type:              "server_vad",
-			Threshold:         0,
-			SilenceDuration:   0,
-			PreffixPadding:    0,
-			InterruptResponse: false,
-			Eagerness:         "",
-			CreateResponse:    false,
-		},
+	// Apply defaults to config
+	if config.Model == "" {
+		config.Model = "gpt-4o-mini-transcribe" // Fastest and most cost-effective model
 	}
+	if config.Voice == "" {
+		config.Voice = "alloy" // Default voice
+	}
+	if config.Timeout == 0 {
+		config.Timeout = sharedHTTPTimeout
+	}
+
+	// Create audio transcription config
+	audioConfig := &AudioTranscriptionConfig{
+		Model:    config.Model,
+		Language: config.Language,
+		Prompt:   config.Prompt,
+	}
+
+	// Use provided VAD config or create default optimized for the language
+	vadConfig := config.VADConfig
+	if vadConfig == nil {
+		vadConfig = getDefaultVADConfig(config.Language)
+	}
+
+	// Generate unique SSRC for this session
+	ssrc := uint32(time.Now().UnixNano() & 0xFFFFFFFF)
+
+	return &RealtimeTranscriptionStage{
+		name:                         config.Name,
+		priority:                     config.Priority,
+		config:                       config,
+		audioTranscriptionConfig:     audioConfig,
+		turnDetection:                vadConfig,
+		transcriptionCallbacks:       make([]TranscriptionCallback, 0),
+		beforeTranscriptionCallbacks: make([]BeforeTranscriptionCallback, 0),
+		eventChan:                    make(chan RealtimeEvent, 100),
+		closeChan:                    make(chan struct{}),
+		stats:                        &RealtimeTranscriptionStats{},
+		// RTP packet tracking
+		sequenceNumber: 0,
+		timestampBase:  uint32(time.Now().UnixNano() / 1000000), // Start with current time in ms
+		ssrc:           ssrc,
+	}
+}
+
+// getDefaultVADConfig returns language-optimized voice activity detection settings
+func getDefaultVADConfig(language string) *TurnDetection {
+	config := &TurnDetection{
+		Type:              "server_vad",
+		Threshold:         0.5,
+		SilenceDurationMs: 500, // Default 500ms
+		PrefixPaddingMs:   300, // Default 300ms padding
+		InterruptResponse: false,
+		Eagerness:         "",
+		CreateResponse:    false,
+	}
+
+	// Language-specific optimizations based on speech patterns
+	switch language {
+	case "ru": // Russian
+		// Russian speakers tend to have longer pauses between words
+		config.SilenceDurationMs = 800
+		config.PrefixPaddingMs = 400
+	case "ar": // Arabic
+		// Arabic has complex consonant clusters and longer utterances
+		config.SilenceDurationMs = 700
+		config.PrefixPaddingMs = 350
+	case "ja": // Japanese
+		// Japanese has different pause patterns and mora timing
+		config.SilenceDurationMs = 700
+		config.PrefixPaddingMs = 350
+	case "ko": // Korean
+		// Korean has syllable timing and longer processing pauses
+		config.SilenceDurationMs = 650
+		config.PrefixPaddingMs = 350
+	case "zh": // Chinese (Mandarin)
+		// Chinese tonal languages benefit from longer context
+		config.SilenceDurationMs = 600
+		config.PrefixPaddingMs = 350
+	case "hi": // Hindi
+		// Hindi has complex consonant clusters
+		config.SilenceDurationMs = 600
+		config.PrefixPaddingMs = 300
+	case "bn": // Bengali
+		// Bengali has similar patterns to Hindi
+		config.SilenceDurationMs = 600
+		config.PrefixPaddingMs = 300
+	case "ur": // Urdu
+		// Urdu similar to Hindi with Arabic influence
+		config.SilenceDurationMs = 650
+		config.PrefixPaddingMs = 320
+	case "tr": // Turkish
+		// Turkish has agglutinative structure with longer words
+		config.SilenceDurationMs = 550
+		config.PrefixPaddingMs = 280
+	case "de": // German
+		// German has compound words and different rhythm
+		config.SilenceDurationMs = 450
+		config.PrefixPaddingMs = 280
+	case "es", "pt", "fr", "it": // Romance languages
+		// Romance languages often have faster speech with shorter pauses
+		config.SilenceDurationMs = 400
+		config.PrefixPaddingMs = 250
+	case "id": // Indonesian
+		// Indonesian has syllable timing
+		config.SilenceDurationMs = 450
+		config.PrefixPaddingMs = 270
+	case "ha": // Hausa
+		// Hausa has tonal elements
+		config.SilenceDurationMs = 550
+		config.PrefixPaddingMs = 300
+	case "en": // English
+		// English baseline - stress-timed language
+		config.SilenceDurationMs = 500
+		config.PrefixPaddingMs = 300
+	}
+
+	return config
 }
 
 // GetName implements MediaPipelineStage.
@@ -251,11 +367,26 @@ func (rts *RealtimeTranscriptionStage) CanProcess(mediaType MediaType) bool {
 // Process implements MediaPipelineStage.
 //
 // Routes incoming audio data to OpenAI Realtime API for transcription.
-// The transcribed text is delivered asynchronously via callbacks.
+// The transcribed text is delivered asynchronously via callbacks and included in output metadata.
 func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaData) (MediaData, error) {
-	// Ensure we're connected
-	if !rts.IsConnected() {
-		if err := rts.Connect(ctx); err != nil {
+	// Call before transcription callbacks to allow modification of input data
+	rts.callBeforeTranscriptionCallbacks(&input)
+
+	// Ensure we're connected (atomic check-and-connect to prevent race conditions)
+	rts.mu.Lock()
+	shouldConnect := !rts.connected && !rts.connecting
+	if shouldConnect {
+		rts.connecting = true
+	}
+	rts.mu.Unlock()
+
+	if shouldConnect {
+		if err := rts.connectWithoutLock(ctx); err != nil {
+			// Reset connecting flag on failure
+			rts.mu.Lock()
+			rts.connecting = false
+			rts.mu.Unlock()
+
 			getLogger := logger.GetLogger()
 			getLogger.Errorw("failed to connect to Realtime API", err)
 			// Don't fail the pipeline, just skip transcription
@@ -268,14 +399,23 @@ func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaD
 		// The audio data from LiveKit is already in Opus format
 		// WebRTC accepts Opus directly
 
-		// Create RTP packet from Opus audio
+		// Create RTP packet from Opus audio with proper timestamps
+		rts.mu.Lock()
+		rts.sequenceNumber++
+		seqNum := rts.sequenceNumber
+		ssrc := rts.ssrc
+		// Calculate timestamp: Opus typically uses 48kHz sample rate
+		// For 20ms frames (typical), increment by 960 samples (48000 * 0.02)
+		timestamp := rts.timestampBase + uint32(seqNum)*960
+		rts.mu.Unlock()
+
 		rtpPacket := &rtp.Packet{
 			Header: rtp.Header{
 				Version:        2,
 				PayloadType:    111, // Opus payload type
-				SequenceNumber: uint16(time.Now().UnixNano() & 0xFFFF),
-				Timestamp:      uint32(time.Now().UnixNano() / 1000),
-				SSRC:           12345,
+				SequenceNumber: seqNum,
+				Timestamp:      timestamp,
+				SSRC:           ssrc,
 			},
 			Payload: input.Data,
 		}
@@ -285,17 +425,14 @@ func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaD
 			getLogger := logger.GetLogger()
 			getLogger.Debugw("failed to write audio to WebRTC track", "error", err)
 		} else {
+			// Update stats
 			rts.stats.mu.Lock()
+			if rts.stats.CurrentSegmentStartTime.IsZero() {
+				rts.stats.CurrentSegmentStartTime = time.Now()
+			}
 			rts.stats.AudioPacketsSent++
 			rts.stats.BytesTranscribed += uint64(len(input.Data))
-			// packetsSent := rts.stats.AudioPacketsSent
 			rts.stats.mu.Unlock()
-
-			// Periodically commit audio buffer to trigger transcription
-			// With whisper-1 model, we need to explicitly commit
-			//if packetsSent%100 == 0 {
-			//	rts.commitAudioBufferViaDataChannel()
-			//}
 		}
 	}
 
@@ -305,6 +442,16 @@ func (rts *RealtimeTranscriptionStage) Process(ctx context.Context, input MediaD
 	}
 	input.Metadata["realtime_transcribed"] = true
 	input.Metadata["transcribed_at"] = time.Now()
+
+	// Include latest transcription in metadata if available (both final and interim)
+	rts.mu.Lock()
+	if rts.latestTranscription != nil {
+		input.Metadata["transcription_event"] = *rts.latestTranscription
+
+		// Clear after including in output to avoid duplicate sends
+		rts.latestTranscription = nil
+	}
+	rts.mu.Unlock()
 
 	return input, nil
 }
@@ -325,6 +472,11 @@ func (rts *RealtimeTranscriptionStage) Connect(ctx context.Context) error {
 		rts.mu.Unlock()
 	}()
 
+	return rts.connectWithoutLock(ctx)
+}
+
+// connectWithoutLock performs the actual connection work without acquiring the mutex.
+func (rts *RealtimeTranscriptionStage) connectWithoutLock(ctx context.Context) error {
 	// Update stats
 	rts.stats.mu.Lock()
 	rts.stats.ConnectionAttempts++
@@ -401,15 +553,14 @@ func (rts *RealtimeTranscriptionStage) Connect(ctx context.Context) error {
 
 	dataChannel.OnOpen(func() {
 		getLogger.Infow("OpenAI Realtime data channel opened")
-		// Send session configuration when data channel opens
-		rts.sendDataChannelConfig()
 	})
 
 	// Handle connection state changes
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		getLogger.Infow("WebRTC connection state changed", "state", state.String())
 
-		if state == webrtc.PeerConnectionStateConnected {
+		switch state {
+		case webrtc.PeerConnectionStateConnected:
 			rts.mu.Lock()
 			rts.connected = true
 			rts.lastConnected = time.Now()
@@ -421,7 +572,7 @@ func (rts *RealtimeTranscriptionStage) Connect(ctx context.Context) error {
 			rts.stats.mu.Unlock()
 
 			fmt.Println("✅ WebRTC connected to OpenAI Realtime API")
-		} else if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 			rts.handleDisconnection()
 		}
 	})
@@ -461,8 +612,8 @@ func (rts *RealtimeTranscriptionStage) Connect(ctx context.Context) error {
 	go rts.processEvents()
 
 	getLogger.Infow("WebRTC connection established with OpenAI Realtime API",
-		"model", rts.model,
-		"voiceMode", rts.voiceMode)
+		"model", rts.config.Model,
+		"voice", rts.config.Voice)
 
 	return nil
 }
@@ -477,8 +628,7 @@ func (rts *RealtimeTranscriptionStage) getEphemeralKey(ctx context.Context) (str
 	// The ephemeral key endpoint for WebRTC is different
 	url := "https://api.openai.com/v1/realtime/transcription_sessions"
 
-	// Only send the model for session creation
-	// For ephemeral key, we use gpt-4o-transcribe
+	// Create session configuration with parameters accepted by OpenAI API
 	reqBody := CreateSessionRequest{
 		InputAudioTranscription: rts.audioTranscriptionConfig,
 		TurnDetection:           rts.turnDetection,
@@ -494,16 +644,26 @@ func (rts *RealtimeTranscriptionStage) getEphemeralKey(ctx context.Context) (str
 		return "", err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+rts.apiKey)
+	req.Header.Set("Authorization", "Bearer "+rts.config.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("OpenAI-Beta", "realtime=v1")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	// Use shared HTTP/2 client with connection pooling
+	ctx, cancel := context.WithTimeout(req.Context(), rts.config.Timeout)
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	client := getSharedHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("ephemeral key request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			getLogger := logger.GetLogger()
+			getLogger.Debugw("failed to close response body", "error", err)
+		}
+	}()
 
 	body, _ := io.ReadAll(resp.Body)
 
@@ -560,12 +720,22 @@ func (rts *RealtimeTranscriptionStage) exchangeSDPWithOpenAI(ctx context.Context
 	getLogger := logger.GetLogger()
 	getLogger.Debugw("Sending SDP offer", "url", url, "auth", "Bearer "+rts.ephemeralKey[:10]+"...")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	// Use shared HTTP/2 client with connection pooling
+	sdpCtx, sdpCancel := context.WithTimeout(req.Context(), rts.config.Timeout)
+	defer sdpCancel()
+	req = req.WithContext(sdpCtx)
+
+	client := getSharedHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sdp exchange request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			getLogger := logger.GetLogger()
+			getLogger.Debugw("failed to close response body", "error", err)
+		}
+	}()
 
 	body, _ := io.ReadAll(resp.Body)
 
@@ -598,45 +768,6 @@ func (rts *RealtimeTranscriptionStage) exchangeSDPWithOpenAI(ctx context.Context
 	return &answer, nil
 }
 
-// Removed connectWebSocketWithKey - using WebRTC only
-
-// sendDataChannelConfig sends session configuration via data channel.
-func (rts *RealtimeTranscriptionStage) sendDataChannelConfig() error {
-	if rts.dataChannel == nil || rts.dataChannel.ReadyState() != webrtc.DataChannelStateOpen {
-		return fmt.Errorf("data channel not open")
-	}
-
-	// Send session configuration for transcription as per OpenAI guide
-	// https://platform.openai.com/docs/guides/realtime-transcription
-	sessionMsg := map[string]interface{}{
-		"type": "session.update",
-		"session": map[string]interface{}{
-			// Set modalities to text only to prevent audio generation
-			"modalities": []string{"text"},
-
-			// Configure transcription with whisper-1 model (currently supported)
-			"input_audio_transcription": rts.audioTranscriptionConfig,
-
-			// Disable turn detection for pure transcription
-			"turn_detection": rts.turnDetection,
-
-			// Set temperature for transcription (0.8 recommended)
-			"temperature": 0.8,
-		},
-	}
-
-	data, err := json.Marshal(sessionMsg)
-	if err != nil {
-		return err
-	}
-
-	getLogger := logger.GetLogger()
-	getLogger.Infow("Sending session configuration via data channel", "config", sessionMsg)
-	fmt.Printf("📤 Sending session config: %v\n", sessionMsg)
-
-	return rts.dataChannel.SendText(string(data))
-}
-
 // Removed WebSocket message handling - using WebRTC data channel only
 
 // handleDataChannelMessage processes messages from the WebRTC data channel.
@@ -654,8 +785,6 @@ func (rts *RealtimeTranscriptionStage) handleDataChannelMessage(data []byte) {
 	}
 
 	// Log all messages from OpenAI to console
-	fmt.Printf("📨 OpenAI Message [%s]: %v\n", msgType, msg)
-
 	getLogger := logger.GetLogger()
 	getLogger.Debugw("Received data channel message", "type", msgType, "msg", msg)
 
@@ -685,29 +814,33 @@ func (rts *RealtimeTranscriptionStage) handleDataChannelMessage(data []byte) {
 	case "conversation.item.input_audio_transcription.delta":
 		// Handle partial transcriptions from input audio
 		if delta, ok := msg["delta"].(string); ok && delta != "" {
+			transcriptionTime := time.Now()
 			rts.notifyTranscription(TranscriptionEvent{
 				Type:      "partial",
 				Text:      delta,
-				Timestamp: time.Now(),
+				Timestamp: transcriptionTime,
+				Language:  rts.audioTranscriptionConfig.Language,
 				IsFinal:   false,
 			})
-			rts.stats.mu.Lock()
-			rts.stats.PartialTranscriptions++
-			rts.stats.mu.Unlock()
+
+			// Update stats using unified method
+			rts.updateStats("partial", transcriptionTime, false)
 		}
 
 	case "conversation.item.input_audio_transcription.completed":
 		// Handle final transcriptions from input audio
 		if transcript, ok := msg["transcript"].(string); ok && transcript != "" {
+			transcriptionTime := time.Now()
 			rts.notifyTranscription(TranscriptionEvent{
 				Type:      "final",
 				Text:      transcript,
-				Timestamp: time.Now(),
+				Timestamp: transcriptionTime,
+				Language:  rts.audioTranscriptionConfig.Language,
 				IsFinal:   true,
 			})
-			rts.stats.mu.Lock()
-			rts.stats.FinalTranscriptions++
-			rts.stats.mu.Unlock()
+
+			// Update stats using unified method
+			rts.updateStats("final", transcriptionTime, false)
 		}
 
 	default:
@@ -716,6 +849,7 @@ func (rts *RealtimeTranscriptionStage) handleDataChannelMessage(data []byte) {
 			Type: msgType,
 			Data: msg,
 		}
+
 		select {
 		case rts.eventChan <- event:
 		default:
@@ -729,18 +863,17 @@ func (rts *RealtimeTranscriptionStage) handleDataChannelMessage(data []byte) {
 func (rts *RealtimeTranscriptionStage) handleTranscriptionDelta(msg map[string]interface{}) {
 	if delta, ok := msg["delta"].(map[string]interface{}); ok {
 		if transcript, ok := delta["transcript"].(string); ok && transcript != "" {
+			transcriptionTime := time.Now()
 			rts.notifyTranscription(TranscriptionEvent{
 				Type:      "partial",
 				Text:      transcript,
-				Timestamp: time.Now(),
+				Timestamp: transcriptionTime,
+				Language:  rts.audioTranscriptionConfig.Language,
 				IsFinal:   false,
 			})
 
-			rts.stats.mu.Lock()
-			rts.stats.PartialTranscriptions++
-			rts.stats.TranscriptionsReceived++
-			rts.stats.LastTranscriptionAt = time.Now()
-			rts.stats.mu.Unlock()
+			// Update stats using unified method
+			rts.updateStats("partial", transcriptionTime, false)
 		}
 	}
 }
@@ -748,18 +881,17 @@ func (rts *RealtimeTranscriptionStage) handleTranscriptionDelta(msg map[string]i
 // handleTranscriptionComplete handles final transcription.
 func (rts *RealtimeTranscriptionStage) handleTranscriptionComplete(msg map[string]interface{}) {
 	if transcript, ok := msg["transcript"].(string); ok && transcript != "" {
+		transcriptionTime := time.Now()
 		rts.notifyTranscription(TranscriptionEvent{
 			Type:      "final",
 			Text:      transcript,
-			Timestamp: time.Now(),
+			Timestamp: transcriptionTime,
+			Language:  rts.audioTranscriptionConfig.Language,
 			IsFinal:   true,
 		})
 
-		rts.stats.mu.Lock()
-		rts.stats.FinalTranscriptions++
-		rts.stats.TranscriptionsReceived++
-		rts.stats.LastTranscriptionAt = time.Now()
-		rts.stats.mu.Unlock()
+		// Update stats using unified method
+		rts.updateStats("final", transcriptionTime, false)
 	}
 }
 
@@ -771,18 +903,17 @@ func (rts *RealtimeTranscriptionStage) handleConversationItem(msg map[string]int
 				if contentItem, ok := c.(map[string]interface{}); ok {
 					// Check for transcript in the content
 					if transcript, ok := contentItem["transcript"].(string); ok && transcript != "" {
+						transcriptionTime := time.Now()
 						rts.notifyTranscription(TranscriptionEvent{
 							Type:      "final",
 							Text:      transcript,
-							Timestamp: time.Now(),
+							Timestamp: transcriptionTime,
+							Language:  rts.audioTranscriptionConfig.Language,
 							IsFinal:   true,
 						})
 
-						rts.stats.mu.Lock()
-						rts.stats.FinalTranscriptions++
-						rts.stats.TranscriptionsReceived++
-						rts.stats.LastTranscriptionAt = time.Now()
-						rts.stats.mu.Unlock()
+						// Update stats using unified method
+						rts.updateStats("final", transcriptionTime, false)
 					}
 				}
 			}
@@ -799,15 +930,15 @@ func (rts *RealtimeTranscriptionStage) handleError(msg map[string]interface{}) {
 		}
 	}
 
+	errorTime := time.Now()
 	rts.notifyTranscription(TranscriptionEvent{
 		Type:      "error",
-		Timestamp: time.Now(),
-		Error:     fmt.Errorf("Realtime API error: %s", errorMsg),
+		Timestamp: errorTime,
+		Error:     fmt.Errorf("realtime API error: %s", errorMsg),
 	})
 
-	rts.stats.mu.Lock()
-	rts.stats.Errors++
-	rts.stats.mu.Unlock()
+	// Update stats using unified method
+	rts.updateStats("error", errorTime, true)
 
 	getLogger := logger.GetLogger()
 	getLogger.Errorw("Realtime API error", fmt.Errorf("%s", errorMsg))
@@ -818,20 +949,27 @@ func (rts *RealtimeTranscriptionStage) handleError(msg map[string]interface{}) {
 // handleDisconnection handles cleanup when disconnected.
 func (rts *RealtimeTranscriptionStage) handleDisconnection() {
 	rts.mu.Lock()
-	rts.connected = false
-	rts.mu.Unlock()
+	defer rts.mu.Unlock()
 
+	// Check if already disconnected
+	if rts.peerConnection == nil {
+		return
+	}
+
+	rts.connected = false
+	rts.connecting = false
+
+	// Update stats with separate lock
 	rts.stats.mu.Lock()
 	rts.stats.CurrentlyConnected = false
 	rts.stats.mu.Unlock()
 
-	// Clean up WebSocket
 	// Clean up WebRTC connection
-	if rts.peerConnection != nil {
-		rts.peerConnection.Close()
-		rts.peerConnection = nil
+	if err := rts.peerConnection.Close(); err != nil {
+		getLogger := logger.GetLogger()
+		getLogger.Debugw("failed to close peer connection", "error", err)
 	}
-
+	rts.peerConnection = nil
 	rts.audioTrack = nil
 	rts.dataChannel = nil
 }
@@ -854,18 +992,6 @@ func (rts *RealtimeTranscriptionStage) processEvents() {
 // processRealtimeEvent processes a single Realtime API event.
 func (rts *RealtimeTranscriptionStage) processRealtimeEvent(event RealtimeEvent) {
 	switch event.Type {
-	case "conversation.item.input_audio_transcription.delta":
-		//// Handle partial transcriptions from input audio
-		//if delta, ok := event.Data["delta"].(string); ok && delta != "" {
-		//	rts.notifyTranscription(TranscriptionEvent{
-		//		Type:      "partial",
-		//		Text:      delta,
-		//		Timestamp: time.Now(),
-		//		IsFinal:   false,
-		//	})
-		//	rts.stats.PartialTranscriptions++
-		//}
-
 	case "conversation.item.input_audio_transcription.completed":
 		// Handle final transcriptions from input audio
 		if transcript, ok := event.Data["transcript"].(string); ok && transcript != "" {
@@ -873,6 +999,7 @@ func (rts *RealtimeTranscriptionStage) processRealtimeEvent(event RealtimeEvent)
 				Type:      "final",
 				Text:      transcript,
 				Timestamp: time.Now(),
+				Language:  rts.audioTranscriptionConfig.Language,
 				IsFinal:   true,
 			})
 			rts.stats.FinalTranscriptions++
@@ -884,6 +1011,7 @@ func (rts *RealtimeTranscriptionStage) processRealtimeEvent(event RealtimeEvent)
 				Type:      "partial",
 				Text:      event.Delta.Transcript,
 				Timestamp: time.Now(),
+				Language:  rts.audioTranscriptionConfig.Language,
 				IsFinal:   false,
 			})
 		}
@@ -896,6 +1024,7 @@ func (rts *RealtimeTranscriptionStage) processRealtimeEvent(event RealtimeEvent)
 						Type:      "final",
 						Text:      content.Transcript,
 						Timestamp: time.Now(),
+						Language:  rts.audioTranscriptionConfig.Language,
 						IsFinal:   true,
 					})
 				}
@@ -915,10 +1044,12 @@ func (rts *RealtimeTranscriptionStage) processRealtimeEvent(event RealtimeEvent)
 
 // notifyTranscription notifies all registered callbacks of a transcription event.
 func (rts *RealtimeTranscriptionStage) notifyTranscription(event TranscriptionEvent) {
-	rts.mu.RLock()
+	// Store latest transcription for pipeline output
+	rts.mu.Lock()
+	rts.latestTranscription = &event
 	callbacks := make([]TranscriptionCallback, len(rts.transcriptionCallbacks))
 	copy(callbacks, rts.transcriptionCallbacks)
-	rts.mu.RUnlock()
+	rts.mu.Unlock()
 
 	for _, callback := range callbacks {
 		// Call in goroutine to prevent blocking
@@ -933,11 +1064,32 @@ func (rts *RealtimeTranscriptionStage) AddTranscriptionCallback(callback Transcr
 	rts.transcriptionCallbacks = append(rts.transcriptionCallbacks, callback)
 }
 
+// AddBeforeTranscriptionCallback adds a callback that runs before transcription processing.
+func (rts *RealtimeTranscriptionStage) AddBeforeTranscriptionCallback(callback BeforeTranscriptionCallback) {
+	rts.mu.Lock()
+	defer rts.mu.Unlock()
+	rts.beforeTranscriptionCallbacks = append(rts.beforeTranscriptionCallbacks, callback)
+}
+
+// callBeforeTranscriptionCallbacks calls all registered before transcription callbacks.
+func (rts *RealtimeTranscriptionStage) callBeforeTranscriptionCallbacks(data *MediaData) {
+	rts.mu.RLock()
+	callbacks := make([]BeforeTranscriptionCallback, len(rts.beforeTranscriptionCallbacks))
+	copy(callbacks, rts.beforeTranscriptionCallbacks)
+	rts.mu.RUnlock()
+
+	for _, callback := range callbacks {
+		// Call callback synchronously since it needs to modify data before processing
+		callback(data)
+	}
+}
+
 // RemoveAllCallbacks removes all transcription callbacks.
 func (rts *RealtimeTranscriptionStage) RemoveAllCallbacks() {
 	rts.mu.Lock()
 	defer rts.mu.Unlock()
 	rts.transcriptionCallbacks = make([]TranscriptionCallback, 0)
+	rts.beforeTranscriptionCallbacks = make([]BeforeTranscriptionCallback, 0)
 }
 
 // IsConnected returns whether the stage is connected to the Realtime API.
@@ -957,7 +1109,9 @@ func (rts *RealtimeTranscriptionStage) Disconnect() {
 	rts.mu.Unlock()
 
 	// Signal shutdown
-	close(rts.closeChan)
+	rts.closeOnce.Do(func() {
+		close(rts.closeChan)
+	})
 
 	// Wait for goroutines
 	rts.wg.Wait()
@@ -969,28 +1123,11 @@ func (rts *RealtimeTranscriptionStage) Disconnect() {
 	getLogger.Infow("disconnected from OpenAI Realtime API")
 }
 
-// commitAudioBufferViaDataChannel sends commit message via data channel
-func (rts *RealtimeTranscriptionStage) commitAudioBufferViaDataChannel() {
-	if rts.dataChannel == nil || rts.dataChannel.ReadyState() != webrtc.DataChannelStateOpen {
-		return
-	}
-
-	// Commit audio buffer to trigger transcription
-	commitMsg := map[string]interface{}{
-		"type": "input_audio_buffer.commit",
-	}
-
-	data, err := json.Marshal(commitMsg)
-	if err != nil {
-		return
-	}
-
-	if err := rts.dataChannel.SendText(string(data)); err != nil {
-		getLogger := logger.GetLogger()
-		getLogger.Debugw("failed to commit audio buffer", "error", err)
-	} else {
-		fmt.Println("📤 Committing audio buffer for transcription")
-	}
+// GetConfig returns the current configuration.
+func (rts *RealtimeTranscriptionStage) GetConfig() *RealtimeTranscriptionConfig {
+	rts.mu.RLock()
+	defer rts.mu.RUnlock()
+	return rts.config
 }
 
 // GetStats returns current transcription statistics.
@@ -1018,5 +1155,79 @@ func (rts *RealtimeTranscriptionStage) GetStats() RealtimeTranscriptionStats {
 func (rts *RealtimeTranscriptionStage) SetModel(model string) {
 	rts.mu.Lock()
 	defer rts.mu.Unlock()
-	rts.model = model
+	rts.config.Model = model
+}
+
+// SetLanguage sets the language for transcription.
+func (rts *RealtimeTranscriptionStage) SetLanguage(language string) {
+	rts.mu.Lock()
+	defer rts.mu.Unlock()
+	if rts.audioTranscriptionConfig != nil {
+		rts.audioTranscriptionConfig.Language = language
+	}
+}
+
+// SetVoice sets the voice for audio generation.
+// Available voices: "alloy", "echo", "fable", "onyx", "nova", "shimmer"
+func (rts *RealtimeTranscriptionStage) SetVoice(voice string) {
+	rts.mu.Lock()
+	defer rts.mu.Unlock()
+	if voice != "" {
+		rts.config.Voice = voice
+	}
+}
+
+// SetPrompt sets the context prompt for better transcription accuracy.
+func (rts *RealtimeTranscriptionStage) SetPrompt(prompt string) {
+	rts.mu.Lock()
+	defer rts.mu.Unlock()
+	if rts.audioTranscriptionConfig != nil {
+		rts.audioTranscriptionConfig.Prompt = prompt
+	}
+}
+
+// updateStats updates transcription statistics following the pattern of other pipeline stages.
+func (rts *RealtimeTranscriptionStage) updateStats(transcriptionType string, transcriptionTime time.Time, isError bool) {
+	rts.stats.mu.Lock()
+	defer rts.stats.mu.Unlock()
+
+	// Update counters based on transcription type
+	if isError {
+		rts.stats.Errors++
+	} else {
+		rts.stats.TranscriptionsReceived++
+		rts.stats.LastTranscriptionAt = transcriptionTime
+
+		switch transcriptionType {
+		case "partial":
+			rts.stats.PartialTranscriptions++
+		case "final":
+			rts.stats.FinalTranscriptions++
+		}
+
+		// Calculate and update average latency
+		rts.updateAverageLatencyLocked(transcriptionTime)
+	}
+}
+
+// updateAverageLatencyLocked calculates and updates per-transcription latency.
+// This method assumes stats.mu is already locked.
+// Measures latency for each transcription segment independently (resets after each transcription).
+func (rts *RealtimeTranscriptionStage) updateAverageLatencyLocked(transcriptionTime time.Time) {
+	// Calculate per-transcription latency from when current audio segment started
+	// Each transcription closes one segment and starts the next
+	if !rts.stats.CurrentSegmentStartTime.IsZero() && rts.stats.CurrentSegmentStartTime.Before(transcriptionTime) {
+		latency := transcriptionTime.Sub(rts.stats.CurrentSegmentStartTime)
+		latencyMs := float64(latency.Milliseconds())
+
+		// Update average latency using exponentially weighted moving average
+		if rts.stats.AverageLatencyMs == 0 {
+			rts.stats.AverageLatencyMs = latencyMs
+		} else {
+			rts.stats.AverageLatencyMs = (rts.stats.AverageLatencyMs * 0.9) + (latencyMs * 0.1)
+		}
+
+		// Reset segment start time for next transcription (this makes it per-transcription, not cumulative)
+		rts.stats.CurrentSegmentStartTime = transcriptionTime
+	}
 }

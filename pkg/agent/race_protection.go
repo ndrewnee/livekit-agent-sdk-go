@@ -13,17 +13,17 @@ import (
 
 // RaceProtector provides protection against race conditions during worker lifecycle
 type RaceProtector struct {
-	mu                         sync.RWMutex
-	logger                     *zap.Logger
-	
+	mu     sync.RWMutex
+	logger *zap.Logger
+
 	// State tracking
-	isDisconnecting            atomic.Bool
-	isReconnecting             atomic.Bool
-	activeTerminations         map[string]*TerminationState
-	pendingStatusUpdates       map[string]*StatusUpdate
+	isDisconnecting             atomic.Bool
+	isReconnecting              atomic.Bool
+	activeTerminations          map[string]*TerminationState
+	pendingStatusUpdates        map[string]*StatusUpdate
 	droppedJobsDuringDisconnect int64
-	droppedStatusUpdates       int64
-	
+	droppedStatusUpdates        int64
+
 	// Callbacks
 	onJobDropped         func(jobID string, reason string)
 	onStatusUpdateQueued func(jobID string)
@@ -31,20 +31,20 @@ type RaceProtector struct {
 
 // TerminationState tracks termination request state
 type TerminationState struct {
-	JobID            string
-	RequestedAt      time.Time
-	RequestCount     int
-	CompletedAt      *time.Time
-	LastError        error
+	JobID        string
+	RequestedAt  time.Time
+	RequestCount int
+	CompletedAt  *time.Time
+	LastError    error
 }
 
 // StatusUpdate represents a pending status update
 type StatusUpdate struct {
-	JobID        string
-	Status       livekit.JobStatus
-	Error        string
-	Timestamp    time.Time
-	RetryCount   int
+	JobID      string
+	Status     livekit.JobStatus
+	Error      string
+	Timestamp  time.Time
+	RetryCount int
 }
 
 // NewRaceProtector creates a new race condition protector
@@ -59,12 +59,12 @@ func NewRaceProtector(logger *zap.Logger) *RaceProtector {
 // SetDisconnecting marks the worker as disconnecting
 func (p *RaceProtector) SetDisconnecting(disconnecting bool) {
 	p.isDisconnecting.Store(disconnecting)
-	
+
 	if disconnecting {
 		p.logger.Debug("Worker entering disconnection state")
 	} else {
 		p.logger.Debug("Worker exiting disconnection state")
-		
+
 		// Reset dropped counters
 		atomic.StoreInt64(&p.droppedJobsDuringDisconnect, 0)
 	}
@@ -78,12 +78,12 @@ func (p *RaceProtector) IsDisconnecting() bool {
 // SetReconnecting marks the worker as reconnecting
 func (p *RaceProtector) SetReconnecting(reconnecting bool) {
 	p.isReconnecting.Store(reconnecting)
-	
+
 	if reconnecting {
 		p.logger.Debug("Worker entering reconnection state")
 	} else {
 		p.logger.Debug("Worker exiting reconnection state")
-		
+
 		// Reset dropped counters
 		atomic.StoreInt64(&p.droppedStatusUpdates, 0)
 	}
@@ -100,34 +100,41 @@ func (p *RaceProtector) CanAcceptJob(jobID string) (bool, string) {
 	if p.IsDisconnecting() {
 		atomic.AddInt64(&p.droppedJobsDuringDisconnect, 1)
 		reason := "worker is disconnecting"
-		
+
 		p.logger.Warn("Rejecting job during disconnection",
 			zap.String("jobID", jobID),
 			zap.Int64("droppedCount", atomic.LoadInt64(&p.droppedJobsDuringDisconnect)),
 		)
-		
-		// Call callback if set
-		if p.onJobDropped != nil {
-			p.onJobDropped(jobID, reason)
+
+		// Call callback if set (safely copy callback under mutex to avoid race)
+		p.mu.RLock()
+		callback := p.onJobDropped
+		p.mu.RUnlock()
+
+		if callback != nil {
+			callback(jobID, reason)
 		}
-		
+
 		return false, reason
 	}
-	
+
 	// Check if there's an active termination for this job
 	p.mu.RLock()
 	termState, hasTermination := p.activeTerminations[jobID]
-	p.mu.RUnlock()
-	
 	if hasTermination && termState.CompletedAt == nil {
+		// Copy values while holding the lock
+		requestCount := termState.RequestCount
+		p.mu.RUnlock()
+
 		reason := "job has pending termination"
 		p.logger.Warn("Rejecting job with pending termination",
 			zap.String("jobID", jobID),
-			zap.Int("terminationRequests", termState.RequestCount),
+			zap.Int("terminationRequests", requestCount),
 		)
 		return false, reason
 	}
-	
+	p.mu.RUnlock()
+
 	return true, ""
 }
 
@@ -135,7 +142,7 @@ func (p *RaceProtector) CanAcceptJob(jobID string) (bool, string) {
 func (p *RaceProtector) RecordTerminationRequest(jobID string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	
+
 	termState, exists := p.activeTerminations[jobID]
 	if !exists {
 		// First termination request
@@ -147,10 +154,10 @@ func (p *RaceProtector) RecordTerminationRequest(jobID string) bool {
 		p.logger.Debug("Recording termination request", zap.String("jobID", jobID))
 		return true
 	}
-	
+
 	// Concurrent termination request
 	termState.RequestCount++
-	
+
 	if termState.CompletedAt != nil {
 		// Job already terminated
 		p.logger.Debug("Ignoring termination request for completed job",
@@ -160,13 +167,13 @@ func (p *RaceProtector) RecordTerminationRequest(jobID string) bool {
 		)
 		return false
 	}
-	
+
 	p.logger.Warn("Concurrent termination request detected",
 		zap.String("jobID", jobID),
 		zap.Int("requestCount", termState.RequestCount),
 		zap.Time("firstRequestAt", termState.RequestedAt),
 	)
-	
+
 	// Allow first request to proceed, ignore subsequent ones
 	return termState.RequestCount == 1
 }
@@ -175,17 +182,17 @@ func (p *RaceProtector) RecordTerminationRequest(jobID string) bool {
 func (p *RaceProtector) CompleteTermination(jobID string, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	
+
 	termState, exists := p.activeTerminations[jobID]
 	if !exists {
 		p.logger.Warn("Completing termination for untracked job", zap.String("jobID", jobID))
 		return
 	}
-	
+
 	now := time.Now()
 	termState.CompletedAt = &now
 	termState.LastError = err
-	
+
 	p.logger.Debug("Termination completed",
 		zap.String("jobID", jobID),
 		zap.Duration("duration", now.Sub(termState.RequestedAt)),
@@ -200,10 +207,9 @@ func (p *RaceProtector) QueueStatusUpdate(jobID string, status livekit.JobStatus
 		// Not reconnecting, allow immediate update
 		return false
 	}
-	
+
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	
+
 	// Check if we already have a pending update for this job
 	if existing, exists := p.pendingStatusUpdates[jobID]; exists {
 		// Update only if the new status is more severe
@@ -217,9 +223,17 @@ func (p *RaceProtector) QueueStatusUpdate(jobID string, status livekit.JobStatus
 				zap.String("previousStatus", existing.Status.String()),
 			)
 		}
+		// Copy callback under mutex and unlock before calling
+		callback := p.onStatusUpdateQueued
+		p.mu.Unlock()
+
+		// Call callback if set
+		if callback != nil {
+			callback(jobID)
+		}
 		return true
 	}
-	
+
 	// Queue new status update
 	p.pendingStatusUpdates[jobID] = &StatusUpdate{
 		JobID:     jobID,
@@ -227,19 +241,25 @@ func (p *RaceProtector) QueueStatusUpdate(jobID string, status livekit.JobStatus
 		Error:     errorMsg,
 		Timestamp: time.Now(),
 	}
-	
+
 	atomic.AddInt64(&p.droppedStatusUpdates, 1)
 	p.logger.Info("Queued status update during reconnection",
 		zap.String("jobID", jobID),
 		zap.String("status", status.String()),
 		zap.Int("queueSize", len(p.pendingStatusUpdates)),
 	)
-	
+
+	// Copy callback under mutex to avoid race and potential deadlock
+	callback := p.onStatusUpdateQueued
+
+	// Release mutex before calling callback to avoid deadlock
+	p.mu.Unlock()
+
 	// Call callback if set
-	if p.onStatusUpdateQueued != nil {
-		p.onStatusUpdateQueued(jobID)
+	if callback != nil {
+		callback(jobID)
 	}
-	
+
 	return true
 }
 
@@ -247,24 +267,24 @@ func (p *RaceProtector) QueueStatusUpdate(jobID string, status livekit.JobStatus
 func (p *RaceProtector) FlushPendingStatusUpdates() []StatusUpdate {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	
+
 	if len(p.pendingStatusUpdates) == 0 {
 		return nil
 	}
-	
+
 	updates := make([]StatusUpdate, 0, len(p.pendingStatusUpdates))
 	for _, update := range p.pendingStatusUpdates {
 		updates = append(updates, *update)
 	}
-	
+
 	p.logger.Info("Flushing pending status updates",
 		zap.Int("count", len(updates)),
 		zap.Int64("totalDropped", atomic.LoadInt64(&p.droppedStatusUpdates)),
 	)
-	
+
 	// Clear the queue
 	p.pendingStatusUpdates = make(map[string]*StatusUpdate)
-	
+
 	return updates
 }
 
@@ -272,24 +292,24 @@ func (p *RaceProtector) FlushPendingStatusUpdates() []StatusUpdate {
 func (p *RaceProtector) CleanupOldTerminations(maxAge time.Duration) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	
+
 	now := time.Now()
 	cleaned := 0
-	
+
 	for jobID, termState := range p.activeTerminations {
 		if termState.CompletedAt != nil && now.Sub(*termState.CompletedAt) > maxAge {
 			delete(p.activeTerminations, jobID)
 			cleaned++
 		}
 	}
-	
+
 	if cleaned > 0 {
 		p.logger.Debug("Cleaned up old termination records",
 			zap.Int("count", cleaned),
 			zap.Int("remaining", len(p.activeTerminations)),
 		)
 	}
-	
+
 	return cleaned
 }
 
@@ -299,24 +319,28 @@ func (p *RaceProtector) GetMetrics() map[string]interface{} {
 	activeTerminations := len(p.activeTerminations)
 	pendingUpdates := len(p.pendingStatusUpdates)
 	p.mu.RUnlock()
-	
+
 	return map[string]interface{}{
-		"is_disconnecting":            p.IsDisconnecting(),
-		"is_reconnecting":             p.IsReconnecting(),
-		"active_terminations":         activeTerminations,
-		"pending_status_updates":      pendingUpdates,
+		"is_disconnecting":               p.IsDisconnecting(),
+		"is_reconnecting":                p.IsReconnecting(),
+		"active_terminations":            activeTerminations,
+		"pending_status_updates":         pendingUpdates,
 		"dropped_jobs_during_disconnect": atomic.LoadInt64(&p.droppedJobsDuringDisconnect),
-		"dropped_status_updates":      atomic.LoadInt64(&p.droppedStatusUpdates),
+		"dropped_status_updates":         atomic.LoadInt64(&p.droppedStatusUpdates),
 	}
 }
 
 // SetOnJobDroppedCallback sets the callback for dropped jobs
 func (p *RaceProtector) SetOnJobDroppedCallback(cb func(jobID string, reason string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.onJobDropped = cb
 }
 
 // SetOnStatusUpdateQueuedCallback sets the callback for queued status updates
 func (p *RaceProtector) SetOnStatusUpdateQueuedCallback(cb func(jobID string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.onStatusUpdateQueued = cb
 }
 
@@ -329,10 +353,10 @@ func shouldReplaceStatus(current, new livekit.JobStatus) bool {
 		livekit.JobStatus_JS_SUCCESS: 3,
 		livekit.JobStatus_JS_FAILED:  4,
 	}
-	
+
 	currentPriority := priority[current]
 	newPriority := priority[new]
-	
+
 	return newPriority > currentPriority
 }
 
@@ -368,7 +392,7 @@ func (g *RaceProtectionGuard) Execute(ctx context.Context, fn func() error) erro
 			g.protector.CompleteTermination(g.jobID, nil)
 		}()
 	}
-	
+
 	// Execute the function
 	return fn()
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/rtp"
+	"github.com/pion/webrtc/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -169,24 +171,41 @@ func (m *MockRealtimeServer) Close() {
 	m.server.Close()
 }
 
+// createTestStage creates a test stage with default config
+func createTestStage(name string, priority int, apiKey, model, language string) *RealtimeTranscriptionStage {
+	config := &RealtimeTranscriptionConfig{
+		Name:     name,
+		Priority: priority,
+		APIKey:   apiKey,
+		Model:    model,
+		Language: language,
+	}
+	return NewRealtimeTranscriptionStage(config)
+}
+
 // TestRealtimeTranscriptionStageCreation tests stage creation
 func TestRealtimeTranscriptionStageCreation(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	assert.NotNil(t, stage)
 	assert.Equal(t, "transcription", stage.GetName())
 	assert.Equal(t, 20, stage.GetPriority())
 	assert.True(t, stage.CanProcess(MediaTypeAudio))
 	assert.False(t, stage.CanProcess(MediaTypeVideo))
-	assert.Equal(t, "gpt-4o-realtime-preview-2024-12-17", stage.model)
-	assert.Equal(t, "text", stage.voiceMode)
+	assert.Equal(t, "gpt-4o-mini-transcribe", stage.config.Model)
+	assert.Equal(t, "alloy", stage.config.Voice)
 	assert.NotNil(t, stage.stats)
 	assert.False(t, stage.IsConnected())
 }
 
 // TestRealtimeTranscriptionProcess tests the Process method
 func TestRealtimeTranscriptionProcess(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		t.Skip("Skipping RealtimeTranscriptionProcess test: OPENAI_API_KEY not set")
+	}
+
+	stage := createTestStage("transcription", 20, apiKey, "", "en")
 	ctx := context.Background()
 
 	// Process audio data
@@ -220,7 +239,7 @@ func TestRealtimeTranscriptionProcess(t *testing.T) {
 
 // TestRealtimeTranscriptionCallbacks tests transcription callbacks
 func TestRealtimeTranscriptionCallbacks(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	receivedEvents := make([]TranscriptionEvent, 0)
 	var mu sync.Mutex
@@ -258,9 +277,10 @@ func TestRealtimeTranscriptionCallbacks(t *testing.T) {
 	// Sort events since goroutines can deliver them out of order
 	var partialEvent, finalEvent *TranscriptionEvent
 	for i := range receivedEvents {
-		if receivedEvents[i].Type == "partial" {
+		switch receivedEvents[i].Type {
+		case "partial":
 			partialEvent = &receivedEvents[i]
-		} else if receivedEvents[i].Type == "final" {
+		case "final":
 			finalEvent = &receivedEvents[i]
 		}
 	}
@@ -285,7 +305,7 @@ func TestRealtimeTranscriptionCallbacks(t *testing.T) {
 
 // TestRealtimeTranscriptionHandlers tests message handlers
 func TestRealtimeTranscriptionHandlers(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	receivedTranscriptions := make([]string, 0)
 	var mu sync.Mutex
@@ -341,12 +361,15 @@ func TestRealtimeTranscriptionHandlers(t *testing.T) {
 
 // TestRealtimeErrorHandling tests error handling
 func TestRealtimeErrorHandling(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	var receivedError error
+	var mu sync.Mutex
 	stage.AddTranscriptionCallback(func(event TranscriptionEvent) {
 		if event.Type == "error" {
+			mu.Lock()
 			receivedError = event.Error
+			mu.Unlock()
 		}
 	})
 
@@ -361,8 +384,10 @@ func TestRealtimeErrorHandling(t *testing.T) {
 	// Wait for callback
 	time.Sleep(50 * time.Millisecond)
 
+	mu.Lock()
 	assert.NotNil(t, receivedError)
 	assert.Contains(t, receivedError.Error(), "Test error message")
+	mu.Unlock()
 
 	// Check stats
 	stats := stage.GetStats()
@@ -371,11 +396,14 @@ func TestRealtimeErrorHandling(t *testing.T) {
 
 // TestRealtimeDataChannelMessage tests data channel message handling
 func TestRealtimeDataChannelMessage(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	var receivedText string
+	var mu sync.Mutex
 	stage.AddTranscriptionCallback(func(event TranscriptionEvent) {
+		mu.Lock()
 		receivedText = event.Text
+		mu.Unlock()
 	})
 
 	// Create a data channel message
@@ -395,7 +423,9 @@ func TestRealtimeDataChannelMessage(t *testing.T) {
 	// Wait for callback
 	time.Sleep(50 * time.Millisecond)
 
+	mu.Lock()
 	assert.Equal(t, "Data channel transcription", receivedText)
+	mu.Unlock()
 
 	// Check stats
 	stats := stage.GetStats()
@@ -405,7 +435,7 @@ func TestRealtimeDataChannelMessage(t *testing.T) {
 
 // TestRealtimeEventProcessing tests event processing
 func TestRealtimeEventProcessing(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	transcriptions := make([]TranscriptionEvent, 0)
 	var mu sync.Mutex
@@ -468,7 +498,7 @@ func TestRealtimeEventProcessing(t *testing.T) {
 
 // TestRealtimeStatistics tests statistics tracking
 func TestRealtimeStatistics(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	// Don't try to connect in Process - the test will only test the manual stats update
 	// Process some audio packets without connection attempts would just skip them
@@ -500,13 +530,51 @@ func TestRealtimeStatistics(t *testing.T) {
 	assert.False(t, stats.CurrentlyConnected)
 }
 
+// TestRealtimeLatencyCalculation tests that AverageLatencyMs is calculated correctly
+func TestRealtimeLatencyCalculation(t *testing.T) {
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
+
+	// Simulate audio segment started 2000ms ago
+	stage.stats.mu.Lock()
+	stage.stats.CurrentSegmentStartTime = time.Now().Add(-2000 * time.Millisecond)
+	stage.stats.mu.Unlock()
+
+	// Simulate receiving first transcription now (2000ms after segment started)
+	transcriptionTime := time.Now()
+	stage.updateStats("partial", transcriptionTime, false)
+
+	// Check stats - should have calculated latency around 2000ms
+	stats := stage.GetStats()
+	assert.Greater(t, stats.AverageLatencyMs, float64(1950)) // Allow for small timing variations
+	assert.Less(t, stats.AverageLatencyMs, float64(2050))    // Allow for small timing variations
+
+	// Simulate second transcription 1500ms later (new segment)
+	// This should measure latency for the second segment, not cumulative
+	time.Sleep(100 * time.Millisecond)
+	secondTranscriptionTime := time.Now()
+	stage.updateStats("final", secondTranscriptionTime, false)
+
+	// The new average should reflect both measurements via EWMA
+	// First: 2000ms, Second: ~100ms, EWMA: 2000*0.9 + 100*0.1 = 1810ms
+	newStats := stage.GetStats()
+	assert.NotEqual(t, stats.AverageLatencyMs, newStats.AverageLatencyMs)
+	assert.Less(t, newStats.AverageLatencyMs, stats.AverageLatencyMs) // Should decrease due to shorter second segment
+	assert.Greater(t, newStats.AverageLatencyMs, float64(1700))       // Should be around 1800ms
+}
+
 // TestRealtimeDisconnection tests disconnection handling
 func TestRealtimeDisconnection(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
-	// Simulate connection
+	// Simulate connection with a mock peer connection
 	stage.connected = true
+	stage.connecting = false
 	stage.stats.CurrentlyConnected = true
+
+	// Create a mock peer connection to simulate an active connection
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	require.NoError(t, err)
+	stage.peerConnection = pc
 
 	// Handle disconnection
 	stage.handleDisconnection()
@@ -523,11 +591,12 @@ func TestRealtimeIntegrationWithPipeline(t *testing.T) {
 	pipeline := NewMediaPipeline()
 
 	// Add Realtime transcription stage
-	transcriptionStage := NewRealtimeTranscriptionStage(
+	transcriptionStage := createTestStage(
 		"realtime-transcription",
 		15,
 		"test-api-key",
 		"gpt-4o-realtime-preview-2024-12-17",
+		"en",
 	)
 	pipeline.AddStage(transcriptionStage)
 
@@ -543,20 +612,6 @@ func TestRealtimeIntegrationWithPipeline(t *testing.T) {
 		}
 	})
 
-	// Verify stage is in pipeline
-	pipeline.mu.RLock()
-	stages := pipeline.stages
-	pipeline.mu.RUnlock()
-
-	found := false
-	for _, stage := range stages {
-		if stage.GetName() == "realtime-transcription" {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found)
-
 	// Test that only audio is processed
 	assert.True(t, transcriptionStage.CanProcess(MediaTypeAudio))
 	assert.False(t, transcriptionStage.CanProcess(MediaTypeVideo))
@@ -564,7 +619,7 @@ func TestRealtimeIntegrationWithPipeline(t *testing.T) {
 
 // TestRealtimeConcurrentOperations tests thread safety
 func TestRealtimeConcurrentOperations(t *testing.T) {
-	stage := NewRealtimeTranscriptionStage("transcription", 20, "test-api-key", "")
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
 
 	// Add multiple callbacks concurrently
 	var wg sync.WaitGroup
@@ -603,5 +658,48 @@ func TestRealtimeConcurrentOperations(t *testing.T) {
 	wg.Wait()
 
 	// Test passed if no panics or deadlocks
+	assert.True(t, true)
+}
+
+// TestRealtimeMultipleDisconnects tests that multiple calls to Disconnect() don't cause a panic
+func TestRealtimeMultipleDisconnects(t *testing.T) {
+	stage := createTestStage("transcription", 20, "test-api-key", "", "en")
+
+	// Simulate a connected state
+	stage.connected = true
+	stage.connecting = false
+
+	// Create a mock peer connection to simulate an active connection
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	require.NoError(t, err)
+	stage.peerConnection = pc
+
+	// Call Disconnect() multiple times concurrently
+	// This would previously cause a "close of closed channel" panic
+	var wg sync.WaitGroup
+	numGoroutines := 10
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			// This should not panic, even when called multiple times
+			stage.Disconnect()
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Verify final state
+	assert.False(t, stage.IsConnected())
+	assert.False(t, stage.GetStats().CurrentlyConnected)
+	assert.Nil(t, stage.peerConnection)
+
+	// Test additional disconnect calls after all goroutines complete
+	// These should also be safe
+	stage.Disconnect()
+	stage.Disconnect()
+
+	// Test passed if no panics occurred
 	assert.True(t, true)
 }

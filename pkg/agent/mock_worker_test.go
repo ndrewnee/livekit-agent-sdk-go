@@ -3,6 +3,7 @@ package agent
 import (
 	"sync"
 
+	"github.com/am-sokolov/livekit-agent-sdk-go/internal/test/mocks"
 	"github.com/livekit/protocol/livekit"
 )
 
@@ -19,7 +20,7 @@ type mockWorker struct {
 // newMockWorker creates a new mock worker for testing
 func newMockWorker(logger Logger) *mockWorker {
 	if logger == nil {
-		logger = NewDefaultLogger()
+		logger = mocks.NewMockLogger()
 	}
 	return &mockWorker{
 		serverURL:  "ws://localhost:7880",

@@ -5,6 +5,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,9 +16,9 @@ import (
 
 // TestResourceLimiterMemoryLimit tests memory limit enforcement
 func TestResourceLimiterMemoryLimit(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 
-	memoryExceeded := false
+	var memoryExceeded atomic.Bool
 	limiter := NewResourceLimiter(logger, ResourceLimiterOptions{
 		MemoryLimitMB:     200, // Reasonable limit for testing
 		CheckInterval:     50 * time.Millisecond,
@@ -25,7 +26,7 @@ func TestResourceLimiterMemoryLimit(t *testing.T) {
 	})
 
 	limiter.SetMemoryLimitCallback(func(usage, limit uint64) {
-		memoryExceeded = true
+		memoryExceeded.Store(true)
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -47,7 +48,7 @@ func TestResourceLimiterMemoryLimit(t *testing.T) {
 	// Wait for detection
 	time.Sleep(150 * time.Millisecond)
 
-	assert.True(t, memoryExceeded)
+	assert.True(t, memoryExceeded.Load())
 
 	metrics := limiter.GetMetrics()
 	assert.Greater(t, metrics["memory_violations"].(int64), int64(0))
@@ -55,7 +56,7 @@ func TestResourceLimiterMemoryLimit(t *testing.T) {
 
 // TestResourceLimiterCPUThrottle tests CPU throttling
 func TestResourceLimiterCPUThrottle(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 
 	// cpuExceeded := false
 	limiter := NewResourceLimiter(logger, ResourceLimiterOptions{
@@ -97,7 +98,7 @@ func TestResourceLimiterCPUThrottle(t *testing.T) {
 
 // TestResourceLimiterFileDescriptors tests FD limit detection
 func TestResourceLimiterFileDescriptors(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 
 	// fdExceeded := false
 	currentFDs := NewFileDescriptorTracker().GetCurrentCount()
@@ -147,7 +148,7 @@ func TestResourceLimiterFileDescriptors(t *testing.T) {
 
 // TestResourceLimiterMetrics tests metrics collection
 func TestResourceLimiterMetrics(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 
 	limiter := NewResourceLimiter(logger, ResourceLimiterOptions{
 		MemoryLimitMB:      1024,
@@ -214,7 +215,7 @@ func TestFileDescriptorTracker(t *testing.T) {
 
 // TestResourceLimitGuard tests the guard pattern
 func TestResourceLimitGuard(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 
 	// Use a very low memory limit to ensure the test triggers
 	limiter := NewResourceLimiter(logger, ResourceLimiterOptions{
@@ -250,7 +251,7 @@ func TestResourceLimitGuard(t *testing.T) {
 
 // TestResourceLimiterCallbacks tests callback functionality
 func TestResourceLimiterCallbacks(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 
 	var mu sync.Mutex
 	var memCallbackCalled bool
@@ -330,7 +331,7 @@ func TestGetSystemResourceLimits(t *testing.T) {
 
 // TestResourceLimiterConcurrency tests concurrent operations
 func TestResourceLimiterConcurrency(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 
 	limiter := NewResourceLimiter(logger, ResourceLimiterOptions{
 		MemoryLimitMB:      1024,
@@ -400,7 +401,7 @@ func TestWorkerResourceLimiterIntegration(t *testing.T) {
 
 // TestMemoryEnforcement tests actual memory limit enforcement
 func TestMemoryEnforcement(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 
 	limiter := NewResourceLimiter(logger, ResourceLimiterOptions{
 		MemoryLimitMB:     512, // Higher limit to avoid interfering with runtime

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/am-sokolov/livekit-agent-sdk-go/internal/test/mocks"
 	"github.com/livekit/protocol/livekit"
 	"github.com/stretchr/testify/assert"
 )
@@ -16,6 +17,7 @@ func TestUniversalWorkerStartStop(t *testing.T) {
 	handler := &MockUniversalHandler{}
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -54,6 +56,7 @@ func TestUniversalWorkerWebSocketMethods(t *testing.T) {
 	handler := &MockUniversalHandler{}
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -92,6 +95,7 @@ func TestUniversalWorkerSendMessage(t *testing.T) {
 	handler := &MockUniversalHandler{}
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -116,6 +120,7 @@ func TestUniversalWorkerPingPong(t *testing.T) {
 		JobType:      livekit.JobType_JT_ROOM,
 		PingInterval: 100 * time.Millisecond,
 		PingTimeout:  50 * time.Millisecond,
+		Logger:       mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -135,6 +140,7 @@ func TestUniversalWorkerRegister(t *testing.T) {
 		AgentName: "test-agent",
 		Version:   "1.0.0",
 		MaxJobs:   5,
+		Logger:    mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -147,6 +153,7 @@ func TestUniversalWorkerHandlePing(t *testing.T) {
 	handler := &MockUniversalHandler{}
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -160,6 +167,7 @@ func TestUniversalWorkerHandleAvailability(t *testing.T) {
 	handler := &MockUniversalHandler{}
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -173,6 +181,7 @@ func TestUniversalWorkerLoadMonitoring(t *testing.T) {
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType:             livekit.JobType_JT_ROOM,
 		EnableCPUMemoryLoad: true,
+		Logger:              mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -192,6 +201,7 @@ func TestUniversalWorkerJobProcessing(t *testing.T) {
 
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -204,6 +214,7 @@ func TestUniversalWorkerReconnection(t *testing.T) {
 	handler := &MockUniversalHandler{}
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -222,6 +233,7 @@ func TestUniversalWorkerShutdown(t *testing.T) {
 	handler := &MockUniversalHandler{}
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
+		Logger:  mocks.NewMockLogger(),
 	})
 	// No defer here since we're testing shutdown explicitly
 
@@ -246,6 +258,7 @@ func TestUniversalWorkerMessageQueue(t *testing.T) {
 	handler := &MockUniversalHandler{}
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -258,6 +271,7 @@ func TestUniversalWorkerJobTimeout(t *testing.T) {
 	handler := &MockUniversalHandler{}
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -286,6 +300,7 @@ func TestUniversalWorkerConnectionMonitoring(t *testing.T) {
 	handler := &MockUniversalHandler{}
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -304,6 +319,7 @@ func TestUniversalWorkerStatusUpdates(t *testing.T) {
 	handler := &MockUniversalHandler{}
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -332,6 +348,7 @@ func TestUniversalWorkerUpdateLoad(t *testing.T) {
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 		MaxJobs: 2,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -351,6 +368,7 @@ func TestUniversalWorkerWithMockConnection(t *testing.T) {
 	handler := &MockUniversalHandler{}
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -371,6 +389,7 @@ func TestUniversalWorkerErrorHandling(t *testing.T) {
 
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -391,6 +410,7 @@ func TestUniversalWorkerConcurrency(t *testing.T) {
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
 		MaxJobs: 10,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 
@@ -433,6 +453,7 @@ func TestUniversalWorkerAllMethods(t *testing.T) {
 	handler := &MockUniversalHandler{}
 	worker := NewUniversalWorker("ws://localhost:7880", "devkey", "secret", handler, WorkerOptions{
 		JobType: livekit.JobType_JT_ROOM,
+		Logger:  mocks.NewMockLogger(),
 	})
 	defer worker.Stop() // Ensure cleanup
 

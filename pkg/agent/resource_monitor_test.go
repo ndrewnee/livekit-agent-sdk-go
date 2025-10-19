@@ -15,7 +15,7 @@ import (
 
 // TestResourceMonitorOOMDetection tests OOM detection
 func TestResourceMonitorOOMDetection(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	monitor := NewResourceMonitor(logger, ResourceMonitorOptions{
 		CheckInterval: 50 * time.Millisecond,
 		MemoryLimitMB: 1, // Very low limit to trigger OOM
@@ -54,7 +54,7 @@ func TestResourceMonitorOOMDetection(t *testing.T) {
 
 // TestResourceMonitorGoroutineLeakDetection tests goroutine leak detection
 func TestResourceMonitorGoroutineLeakDetection(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	monitor := NewResourceMonitor(logger, ResourceMonitorOptions{
 		CheckInterval:          50 * time.Millisecond,
 		GoroutineLimit:         runtime.NumGoroutine() + 10, // Low limit
@@ -106,7 +106,7 @@ func TestResourceMonitorGoroutineLeakDetection(t *testing.T) {
 
 // TestResourceMonitorCircularDependency tests circular dependency detection
 func TestResourceMonitorCircularDependency(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	monitor := NewResourceMonitor(logger, ResourceMonitorOptions{})
 
 	circularDetected := false
@@ -131,7 +131,7 @@ func TestResourceMonitorCircularDependency(t *testing.T) {
 
 // TestResourceMonitorHealthStatus tests resource health status
 func TestResourceMonitorHealthStatus(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	monitor := NewResourceMonitor(logger, ResourceMonitorOptions{
 		MemoryLimitMB: 10000, // High limit to avoid OOM
 	})
@@ -157,7 +157,7 @@ func TestResourceMonitorHealthStatus(t *testing.T) {
 
 // TestResourceGuard tests resource protection
 func TestResourceGuard(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	monitor := NewResourceMonitor(logger, ResourceMonitorOptions{})
 	guard := NewResourceGuard(monitor)
 
@@ -190,7 +190,7 @@ func TestResourceGuard(t *testing.T) {
 
 // TestResourceMonitorMetrics tests metrics collection
 func TestResourceMonitorMetrics(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	monitor := NewResourceMonitor(logger, ResourceMonitorOptions{})
 
 	metrics := monitor.GetMetrics()
@@ -215,7 +215,7 @@ func TestResourceMonitorMetrics(t *testing.T) {
 
 // TestResourceMonitorConcurrency tests concurrent operations
 func TestResourceMonitorConcurrency(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	monitor := NewResourceMonitor(logger, ResourceMonitorOptions{
 		CheckInterval: 10 * time.Millisecond,
 	})
@@ -252,7 +252,7 @@ func TestResourceMonitorConcurrency(t *testing.T) {
 
 // TestResourceHealthLevels tests health level determination with LiveKit server
 func TestResourceHealthLevels(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 
 	// Connect to local LiveKit server to create realistic resource usage
 	manager := NewTestRoomManager()
@@ -463,7 +463,7 @@ func TestResourceHealthLevels(t *testing.T) {
 
 // TestResourceGuardRetries tests retry logic in resource guard
 func TestResourceGuardRetries(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
+	logger := zap.NewNop()
 	monitor := NewResourceMonitor(logger, ResourceMonitorOptions{})
 	guard := NewResourceGuard(monitor)
 	guard.maxRetries = 3
