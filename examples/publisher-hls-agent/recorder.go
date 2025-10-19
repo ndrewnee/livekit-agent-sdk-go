@@ -488,10 +488,11 @@ func (r *ParticipantRecorder) ActivateRecording() {
 	r.audioLastTimestamp = 0
 	r.mu.Unlock()
 
-	// Clear pre-buffers to prevent stale packets from being recorded
-	// This ensures recording starts cleanly from the next keyframe
-	r.clearPreVideoBuffer()
-	r.clearPreAudioBuffer()
+	// Keep pre-buffers to have packets available for pipeline priming
+	// This ensures segment 0 contains both audio and video
+	// Note: We rely on keyframe detection to prevent stale P-frames
+	// r.clearPreVideoBuffer()
+	// r.clearPreAudioBuffer()
 }
 
 // Start prepares the recorder for operation.
@@ -1039,7 +1040,6 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 							}
 						}
 					}
-					r.recordingKeyframePending.Store(false)
 					r.mu.Lock()
 					r.videoKeyframeCount++
 					r.mu.Unlock()
@@ -1057,6 +1057,43 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 					} else {
 						log.Printf("[%s] starting active recording with keyframe seq=%d ts=%d", r.logPrefix(), rtpPacket.SequenceNumber, rtpPacket.Timestamp)
 					}
+
+					// Push first video keyframe BEFORE allowing audio to start
+					// This ensures first HLS segment contains both audio and video
+					r.initVideoCaps(rtpPacket.PayloadType)
+					if err := r.pushVideoPacket(rtpPacket); err != nil {
+						log.Printf("[%s] video push error: %v", r.logPrefix(), err)
+						return
+					}
+					r.mu.Lock()
+					r.videoPacketCount++
+					r.videoBytesReceived += int64(len(rtpPacket.Payload))
+					r.mu.Unlock()
+
+					// Push several more video packets from pre-buffer to prime the pipeline
+					// This ensures video reaches the muxer before audio starts flooding in
+					primeCount := 0
+					for {
+						buffered := r.dequeuePreVideoPacket()
+						if buffered == nil {
+							break
+						}
+						r.initVideoCaps(buffered.PayloadType)
+						if err := r.pushVideoPacket(buffered); err != nil {
+							log.Printf("[%s] video push error while priming: %v", r.logPrefix(), err)
+							return
+						}
+						r.mu.Lock()
+						r.videoPacketCount++
+						r.videoBytesReceived += int64(len(buffered.Payload))
+						r.mu.Unlock()
+						primeCount++
+					}
+					log.Printf("[%s] primed pipeline with keyframe + %d video packets", r.logPrefix(), primeCount)
+
+					// NOW allow audio to start (video pipeline is primed)
+					r.recordingKeyframePending.Store(false)
+					continue
 				} else {
 					recordingWait++
 					if recordingWait == 1 || recordingWait%200 == 0 {
