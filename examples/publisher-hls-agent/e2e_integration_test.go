@@ -390,6 +390,13 @@ func TestPublisherHLSAgentMultipleParticipants(t *testing.T) {
 	}
 
 	t.Logf("✓ All %d participants successfully recorded to S3", participantCount)
+
+	// Set bucket policy to allow public read access for all participant recordings
+	prefix := path.Join("multi-participant-tests", roomName)
+	policy := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":["s3:GetObject"],"Resource":["arn:aws:s3:::%s/%s/*"]}]}`, ms.Bucket, prefix)
+	if err := client.SetBucketPolicy(context.Background(), ms.Bucket, policy); err != nil {
+		t.Fatalf("failed to set read policy on MinIO bucket: %v", err)
+	}
 	t.Logf("")
 	t.Logf("=== HLS Recording URLs ===")
 	for _, participantName := range participantNames {

@@ -35,12 +35,6 @@ type RealtimeS3Uploader struct {
 	uploadedMu    sync.Mutex
 	uploadedFiles map[string]struct{}
 
-	// Timestamp normalization: calculated from first segment, applied to all
-	offsetMu         sync.Mutex
-	ptsOffset        uint64
-	pcrOffset        uint64
-	offsetCalculated bool
-
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -183,32 +177,6 @@ func (u *RealtimeS3Uploader) uploadAndDeleteSegment(segmentName string) {
 	defer u.wg.Done()
 
 	segmentPath := filepath.Join(u.watchDir, segmentName)
-
-	// Calculate timestamp offset from first segment
-	u.offsetMu.Lock()
-	if !u.offsetCalculated {
-		// Analyze first segment to get the timestamp offsets
-		ptsOff, pcrOff, err := analyzeTsOffsets(segmentPath)
-		if err != nil {
-			log.Printf("[%s/%s] failed to analyze offsets for %s: %v", u.room, u.participant, segmentName, err)
-			// Continue anyway with zero offsets
-			ptsOff, pcrOff = 0, 0
-		}
-		u.ptsOffset = ptsOff
-		u.pcrOffset = pcrOff
-		u.offsetCalculated = true
-		log.Printf("[%s/%s] calculated timestamp offsets: PTS=%d PCR=%d", u.room, u.participant, ptsOff, pcrOff)
-	}
-	ptsOffset := u.ptsOffset
-	pcrOffset := u.pcrOffset
-	u.offsetMu.Unlock()
-
-	// Normalize segment timestamps using the global offset
-	// This ensures all segments have continuous timestamps starting from 0
-	if err := normalizeTsFile(segmentPath, ptsOffset, pcrOffset); err != nil {
-		log.Printf("[%s/%s] failed to normalize timestamps for %s: %v", u.room, u.participant, segmentName, err)
-		// Continue with upload anyway - better to have a segment with wrong timestamps than no segment
-	}
 
 	// Upload to S3
 	if err := u.uploadFile(segmentPath, segmentName); err != nil {
