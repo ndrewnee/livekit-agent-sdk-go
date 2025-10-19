@@ -297,3 +297,25 @@ func subMod(value, offset, mod uint64) uint64 {
 	}
 	return (mod - rem) % mod
 }
+
+// normalizeSegmentTimestamps normalizes timestamps in a single MPEG-TS segment.
+// This is used by real-time S3 uploader to normalize segments before upload.
+func normalizeSegmentTimestamps(segmentPath string) error {
+	// Analyze the segment to find PTS/PCR offsets
+	ptsOffset, pcrOffset, err := analyzeTsOffsets(segmentPath)
+	if err != nil {
+		return fmt.Errorf("analyze segment offsets: %w", err)
+	}
+
+	// If offsets are already zero, no normalization needed
+	if ptsOffset == 0 && pcrOffset == 0 {
+		return nil
+	}
+
+	// Normalize the segment file
+	if err := normalizeTsFile(segmentPath, ptsOffset, pcrOffset); err != nil {
+		return fmt.Errorf("normalize segment: %w", err)
+	}
+
+	return nil
+}

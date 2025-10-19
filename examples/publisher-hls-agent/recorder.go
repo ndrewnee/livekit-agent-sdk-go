@@ -1231,6 +1231,12 @@ func (r *ParticipantRecorder) Stop() {
 			log.Printf("[%s] normalized HLS timestamps", r.logPrefix())
 		}
 
+		if err := fixHLSPlaylist(r.outputDir); err != nil {
+			log.Printf("[%s] failed to fix HLS playlist: %v", r.logPrefix(), err)
+		} else {
+			log.Printf("[%s] fixed HLS playlist final segment duration", r.logPrefix())
+		}
+
 		// Close real-time S3 uploader if enabled
 		if r.s3Uploader != nil {
 			if err := r.s3Uploader.Close(); err != nil {

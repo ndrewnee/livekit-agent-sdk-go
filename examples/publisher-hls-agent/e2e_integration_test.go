@@ -330,6 +330,8 @@ func TestPublisherHLSAgentMultipleParticipants(t *testing.T) {
 	defer cancel()
 
 	successCount := 0
+	s3Links := make(map[string]string)
+
 	for _, participantName := range participantNames {
 		prefix := path.Join("multi-participant-tests", roomName, participantName)
 		playlistObj := path.Join(prefix, "playlist.m3u8")
@@ -375,6 +377,10 @@ func TestPublisherHLSAgentMultipleParticipants(t *testing.T) {
 			continue
 		}
 
+		// Generate S3 URL for this participant's recording
+		s3URL := fmt.Sprintf("http://%s/%s/%s", ms.Endpoint, ms.Bucket, playlistObj)
+		s3Links[participantName] = s3URL
+
 		t.Logf("✓ participant %s: validated S3 recording with %d segments", participantName, foundSegments)
 		successCount++
 	}
@@ -384,6 +390,14 @@ func TestPublisherHLSAgentMultipleParticipants(t *testing.T) {
 	}
 
 	t.Logf("✓ All %d participants successfully recorded to S3", participantCount)
+	t.Logf("")
+	t.Logf("=== HLS Recording URLs ===")
+	for _, participantName := range participantNames {
+		if url, ok := s3Links[participantName]; ok {
+			t.Logf("  %s: %s", participantName, url)
+		}
+	}
+	t.Logf("")
 	t.Logf("S3 bucket: http://%s/%s/multi-participant-tests/%s/", ms.Endpoint, ms.Bucket, roomName)
 
 	if ms.KeepAlive {
