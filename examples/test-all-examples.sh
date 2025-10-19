@@ -48,7 +48,7 @@ total=0
 passed=0
 
 # Test each example
-for example in simple-room-agent participant-monitoring-agent media-publisher-agent; do
+for example in simple-room-agent media-publisher-agent livekit-cloud-example publisher-hls-agent universal-worker-demo; do
     total=$((total + 1))
     if test_example "$example"; then
         passed=$((passed + 1))

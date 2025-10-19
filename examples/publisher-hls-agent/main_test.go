@@ -150,19 +150,19 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 	}
 	serverLogPath := filepath.Join(tempRoot, "livekit-server.log")
 
-	os.Setenv("LIVEKIT_URL", testLiveKitURL)
-	os.Setenv("LIVEKIT_API_KEY", testAPIKey)
-	os.Setenv("LIVEKIT_API_SECRET", testAPISecret)
-	os.Setenv("OUTPUT_DIR", outputDir)
-	os.Setenv("AGENT_NAME", "test-publisher-hls-agent")
-	os.Setenv("HLS_SEGMENT_DURATION", "2")
-	os.Setenv("HLS_MAX_SEGMENTS", "0")
+	_ = os.Setenv("LIVEKIT_URL", testLiveKitURL)
+	_ = os.Setenv("LIVEKIT_API_KEY", testAPIKey)
+	_ = os.Setenv("LIVEKIT_API_SECRET", testAPISecret)
+	_ = os.Setenv("OUTPUT_DIR", outputDir)
+	_ = os.Setenv("AGENT_NAME", "test-publisher-hls-agent")
+	_ = os.Setenv("HLS_SEGMENT_DURATION", "2")
+	_ = os.Setenv("HLS_MAX_SEGMENTS", "0")
 
 	serverLogFile, err := os.Create(serverLogPath)
 	if err != nil {
 		t.Fatalf("failed to create server log file: %v", err)
 	}
-	defer serverLogFile.Close()
+	defer func() { _ = serverLogFile.Close() }()
 
 	serverCmd := exec.Command(serverBinary, "--config", configPath)
 	serverCmd.Stdout = serverLogFile
@@ -223,7 +223,7 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 			return
 		}
 		cancel()
-		worker.Stop()
+		_ = worker.Stop()
 		select {
 		case err := <-workerErr:
 			if err != nil {
@@ -355,7 +355,7 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 	time.Sleep(8 * time.Second)
 
 	cancel()
-	worker.Stop()
+	_ = worker.Stop()
 	select {
 	case err := <-workerErr:
 		if err != nil {
@@ -563,6 +563,7 @@ func waitForFile(path string, timeout time.Duration) error {
 // and timing measurements to aid in debugging validation failures.
 func validateRecordingOutput(t *testing.T, outputFile, referenceVideo string) error {
 	t.Helper()
+	_ = referenceVideo // Reserved for future comparison logic
 
 	stat, err := os.Stat(outputFile)
 	if err != nil {
@@ -700,7 +701,6 @@ func validateRecordingOutput(t *testing.T, outputFile, referenceVideo string) er
 	if !haveVideoTiming || videoDuration == 0 {
 		if _, tsVideoDuration, tsErr := ffprobeStreamTiming(outputFile, "v:0"); tsErr == nil && tsVideoDuration > 0 {
 			videoDuration = tsVideoDuration
-			haveVideoTiming = true
 		}
 	}
 
@@ -708,7 +708,6 @@ func validateRecordingOutput(t *testing.T, outputFile, referenceVideo string) er
 	if !haveAudioTiming || audioDuration == 0 {
 		if _, tsAudioDuration, tsErr := ffprobeStreamTiming(outputFile, "a:0"); tsErr == nil && tsAudioDuration > 0 {
 			audioDuration = tsAudioDuration
-			haveAudioTiming = true
 		}
 	}
 
@@ -774,13 +773,13 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 
 	if _, err = io.Copy(out, in); err != nil {
 		return err
@@ -1128,61 +1127,4 @@ func ffprobeStreamTiming(input, selector string) (start float64, duration float6
 		return 0, 0, fmt.Errorf("failed to parse duration: %w", err)
 	}
 	return
-}
-
-// ffprobeDuration extracts the total duration of a media file using format-level metadata.
-//
-// This function queries the container format's duration metadata, which represents
-// the overall duration of the media file across all streams. This is distinct from
-// ffprobeStreamTiming which queries individual stream durations.
-//
-// ffprobe command:
-//
-//	ffprobe -v error -show_entries format=duration -of csv=p=0 input
-//
-// Command flags explained:
-//   - "-v error": Only show errors (suppress info messages)
-//   - "-show_entries format=duration": Extract duration from format (container) metadata
-//   - "-of csv=p=0": Output as CSV without headers (single duration value)
-//
-// Expected output format:
-//
-//	10.500000
-//	(duration in seconds as a single floating-point value)
-//
-// Difference from ffprobeStreamTiming:
-//   - ffprobeDuration: Queries format/container duration (overall file)
-//   - ffprobeStreamTiming: Queries individual stream duration (video or audio)
-//
-// For well-formed media files, format duration typically matches the longest
-// stream duration. However, they may differ if:
-//   - Container metadata is incorrect or missing
-//   - Streams have different lengths (e.g., video extends beyond audio end)
-//   - File was concatenated or edited improperly
-//
-// Parameters:
-//   - input: Path to media file (HLS playlist, MPEG-TS, MP4, etc.)
-//
-// Returns:
-//   - duration: File duration in seconds
-//   - error: Non-nil if ffprobe fails or duration cannot be parsed
-//
-// Note: This function is currently defined but not actively used in the test
-// validation logic. The tests prefer ffprobeStreamTiming for more granular
-// stream-level duration validation.
-//
-// Example:
-//
-//	duration, err := ffprobeDuration("/tmp/output.ts")
-//	if err != nil {
-//	    t.Fatalf("failed to get duration: %v", err)
-//	}
-//	t.Logf("file duration: %.3fs", duration)
-func ffprobeDuration(input string) (float64, error) {
-	cmd := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", input)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return 0, fmt.Errorf("ffprobe failed: %w (output: %s)", err, string(out))
-	}
-	return strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
 }

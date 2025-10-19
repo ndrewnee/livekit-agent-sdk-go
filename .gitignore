@@ -16,7 +16,6 @@ vendor/
 
 # Go workspace file
 go.work
-*.sum
 
 # IDE specific files
 .idea/
@@ -30,7 +29,14 @@ go.work
 Thumbs.db
 
 # Example binaries
-examples/transcription-agent/transcription-agent
+examples/*/main
+examples/*/*.exe
+examples/livekit-cloud-example/livekit-cloud-example
+examples/media-publisher-agent/media-publisher-agent
+examples/minimal-repro/minimal-repro
+examples/publisher-hls-agent/publisher-hls-agent
+examples/simple-room-agent/simple-room-agent
+examples/universal-worker-demo/universal-worker-demo
 
 # Temporary files
 *.tmp
@@ -38,32 +44,29 @@ examples/transcription-agent/transcription-agent
 
 # Environment variable files
 .env
-/server-sdk-go/
+
+# Virtual environments and dependencies
 /venv/
 /.venv/
 /node_modules/
-/livekit/
-/go-astits/
 
+# Development dependencies (local clones)
 /gohlslib/
+/go-astits/
+/livekit/
 /mediacommon/
 
-# Temporary example files
+# Temporary test/development files
 /save-to-webm.go
 /play-from-disk.go
-/examples/participant-hls-recorder/test-recordings/
-/gohlslib/
-/go-astits/
-/livekit/
-/egress/
 /agents/
 /debug-hls-output/
-/examples/save-to-hls-gstreamer/hls-gst-output/
-/livekit/
+
+# Publisher HLS Agent recordings and output
 /examples/publisher-hls-agent/output/
-/examples/publisher-hls-agent/hls-agent-recordings/
-/examples/publisher-hls-agent/hls-agent-recordings-local-output/
-/examples/publisher-hls-agent/hls-agent-recordings-s3-upload/
-/examples/publisher-hls-agent/publisher-hls-agent
-/examples/publisher-hls-agent/hls-agent-recordings-multi-participant/
+/examples/publisher-hls-agent/hls-agent-recordings*/
+/examples/publisher-hls-agent/*.mp4
+/examples/publisher-hls-agent/*.log
+
+# Claude AI session data
 /.claude/
