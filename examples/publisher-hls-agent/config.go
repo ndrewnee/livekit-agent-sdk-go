@@ -4,7 +4,6 @@ import (
 	"log"
 	"os"
 	"strconv"
-	"time"
 )
 
 // Config captures runtime configuration for the publisher HLS agent.
@@ -126,17 +125,6 @@ func getEnvInt(key string, defaultValue int) int {
 func getEnvBool(key string, defaultValue bool) bool {
 	if str := os.Getenv(key); str != "" {
 		if value, err := strconv.ParseBool(str); err == nil {
-			return value
-		}
-	}
-	return defaultValue
-}
-
-// getEnvDuration retrieves a time.Duration environment variable or returns the default value.
-// Returns defaultValue if the variable is unset or cannot be parsed (e.g., "30s", "5m").
-func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
-	if str := os.Getenv(key); str != "" {
-		if value, err := time.ParseDuration(str); err == nil {
 			return value
 		}
 	}

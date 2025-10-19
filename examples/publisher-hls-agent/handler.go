@@ -113,6 +113,7 @@ func NewPublisherHLSHandler(cfg *Config) *PublisherHLSHandler {
 //   - ParticipantName: Display name shown in the room participant list
 //   - ParticipantMetadata: JSON metadata for client identification
 func (h *PublisherHLSHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *agent.JobMetadata) {
+	_ = ctx // Context parameter required by interface but not used
 	if job.Type != livekit.JobType_JT_PUBLISHER {
 		log.Printf("rejecting job %s: unsupported type %s", job.Id, job.Type.String())
 		return false, nil
@@ -326,6 +327,8 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 			recorder.VideoStreamEnded()
 		case webrtc.RTPCodecTypeAudio:
 			recorder.AudioStreamEnded()
+		default:
+			log.Printf("[%s/%s] unsubscribed from unsupported track kind %s", roomName, targetIdentity, track.Kind().String())
 		}
 	}
 
@@ -388,6 +391,7 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 // GStreamer pipeline, S3 upload (if configured), and removal of the session
 // from the handler's tracking maps.
 func (h *PublisherHLSHandler) OnJobTerminated(ctx context.Context, jobID string) {
+	_ = ctx // Context parameter required by interface but not used
 	h.mu.Lock()
 	session, ok := h.sessions[jobID]
 	h.mu.Unlock()
