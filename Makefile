@@ -20,10 +20,32 @@ test-coverage:
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
 
+# EGRESS MODULE TESTS - PRODUCTION CRITICAL
+
+# Race detection tests for egress - CRITICAL FOR PRODUCTION
+test-egress-race:
+	@echo "Running egress tests with race detector..."
+	GORACE="history_size=7" go test -race ./pkg/egress/... -timeout 30m
+
+# Stress tests for egress resource exhaustion
+test-egress-stress:
+	@echo "Running egress stress tests..."
+	go test -tags=integration ./pkg/egress -run TestResourceExhaustion -v -timeout 30m
+	go test -tags=integration ./pkg/egress -run TestNetworkFailure -v -timeout 30m
+
+# Long-running egress stability tests
+test-egress-longevity:
+	@echo "Running egress longevity tests (1+ hours)..."
+	LONGEVITY_TEST_DURATION=1h go test -tags=longevity ./pkg/egress -run TestLongRunningStability -v -timeout 2h
+
+# All egress production tests
+test-egress-production: test-egress-race test-egress-stress
+	@echo "Egress production readiness tests completed!"
+
 # Run linter
 lint:
 	@if command -v golangci-lint > /dev/null; then \
-		golangci-lint run ./...; \
+		GOOS=$$(go env GOOS) GOARCH=$$(go env GOARCH) golangci-lint run ./...; \
 	else \
 		echo "golangci-lint not installed. Install with: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"; \
 		exit 1; \

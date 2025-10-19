@@ -39,8 +39,9 @@ func newMockWebSocketServer() *mockWebSocketServer {
 		},
 		connections:  make([]*websocket.Conn, 0),
 		receivedMsgs: make([][]byte, 0),
-		responses:    make(chan *livekit.ServerMessage, 10),
-		workerID:     "mock-worker-123",
+		// Large buffer to avoid blocking under bursty enqueue in stress tests
+		responses: make(chan *livekit.ServerMessage, 1024),
+		workerID:  "mock-worker-123",
 	}
 
 	m.Server = httptest.NewServer(http.HandlerFunc(m.handleWebSocket))
@@ -137,10 +138,14 @@ func (m *mockWebSocketServer) handleConnection(conn *websocket.Conn) {
 				_ = m.sendMessage(conn, resp)
 			} else {
 				// When registration is suppressed, immediately send any queued responses
-				select {
-				case resp := <-m.responses:
-					_ = m.sendMessage(conn, resp)
-				default:
+			flushReg:
+				for {
+					select {
+					case resp := <-m.responses:
+						_ = m.sendMessage(conn, resp)
+					default:
+						break flushReg
+					}
 				}
 			}
 
@@ -168,11 +173,15 @@ func (m *mockWebSocketServer) handleConnection(conn *websocket.Conn) {
 			// Job status update
 		}
 
-		// Send any queued responses
-		select {
-		case resp := <-m.responses:
-			_ = m.sendMessage(conn, resp)
-		default:
+		// Send all queued responses
+	flush:
+		for {
+			select {
+			case resp := <-m.responses:
+				_ = m.sendMessage(conn, resp)
+			default:
+				break flush
+			}
 		}
 	}
 }
@@ -202,6 +211,19 @@ func (m *mockWebSocketServer) SendJobAssignment(job *livekit.Job, token string) 
 			Assignment: &livekit.JobAssignment{
 				Job:   job,
 				Token: token,
+			},
+		},
+	}
+	m.responses <- msg
+}
+
+func (m *mockWebSocketServer) SendJobAssignmentWithURL(job *livekit.Job, token, url string) {
+	msg := &livekit.ServerMessage{
+		Message: &livekit.ServerMessage_Assignment{
+			Assignment: &livekit.JobAssignment{
+				Job:   job,
+				Token: token,
+				Url:   &url,
 			},
 		},
 	}

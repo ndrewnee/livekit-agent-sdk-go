@@ -490,7 +490,8 @@ func (mp *MediaPipeline) startMediaReceiver(track *webrtc.TrackRemote, pipeline 
 		// Video handling would be implemented here
 		// This would involve setting up video receivers
 	default:
-		panic("unhandled default case")
+		// Avoid panicking on unexpected kinds; surface a clear error
+		return fmt.Errorf("unsupported track kind: %v", track.Kind())
 	}
 
 	// Note: Actual media reception would require lower-level WebRTC access

@@ -28,8 +28,15 @@ go.work
 .DS_Store
 Thumbs.db
 
-# Example binaries
-examples/transcription-agent/transcription-agent
+# Example binaries - ignore any binary with the same name as its parent directory
+examples/*/main
+examples/*/*.exe
+examples/livekit-cloud-example/livekit-cloud-example
+examples/media-publisher-agent/media-publisher-agent
+examples/minimal-repro/minimal-repro
+examples/publisher-hls-agent/publisher-hls-agent
+examples/simple-room-agent/simple-room-agent
+examples/universal-worker-demo/universal-worker-demo
 
 # Temporary files
 *.tmp
@@ -37,4 +44,30 @@ examples/transcription-agent/transcription-agent
 
 # Environment variable files
 .env
-/server-sdk-go/
+
+# Virtual environments and dependencies
+/venv/
+/.venv/
+/node_modules/
+
+# Development dependencies (local clones)
+/gohlslib/
+/go-astits/
+/livekit/
+/mediacommon/
+
+# Temporary test/development files
+/save-to-webm.go
+/play-from-disk.go
+/agents/
+/debug-hls-output/
+
+# Publisher HLS Agent recordings and output
+/examples/publisher-hls-agent/output/
+/examples/publisher-hls-agent/hls-agent-recordings*/
+/examples/publisher-hls-agent/*.mp4
+/examples/publisher-hls-agent/**/*.mp4
+/examples/publisher-hls-agent/*.log
+
+# Claude AI session data
+/.claude/

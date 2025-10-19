@@ -248,9 +248,30 @@ func TestJobContext(t *testing.T) {
 	})
 
 	t.Run("publish data", func(t *testing.T) {
-		// We need to create a proper mock room or skip this test
-		// Since PublishData requires a valid LocalParticipant, we'll skip it for unit tests
-		t.Skip("PublishData requires a connected room with LocalParticipant")
+		// Use a real LiveKit room to exercise PublishData
+		if err := TestLiveKitConnection(); err != nil {
+			t.Skipf("LiveKit server not available for PublishData test: %v", err)
+		}
+
+		manager := NewTestRoomManager()
+		defer manager.CleanupRooms()
+
+		pubRoom, subRoom, err := manager.CreateConnectedRooms("utils-publishdata")
+		if err != nil {
+			t.Fatalf("failed to create rooms: %v", err)
+		}
+		defer pubRoom.Disconnect()
+		defer subRoom.Disconnect()
+
+		// Build JobUtils with the publisher room
+		job := &livekit.Job{Id: "job-utils-publish"}
+		jc := NewJobUtils(context.Background(), job, pubRoom)
+
+		// Send data to the subscriber identity
+		dest := []string{"test-subscriber"}
+		if err := jc.PublishData([]byte("hello"), true, dest); err != nil {
+			t.Fatalf("PublishData failed: %v", err)
+		}
 	})
 }
 

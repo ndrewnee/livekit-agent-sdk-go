@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -247,19 +248,7 @@ func isNetworkError(err error) bool {
 
 // containsNetError checks if a string contains a substring (case-insensitive)
 func containsNetError(s, substr string) bool {
-	return len(s) >= len(substr) &&
-		(s == substr ||
-			len(s) > len(substr) &&
-				(containsNetErrorHelper(s, substr)))
-}
-
-func containsNetErrorHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }
 
 // NetworkMonitor monitors network health

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"strings"
 )
 
 // ResourceLimiter enforces hard limits on system resources to prevent agents from consuming
@@ -447,17 +448,16 @@ func (t *FileDescriptorTracker) LogOpenFiles(logger *zap.Logger) {
 			continue
 		}
 
-		// Categorize by type
-		switch {
-		case link == "pipe:[0]" || link[:5] == "pipe:":
+		// Categorize by type (safe prefix checks)
+		if link == "pipe:[0]" || strings.HasPrefix(link, "pipe:") {
 			fileTypes["pipe"]++
-		case link[:7] == "socket:":
+		} else if strings.HasPrefix(link, "socket:") {
 			fileTypes["socket"]++
-		case link[:11] == "anon_inode:":
+		} else if strings.HasPrefix(link, "anon_inode:") {
 			fileTypes["anon_inode"]++
-		case link[0] == '/':
+		} else if len(link) > 0 && link[0] == '/' {
 			fileTypes["file"]++
-		default:
+		} else {
 			fileTypes["other"]++
 		}
 	}

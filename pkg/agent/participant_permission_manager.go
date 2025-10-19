@@ -386,19 +386,28 @@ func (p *TimeBasedPolicy) GetDefaultPermissions(identity string) *livekit.Partic
 
 // describePermissionChanges describes what changed between two permission sets
 func describePermissionChanges(from, to *livekit.ParticipantPermission) string {
+	// Be nil-safe; treat nil as zero-valued permissions
+	var f, t livekit.ParticipantPermission
+	if from != nil {
+		f = *from
+	}
+	if to != nil {
+		t = *to
+	}
+
 	changes := []string{}
 
-	if from.CanSubscribe != to.CanSubscribe {
-		changes = append(changes, fmt.Sprintf("subscribe: %v->%v", from.CanSubscribe, to.CanSubscribe))
+	if f.CanSubscribe != t.CanSubscribe {
+		changes = append(changes, fmt.Sprintf("subscribe: %v->%v", f.CanSubscribe, t.CanSubscribe))
 	}
-	if from.CanPublish != to.CanPublish {
-		changes = append(changes, fmt.Sprintf("publish: %v->%v", from.CanPublish, to.CanPublish))
+	if f.CanPublish != t.CanPublish {
+		changes = append(changes, fmt.Sprintf("publish: %v->%v", f.CanPublish, t.CanPublish))
 	}
-	if from.CanPublishData != to.CanPublishData {
-		changes = append(changes, fmt.Sprintf("publish_data: %v->%v", from.CanPublishData, to.CanPublishData))
+	if f.CanPublishData != t.CanPublishData {
+		changes = append(changes, fmt.Sprintf("publish_data: %v->%v", f.CanPublishData, t.CanPublishData))
 	}
-	if from.Hidden != to.Hidden {
-		changes = append(changes, fmt.Sprintf("hidden: %v->%v", from.Hidden, to.Hidden))
+	if f.Hidden != t.Hidden {
+		changes = append(changes, fmt.Sprintf("hidden: %v->%v", f.Hidden, t.Hidden))
 	}
 
 	if len(changes) == 0 {
