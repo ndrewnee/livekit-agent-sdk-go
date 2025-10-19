@@ -26,6 +26,19 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
+// e2eScenario defines the configuration for an end-to-end integration test scenario.
+//
+// This structure encapsulates all parameters needed to run a complete test including
+// room configuration, agent settings, output locations, and environment variables.
+//
+// Fields:
+//   - name: Scenario identifier used for output directory naming (e.g., "s3-upload")
+//   - agentName: LiveKit agent name for job dispatch (defaults to "publisher-hls-e2e-agent")
+//   - roomName: LiveKit room name to create (defaults to "publisher-hls-e2e-room")
+//   - participant: Participant identity for testing (defaults to "publisher-hls-e2e-participant")
+//   - outputDir: Local directory for HLS recordings (defaults to hls-agent-recordings-{name})
+//   - agentEnv: Environment variables to pass to the agent process (e.g., S3 credentials)
+//   - skipS3Validation: If true, skips built-in S3 validation in runE2EScenario (for custom validation)
 type e2eScenario struct {
 	name             string
 	agentName        string
@@ -36,6 +49,17 @@ type e2eScenario struct {
 	skipS3Validation bool // Skip built-in S3 validation in runE2EScenario (for custom validation)
 }
 
+// e2eResult contains the output paths and identifiers from a completed end-to-end test.
+//
+// This structure is returned by runE2EScenario and provides access to all artifacts
+// and metadata generated during the test for further validation or debugging.
+//
+// Fields:
+//   - outputDir: Root directory containing all recordings for this test run
+//   - participantDir: Specific subdirectory for this participant's recording session
+//   - agentLogPath: Path to the agent's log file
+//   - roomName: LiveKit room name used in the test
+//   - participantName: Participant identity used in the test
 type e2eResult struct {
 	outputDir       string
 	participantDir  string
@@ -44,6 +68,23 @@ type e2eResult struct {
 	participantName string
 }
 
+// TestPublisherHLSAgentUploadsToS3 validates that the publisher-hls-agent correctly
+// uploads HLS recordings to S3-compatible storage and that the uploaded files are valid.
+//
+// This test performs the following validations:
+//  1. Starts a local MinIO server for S3 storage
+//  2. Creates a LiveKit room with agent dispatch configuration
+//  3. Publishes H.264 + Opus media tracks to the room
+//  4. Waits for the agent to record and upload to S3
+//  5. Validates the S3 playlist file contains valid segment entries
+//  6. Verifies first segment has non-zero duration
+//  7. Sets public read ACL for testing HLS playback URLs
+//
+// Environment variables:
+//   - PUBLISHER_HLS_KEEP_MINIO: If "1", MinIO server stays running after test for manual inspection
+//
+// The test uses a unique agent name per run to avoid conflicts with stale workers
+// from previous test runs.
 func TestPublisherHLSAgentUploadsToS3(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping end-to-end integration test in short mode")
@@ -412,7 +453,34 @@ func TestPublisherHLSAgentMultipleParticipants(t *testing.T) {
 	}
 }
 
-// runParticipant connects a single participant, publishes tracks, and waits for recording
+// runParticipant connects a single participant, publishes tracks, and waits for recording to complete.
+//
+// This helper function is used by TestPublisherHLSAgentMultipleParticipants to simulate
+// a participant joining a room, publishing media, and recording for the duration of the test video.
+//
+// Lifecycle:
+//  1. Connect to LiveKit room with given identity
+//  2. Create H.264 video and Opus audio local tracks
+//  3. Publish tracks to the room with track names based on participant identity
+//  4. Wait for tracks to be bound (WebRTC negotiation complete)
+//  5. Start GStreamer publisher to stream test video file
+//  6. Restart publisher midway to simulate real-world reconnection scenarios
+//  7. Wait for test video to complete playback
+//  8. Stop publisher and disconnect from room
+//
+// Parameters:
+//   - t: Test context for logging and assertions
+//   - roomName: LiveKit room to join
+//   - participantIdentity: Unique identity for this participant
+//   - testVideo: Path to MP4 test video file
+//   - agentLogPath: Path to agent log file (for debugging if needed)
+//
+// Returns:
+//   - nil on success
+//   - error if connection, track publication, or media streaming fails
+//
+// This function is designed to be called concurrently from multiple goroutines
+// to test the agent's behavior under multiple simultaneous participants.
 func runParticipant(t *testing.T, roomName, participantIdentity, testVideo, agentLogPath string) error {
 	t.Helper()
 
@@ -507,6 +575,38 @@ func runParticipant(t *testing.T, roomName, participantIdentity, testVideo, agen
 	return nil
 }
 
+// runE2EScenario executes a complete end-to-end integration test scenario.
+//
+// This is the main test orchestration function that sets up the complete testing
+// environment including LiveKit server, publisher-hls-agent, MinIO (if S3 enabled),
+// and a test participant publishing media.
+//
+// Test infrastructure setup:
+//  1. Starts livekit-server with dev configuration
+//  2. Starts publisher-hls-agent with scenario-specific environment
+//  3. Creates LiveKit room with agent dispatch configuration
+//  4. Connects test participant and publishes H.264 + Opus tracks
+//  5. Streams test video file to LiveKit room
+//  6. Waits for recording completion
+//  7. Validates recording output (local or S3 depending on configuration)
+//  8. Cleans up all processes and resources
+//
+// The function handles three validation modes:
+//   - Local validation: Validates output.ts file if S3 is disabled
+//   - S3 post-processing validation: Built-in validation after recording completes
+//   - Custom S3 validation: Test performs its own validation (skipS3Validation=true)
+//
+// Parameters:
+//   - t: Test context for logging, assertions, and cleanup
+//   - scenario: Configuration defining agent settings, S3 options, and test parameters
+//
+// Returns:
+//   - e2eResult: Paths and identifiers for test artifacts and recordings
+//
+// Cleanup behavior:
+//   - On test failure: Preserves output directory and logs for debugging
+//   - On success: Removes output directory unless PUBLISHER_HLS_KEEP_MINIO=1
+//   - Always: Shuts down livekit-server and agent processes gracefully
 func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	t.Helper()
 
@@ -855,6 +955,10 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	}
 }
 
+// requireFileExists fails the test if the specified file does not exist.
+//
+// This helper is used to validate test prerequisites like test video files
+// or configuration files before attempting to run tests.
 func requireFileExists(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); err != nil {
@@ -862,6 +966,21 @@ func requireFileExists(t *testing.T, path string) {
 	}
 }
 
+// shutdownProcess gracefully shuts down a process with SIGINT, then kills if necessary.
+//
+// Shutdown sequence:
+//  1. Send SIGINT to allow graceful shutdown
+//  2. Wait up to timeout duration for process to exit
+//  3. If timeout expires, send SIGKILL to force termination
+//  4. Log exit status for debugging
+//
+// Parameters:
+//   - t: Test context for logging
+//   - cmd: Command to shut down (must have been started)
+//   - name: Human-readable process name for log messages
+//   - timeout: Maximum time to wait for graceful shutdown
+//
+// This function is safe to call multiple times and handles nil commands gracefully.
 func shutdownProcess(t *testing.T, cmd *exec.Cmd, name string, timeout time.Duration) {
 	t.Helper()
 	if cmd == nil || cmd.Process == nil {
@@ -891,6 +1010,31 @@ func shutdownProcess(t *testing.T, cmd *exec.Cmd, name string, timeout time.Dura
 	}
 }
 
+// waitForLogContains polls a log file until it contains a specific string or times out.
+//
+// This function is used to wait for specific events to occur during testing by
+// monitoring log file content. It handles cases where the log file doesn't exist
+// yet (which is normal at test startup).
+//
+// Polling strategy:
+//   - Reads entire log file every 200ms
+//   - Returns immediately when needle is found
+//   - Ignores ErrNotExist (file may not exist yet)
+//   - Returns timeout error if deadline expires
+//
+// Parameters:
+//   - path: Path to log file to monitor
+//   - needle: String to search for in log content
+//   - timeout: Maximum time to wait before giving up
+//
+// Returns:
+//   - nil if needle is found within timeout
+//   - error if timeout expires or file read fails (non-ErrNotExist)
+//
+// Common use cases:
+//   - Waiting for "Worker registered" to confirm agent started
+//   - Waiting for "auto-activating recording" to confirm recording began
+//   - Waiting for "uploaded recording to" to confirm S3 upload completed
 func waitForLogContains(path, needle string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -908,6 +1052,21 @@ func waitForLogContains(path, needle string, timeout time.Duration) error {
 	}
 }
 
+// minioServer represents a running MinIO server instance for S3-compatible testing.
+//
+// The server can be run either as a local binary or as a Docker container,
+// depending on what's available in the environment. Tests use this to provide
+// S3-compatible storage without requiring actual AWS credentials or internet access.
+//
+// Fields:
+//   - Cmd: Process handle for locally-run MinIO (nil if using Docker)
+//   - Endpoint: Host:port for S3 API access (e.g., "127.0.0.1:12345")
+//   - AccessKey: MinIO access key (defaults to "minioadmin")
+//   - SecretKey: MinIO secret key (defaults to "minioadmin")
+//   - Bucket: Default bucket name ("publisher-hls")
+//   - Container: Docker container ID if using Docker (empty if local binary)
+//   - DataDir: Local directory for MinIO data storage
+//   - KeepAlive: If true, server persists after test for manual inspection
 type minioServer struct {
 	Cmd       *exec.Cmd
 	Endpoint  string
@@ -919,6 +1078,14 @@ type minioServer struct {
 	KeepAlive bool
 }
 
+// Shutdown stops the MinIO server gracefully.
+//
+// Behavior:
+//   - If KeepAlive is true, does nothing (leaves server running for inspection)
+//   - If using Docker: Runs `docker rm -f` to remove container
+//   - If using local binary: Sends SIGINT, then SIGKILL after 5s timeout
+//
+// This method is safe to call multiple times and handles nil receivers gracefully.
 func (m *minioServer) Shutdown(t *testing.T) {
 	t.Helper()
 	if m == nil || m.KeepAlive {
@@ -941,6 +1108,16 @@ func (m *minioServer) Shutdown(t *testing.T) {
 	}
 }
 
+// NewClient creates a new MinIO client configured to connect to this server instance.
+//
+// The returned client is pre-configured with:
+//   - Endpoint from server instance
+//   - Static credentials (AccessKey/SecretKey)
+//   - No SSL (Secure: false) for local testing
+//   - Path-style bucket lookup for compatibility
+//   - us-east-1 region
+//
+// Returns a configured client or fails the test if client creation errors.
 func (m *minioServer) NewClient(t *testing.T) *minio.Client {
 	t.Helper()
 	client, err := minio.New(m.Endpoint, &minio.Options{
@@ -955,6 +1132,35 @@ func (m *minioServer) NewClient(t *testing.T) *minio.Client {
 	return client
 }
 
+// startMinIOServer starts a MinIO server for S3-compatible storage during tests.
+//
+// Server selection strategy:
+//  1. Try to find `minio` binary in PATH
+//  2. If not found, check for `docker` binary
+//  3. If neither found, skip the test (S3 testing unavailable)
+//  4. Start MinIO using whichever method is available
+//
+// Local binary mode:
+//   - Runs MinIO server process with --address for API and --console-address for web UI
+//   - Uses random free ports to avoid conflicts
+//   - Captures stdout/stderr to temp log file
+//   - Sets MINIO_ROOT_USER and MINIO_ROOT_PASSWORD environment variables
+//
+// Docker mode:
+//   - Runs quay.io/minio/minio:latest container
+//   - Maps random free ports to container ports 9000 (API) and 9001 (console)
+//   - Container runs with --rm flag for automatic cleanup
+//   - Uses docker environment variables for credentials
+//
+// Initialization:
+//   - Waits up to 20 seconds for MinIO health endpoint to return 200 OK
+//   - Creates default bucket "publisher-hls" if it doesn't exist
+//   - Returns configured minioServer instance for test use
+//
+// Environment variables:
+//   - PUBLISHER_HLS_KEEP_MINIO: If "1", server persists after test with data in temp directory
+//
+// Returns a started and ready MinIO server instance or skips/fails the test.
 func startMinIOServer(t *testing.T) *minioServer {
 	t.Helper()
 
@@ -1078,6 +1284,16 @@ func startMinIOServer(t *testing.T) *minioServer {
 	return server
 }
 
+// mustGetFreePort finds and returns an available TCP port on localhost.
+//
+// The function uses the kernel's port allocation by listening on port 0,
+// which causes the OS to assign a free ephemeral port. The port is then
+// immediately released and returned for use by the test.
+//
+// Note: There's a small race condition window between releasing the port
+// and using it, but in practice this is rarely an issue for local testing.
+//
+// Fails the test if no free port can be found.
 func mustGetFreePort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1088,6 +1304,36 @@ func mustGetFreePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
+// validateS3Recording validates that an HLS recording was successfully uploaded to S3
+// and that the playlist and segments are accessible and valid.
+//
+// Validation steps:
+//  1. Wait for playlist.m3u8 to appear in S3 (up to 2 minutes)
+//  2. Download playlist to local temp directory
+//  3. Parse playlist to extract segment filenames
+//  4. Wait for each segment to appear in S3
+//  5. Download all segments for validation
+//  6. Normalize segment durations using ffprobe
+//  7. Update #EXT-X-TARGETDURATION based on actual maximum segment duration
+//  8. Re-upload normalized playlist to S3 if changes were made
+//
+// The normalization step corrects any invalid durations written by GStreamer's hlssink
+// (such as the final segment bug where duration may be extremely large).
+//
+// Parameters:
+//   - t: Test context for logging
+//   - client: MinIO/S3 client configured for the bucket
+//   - bucket: S3 bucket name
+//   - prefix: S3 key prefix for this recording (e.g., "tests/room/participant")
+//   - referenceVideo: Path to original test video (unused currently, for future validation)
+//   - artifactDir: Directory for test artifacts (unused currently)
+//
+// Returns:
+//   - nil if validation succeeds
+//   - error if playlist/segments are missing, malformed, or inaccessible
+//
+// Note: This function does NOT validate output.ts as it's redundant with HLS segments
+// and is not uploaded to S3 by the real-time S3 uploader.
 func validateS3Recording(t *testing.T, client *minio.Client, bucket, prefix, referenceVideo, artifactDir string) error {
 	t.Helper()
 
@@ -1166,6 +1412,36 @@ func validateS3Recording(t *testing.T, client *minio.Client, bucket, prefix, ref
 	return nil
 }
 
+// normalizePlaylistDurations corrects segment durations in an HLS playlist using ffprobe.
+//
+// This function addresses GStreamer hlssink bugs where segment durations may be incorrect
+// (particularly the final segment which often has an invalid duration like 18446743552).
+//
+// Algorithm:
+//  1. Read playlist.m3u8 file
+//  2. For each #EXTINF directive, find corresponding .ts segment file
+//  3. Use ffprobe to get actual segment duration
+//  4. Sanitize duration (clamp to 0.01-60s range, round to 3 decimals)
+//  5. Replace #EXTINF duration if it doesn't match actual duration
+//  6. Update #EXT-X-TARGETDURATION to ceiling of maximum segment duration
+//  7. Write corrected playlist back to disk if any changes were made
+//
+// Parameters:
+//   - playlistPath: Path to playlist.m3u8 file to normalize
+//   - segmentPaths: Map of segment filenames to their local paths (for ffprobe)
+//
+// Returns:
+//   - bool: true if playlist was modified, false if no changes needed
+//   - error: nil on success, error if file operations or ffprobe fails
+//
+// Segment duration sanitization:
+//   - NaN or Inf values: Replaced with 0
+//   - Negative values: Clamped to 0
+//   - Values < 0.01s: Clamped to 0.01s (minimum valid duration)
+//   - Values > 60s: Clamped to 60s (sanity check)
+//   - All values rounded to 3 decimal places
+//
+// Invalid segments (ffprobe failures) are skipped rather than failing the entire validation.
 func normalizePlaylistDurations(playlistPath string, segmentPaths map[string]string) (bool, error) {
 	data, err := os.ReadFile(playlistPath)
 	if err != nil {
@@ -1254,6 +1530,27 @@ func normalizePlaylistDurations(playlistPath string, segmentPaths map[string]str
 	return true, nil
 }
 
+// ffprobeSegmentDuration uses ffprobe to determine the actual duration of an MPEG-TS segment.
+//
+// This function shells out to the ffprobe command-line tool to extract the duration
+// from the segment's container metadata. This is more reliable than parsing PTS values
+// manually and handles edge cases like variable frame rates correctly.
+//
+// Command:
+//
+//	ffprobe -v error -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 <path>
+//
+// Parameters:
+//   - path: Path to .ts segment file
+//
+// Returns:
+//   - duration in seconds (float64)
+//   - error if ffprobe fails, returns empty output, or duration can't be parsed
+//
+// Common failure cases:
+//   - Segment file is incomplete or corrupted
+//   - Segment was written during pipeline shutdown and is invalid
+//   - ffprobe is not installed or not in PATH
 func ffprobeSegmentDuration(path string) (float64, error) {
 	cmd := exec.Command("ffprobe",
 		"-v", "error",
@@ -1276,6 +1573,23 @@ func ffprobeSegmentDuration(path string) (float64, error) {
 	return value, nil
 }
 
+// sanitizeSegmentDuration clamps and rounds a segment duration to a valid HLS range.
+//
+// Sanitization rules:
+//   - NaN or Inf: Return 0
+//   - Negative values: Clamp to 0
+//   - Values < 0.01s: Clamp to 0.01s (minimum practical segment duration)
+//   - Values > 60s: Clamp to 60s (sanity check for obviously invalid values)
+//   - All values: Round to 3 decimal places (millisecond precision)
+//
+// Parameters:
+//   - duration: Raw duration value from ffprobe or other source
+//
+// Returns:
+//   - Sanitized duration value suitable for HLS #EXTINF directive
+//
+// The 0.01s minimum prevents zero-duration segments which can cause playback issues.
+// The 60s maximum catches obviously invalid values while allowing legitimate long segments.
 func sanitizeSegmentDuration(duration float64) float64 {
 	if math.IsNaN(duration) || math.IsInf(duration, 0) {
 		return 0

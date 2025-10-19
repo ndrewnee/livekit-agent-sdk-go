@@ -4,8 +4,6 @@ go 1.24.6
 
 replace github.com/am-sokolov/livekit-agent-sdk-go => ../..
 
-replace github.com/livekit/server-sdk-go/v2 => ../../server-sdk-go
-
 require (
 	github.com/am-sokolov/livekit-agent-sdk-go v0.0.0
 	github.com/go-gst/go-gst v1.4.0

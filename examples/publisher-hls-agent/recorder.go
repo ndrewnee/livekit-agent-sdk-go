@@ -86,6 +86,24 @@ type ParticipantRecorder struct {
 	s3Uploader *RealtimeS3Uploader // Real-time S3 uploader (nil if disabled)
 }
 
+// Pre-buffer configuration for video and audio packets.
+//
+// These buffers store incoming RTP packets before recording activation,
+// ensuring the first HLS segment contains both audio and video streams
+// when the pipeline starts.
+//
+// Buffer sizes are chosen to accommodate typical streaming scenarios:
+//   - preVideoBufferMax: 300 packets (approximately 10 seconds at 30fps)
+//   - preAudioBufferMax: 500 packets (approximately 10 seconds at 50 packets/sec for Opus)
+//
+// When a buffer fills up, the oldest packet is discarded (FIFO behavior).
+// This prevents unbounded memory growth while waiting for recording activation.
+//
+// The buffers are critical for ensuring HLS segment synchronization:
+//  1. Video and audio packets arrive before recording starts
+//  2. Packets are buffered until ActivateRecording() is called
+//  3. On first keyframe, buffered packets prime the GStreamer pipeline
+//  4. This ensures segment 0 contains synchronized audio and video
 const (
 	preVideoBufferMax = 300
 	preAudioBufferMax = 500
@@ -439,6 +457,15 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	return recorder, nil
 }
 
+// logPrefix returns a standardized log prefix for this recorder.
+//
+// Format: "room/participant"
+//
+// This prefix is prepended to all log messages from this recorder instance,
+// making it easy to correlate log entries with specific recording sessions
+// when multiple participants are being recorded simultaneously.
+//
+// Example output: "test-room/participant-123"
 func (r *ParticipantRecorder) logPrefix() string {
 	return fmt.Sprintf("%s/%s", r.room, r.participant)
 }
@@ -507,7 +534,34 @@ func (r *ParticipantRecorder) Start() error {
 	return nil
 }
 
-// H.264 NAL unit types used to detect keyframes.
+// H.264 NAL unit types used to detect keyframes and parameter sets.
+//
+// These constants define NAL unit type values as specified in ITU-T H.264 / ISO/IEC 14496-10.
+//
+// Parameter sets (must precede video data for decoding):
+//   - nalUnitTypeSPS (7): Sequence Parameter Set
+//     Contains global codec parameters (resolution, profile, level, etc.)
+//   - nalUnitTypePPS (8): Picture Parameter Set
+//     Contains picture-specific parameters (entropy coding mode, slice groups, etc.)
+//
+// Video data:
+//   - nalUnitTypeIDR (5): IDR (Instantaneous Decoder Refresh) keyframe
+//     Intra-coded frame that can be decoded independently (no dependencies on previous frames)
+//
+// RTP packetization (RFC 6184):
+//   - nalUnitTypeSTAPA (24): Single-Time Aggregation Packet Type A
+//     Multiple NAL units in a single RTP packet (used to reduce overhead)
+//   - nalUnitTypeFUA (28): Fragmentation Unit Type A
+//     Large NAL unit fragmented across multiple RTP packets
+//
+// Keyframe detection logic:
+// A keyframe is identified by the presence of SPS, PPS, or IDR NAL units.
+// For HLS recording, we must wait for a keyframe before starting the pipeline
+// to ensure all segments begin with decodable video (no P-frame dependencies).
+//
+// The NAL unit type is encoded in the lower 5 bits of the first payload byte:
+//
+//	nalType = payload[0] & 0x1F
 const (
 	nalUnitTypeSPS   = 7  // Sequence Parameter Set
 	nalUnitTypePPS   = 8  // Picture Parameter Set
@@ -680,6 +734,29 @@ func detectParameterSets(payload []byte) (bool, bool) {
 	}
 }
 
+// initVideoCaps initializes the GStreamer video appsrc element's capabilities.
+//
+// This function must be called before pushing video packets to the appsrc.
+// It configures the RTP stream parameters that GStreamer needs to properly
+// decode the incoming H.264 video stream.
+//
+// Caps format:
+//
+//	application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,payload=<PT>
+//
+// Parameters explained:
+//   - media=video: Indicates this is a video stream
+//   - encoding-name=H264: Codec is H.264 (AVC)
+//   - clock-rate=90000: RTP timestamp clock rate in Hz (H.264 standard)
+//   - payload=<PT>: RTP payload type from the track's codec parameters
+//
+// Initialization is idempotent (only occurs once per recorder instance).
+// Subsequent calls are no-ops to prevent re-initializing the pipeline.
+//
+// Thread-safety: Protected by r.mu mutex.
+//
+// Parameters:
+//   - payloadType: RTP payload type number from the WebRTC track
 func (r *ParticipantRecorder) initVideoCaps(payloadType uint8) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -693,6 +770,28 @@ func (r *ParticipantRecorder) initVideoCaps(payloadType uint8) {
 	log.Printf("[%s] video caps initialized: %s", r.logPrefix(), capsStr)
 }
 
+// enqueuePreVideoPacket adds a video RTP packet to the pre-recording buffer.
+//
+// This buffer stores video packets that arrive before recording is activated,
+// ensuring the first HLS segment contains synchronized audio and video when
+// the GStreamer pipeline starts.
+//
+// Buffering strategy:
+//  1. Clone the incoming packet (to avoid mutation by the caller)
+//  2. If buffer is full (300 packets), discard oldest packet (FIFO)
+//  3. Append new packet to buffer
+//
+// The pre-buffer is used during two critical phases:
+//   - Pre-handshake: Buffering while waiting for first keyframe
+//   - Pre-recording: Buffering while waiting for ActivateRecording() call
+//
+// When recording starts, buffered packets are drained via dequeuePreVideoPacket()
+// to prime the GStreamer pipeline before live packets are pushed.
+//
+// Thread-safety: Protected by r.preVideoMu mutex.
+//
+// Parameters:
+//   - pkt: RTP packet to buffer (nil packets are ignored)
 func (r *ParticipantRecorder) enqueuePreVideoPacket(pkt *rtp.Packet) {
 	if pkt == nil {
 		return
@@ -710,6 +809,33 @@ func (r *ParticipantRecorder) enqueuePreVideoPacket(pkt *rtp.Packet) {
 	r.preVideoMu.Unlock()
 }
 
+// dequeuePreVideoPacket removes and returns the oldest video packet from the pre-buffer.
+//
+// This function is called during recording activation to drain the pre-buffer
+// and prime the GStreamer pipeline with buffered packets. By pushing buffered
+// packets first, we ensure the first HLS segment contains synchronized audio
+// and video streams.
+//
+// Dequeue behavior:
+//   - Returns oldest packet (FIFO ordering)
+//   - Removes packet from buffer
+//   - Sets removed slot to nil (helps GC)
+//   - Returns nil if buffer is empty
+//
+// Typical usage pattern:
+//
+//	for {
+//	    pkt := r.dequeuePreVideoPacket()
+//	    if pkt == nil {
+//	        break
+//	    }
+//	    r.pushVideoPacket(pkt)
+//	}
+//
+// Thread-safety: Protected by r.preVideoMu mutex.
+//
+// Returns:
+//   - RTP packet from buffer, or nil if buffer is empty
 func (r *ParticipantRecorder) dequeuePreVideoPacket() *rtp.Packet {
 	r.preVideoMu.Lock()
 	defer r.preVideoMu.Unlock()
@@ -722,6 +848,20 @@ func (r *ParticipantRecorder) dequeuePreVideoPacket() *rtp.Packet {
 	return pkt
 }
 
+// clearPreVideoBuffer discards all buffered video packets.
+//
+// This function is called during cleanup to free memory and prevent
+// stale packets from being used in future recordings.
+//
+// Memory management:
+//   - Sets all packet references to nil (helps GC reclaim memory)
+//   - Resets slice to nil
+//
+// Calling this function is typically done:
+//   - During Stop() to release resources
+//   - After ActivateRecording() if starting fresh (currently commented out)
+//
+// Thread-safety: Protected by r.preVideoMu mutex.
 func (r *ParticipantRecorder) clearPreVideoBuffer() {
 	r.preVideoMu.Lock()
 	for i := range r.preVideoPackets {
@@ -731,6 +871,27 @@ func (r *ParticipantRecorder) clearPreVideoBuffer() {
 	r.preVideoMu.Unlock()
 }
 
+// enqueuePreAudioPacket adds an audio RTP packet to the pre-recording buffer.
+//
+// This buffer stores audio packets that arrive before recording is activated.
+// Audio buffering is critical because:
+//   - Audio packets arrive continuously during handshake/warmup phase
+//   - Recording can only start on a video keyframe
+//   - Without buffering, early audio would be lost
+//
+// Buffering strategy (same as video):
+//  1. Clone the incoming packet (to avoid mutation by the caller)
+//  2. If buffer is full (500 packets), discard oldest packet (FIFO)
+//  3. Append new packet to buffer
+//
+// The audio pre-buffer complements the video pre-buffer:
+//   - Video buffer: Ensures keyframe-aligned start
+//   - Audio buffer: Ensures no audio gaps when recording starts
+//
+// Thread-safety: Protected by r.preAudioMu mutex.
+//
+// Parameters:
+//   - pkt: RTP packet to buffer (nil packets are ignored)
 func (r *ParticipantRecorder) enqueuePreAudioPacket(pkt *rtp.Packet) {
 	if pkt == nil {
 		return
@@ -748,6 +909,23 @@ func (r *ParticipantRecorder) enqueuePreAudioPacket(pkt *rtp.Packet) {
 	r.preAudioMu.Unlock()
 }
 
+// dequeuePreAudioPacket removes and returns the oldest audio packet from the pre-buffer.
+//
+// This function is called during recording activation to drain the audio pre-buffer
+// after the video pipeline has been primed with keyframe packets. The audio packets
+// are pushed to GStreamer only after video packets to ensure proper stream alignment
+// in the muxer.
+//
+// Sequencing with video:
+//  1. First recording keyframe arrives
+//  2. Video pipeline is primed with buffered video packets
+//  3. THEN audio pipeline starts (this function is called)
+//  4. Result: First HLS segment has both audio and video
+//
+// Thread-safety: Protected by r.preAudioMu mutex.
+//
+// Returns:
+//   - RTP packet from buffer, or nil if buffer is empty
 func (r *ParticipantRecorder) dequeuePreAudioPacket() *rtp.Packet {
 	r.preAudioMu.Lock()
 	defer r.preAudioMu.Unlock()
@@ -760,6 +938,16 @@ func (r *ParticipantRecorder) dequeuePreAudioPacket() *rtp.Packet {
 	return pkt
 }
 
+// clearPreAudioBuffer discards all buffered audio packets.
+//
+// This function mirrors clearPreVideoBuffer and is called during cleanup
+// to free memory and prevent stale audio packets from being used.
+//
+// Memory management:
+//   - Sets all packet references to nil (helps GC reclaim memory)
+//   - Resets slice to nil
+//
+// Thread-safety: Protected by r.preAudioMu mutex.
 func (r *ParticipantRecorder) clearPreAudioBuffer() {
 	r.preAudioMu.Lock()
 	for i := range r.preAudioPackets {
@@ -769,6 +957,43 @@ func (r *ParticipantRecorder) clearPreAudioBuffer() {
 	r.preAudioMu.Unlock()
 }
 
+// pushVideoPacket converts an RTP packet to a GStreamer buffer and pushes it to the video appsrc.
+//
+// This function performs four critical operations:
+//  1. Timestamp normalization: Converts absolute RTP timestamp to relative (base-0)
+//  2. PTS calculation: Converts RTP timestamp to GStreamer ClockTime (nanoseconds)
+//  3. RTP marshaling: Serializes the RTP packet to wire format
+//  4. Buffer push: Sends the buffer to GStreamer's video appsrc element
+//
+// Timestamp handling:
+// RTP timestamps are 32-bit values that increment continuously. For HLS recording,
+// we need timestamps to start at 0 for the first packet. This function calls
+// videoClockTime() to normalize timestamps and convert from 90kHz clock to nanoseconds.
+//
+// Example:
+//
+//	First packet:  RTP TS = 3840000000 → Relative TS = 0 → PTS = 0ns
+//	Second packet: RTP TS = 3840003000 → Relative TS = 3000 → PTS = 33333333ns (33.3ms at 30fps)
+//
+// GStreamer buffer properties:
+//   - Data: Marshaled RTP packet (header + payload)
+//   - PTS: Presentation timestamp in nanoseconds (for muxer synchronization)
+//
+// Error handling:
+//   - Marshal failure: Returns error (malformed RTP packet)
+//   - FlowFlushing: Pipeline is shutting down (expected during Stop())
+//   - Other flow errors: Unexpected pipeline state (logged and returned)
+//
+// Thread-safety:
+//   - videoClockTime() is protected by r.mu
+//   - videoLastPTS/videoLastTimestamp updates are protected by r.mu
+//
+// Parameters:
+//   - pkt: RTP packet to push (modified in-place: Timestamp field normalized)
+//
+// Returns:
+//   - nil on success
+//   - error if marshaling fails or appsrc rejects the buffer
 func (r *ParticipantRecorder) pushVideoPacket(pkt *rtp.Packet) error {
 	pts, relative := r.videoClockTime(pkt.Timestamp)
 	pkt.Timestamp = relative
@@ -794,6 +1019,55 @@ func (r *ParticipantRecorder) pushVideoPacket(pkt *rtp.Packet) error {
 	return nil
 }
 
+// injectParameterSets creates a synthetic STAP-A RTP packet containing H.264 parameter sets.
+//
+// This function is called when recording starts but no SPS/PPS NAL units have been
+// received in the RTP stream. It uses parameter sets from the SDP fmtp line
+// (sprop-parameter-sets) to ensure decoders have the required codec information.
+//
+// Algorithm:
+//  1. Validate input NAL units (non-empty, size < 64KB)
+//  2. Create STAP-A payload header (0x78 = F:0, NRI:3, Type:24)
+//  3. For each NAL unit:
+//     - Classify as SPS or PPS
+//     - Append 2-byte length prefix (big-endian)
+//     - Append NAL unit bytes
+//  4. Create synthetic RTP packet with modified sequence number
+//  5. Push to GStreamer via pushVideoPacket()
+//
+// STAP-A packet format (RFC 6184 Section 5.7.1):
+//
+//	 0                   1                   2                   3
+//	 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//	|F|NRI|  Type   |         NALU 1 Size           | NALU 1 HDR    |
+//	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//	|                         NALU 1 Data...                        |
+//	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//	|         NALU 2 Size           | NALU 2 HDR    | NALU 2 Data...|
+//	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//
+// Synthetic RTP header construction:
+//   - Version: 2 (RTP version)
+//   - PayloadType: Copied from reference packet (maintains stream consistency)
+//   - SequenceNumber: reference.SequenceNumber - 1 (inserted before keyframe)
+//   - Timestamp: Same as reference (parameter sets have no duration)
+//   - SSRC: Copied from reference (maintains stream identity)
+//   - Marker: false (not end of frame)
+//
+// Why inject before keyframe:
+// Parameter sets must arrive before the IDR frame to allow decoding. By using
+// sequence number (reference - 1), we ensure proper ordering in the GStreamer
+// jitterbuffer and rtph264depay elements.
+//
+// Parameters:
+//   - reference: RTP packet to use as template (typically the first keyframe)
+//   - nalUnits: List of NAL units to inject (from SDP sprop-parameter-sets)
+//
+// Returns:
+//   - spsInjected: true if at least one SPS was included
+//   - ppsInjected: true if at least one PPS was included
+//   - error: if no valid NAL units or pushVideoPacket fails
 func (r *ParticipantRecorder) injectParameterSets(reference *rtp.Packet, nalUnits [][]byte) (bool, bool, error) {
 	if len(nalUnits) == 0 {
 		return false, false, fmt.Errorf("no parameter sets to inject")
@@ -841,6 +1115,46 @@ func (r *ParticipantRecorder) injectParameterSets(reference *rtp.Packet, nalUnit
 	return spsInjected, ppsInjected, nil
 }
 
+// videoClockTime converts an RTP timestamp to GStreamer ClockTime (nanoseconds).
+//
+// This function performs two critical timestamp transformations:
+//  1. Normalization: Converts absolute RTP timestamp to relative (base-0)
+//  2. Clock conversion: Converts from 90kHz RTP clock to nanoseconds
+//
+// Algorithm:
+//  1. On first call: Initialize timestamp base (videoTimestampBase = ts)
+//  2. Subtract base from current timestamp to get relative value
+//  3. Convert from 90kHz clock to nanoseconds using formula:
+//     nanoseconds = (ticks * 1_000_000_000) / 90000
+//
+// H.264 RTP timestamp clock (RFC 6184):
+// H.264 video uses a 90kHz RTP timestamp clock, meaning each timestamp unit
+// represents 1/90000 of a second (approximately 11.1 microseconds).
+//
+// Example conversions (30fps video, 3000 ticks per frame):
+//
+//	First packet:   RTP TS = 3840000000 → Base = 3840000000 → Relative = 0       → PTS = 0ns
+//	Second packet:  RTP TS = 3840003000 → Base = 3840000000 → Relative = 3000    → PTS = 33333333ns (33.3ms)
+//	Third packet:   RTP TS = 3840006000 → Base = 3840000000 → Relative = 6000    → PTS = 66666666ns (66.7ms)
+//	Frame at 1sec:  RTP TS = 3840090000 → Base = 3840000000 → Relative = 90000   → PTS = 1000000000ns (1.0s)
+//
+// Timestamp wraparound handling:
+// This function uses uint32 subtraction which automatically handles wraparound
+// correctly due to modular arithmetic. For example:
+//
+//	Base = 4294960000, Current = 10000 (wrapped around)
+//	Relative = uint32(10000 - 4294960000) = uint32(-4294950000) = 17296 (correct)
+//
+// Thread-safety:
+//   - Protected by r.mu mutex
+//   - videoTimestampInit and videoTimestampBase are accessed under lock
+//
+// Parameters:
+//   - ts: RTP timestamp from video packet (32-bit, 90kHz clock)
+//
+// Returns:
+//   - ClockTime: GStreamer presentation timestamp in nanoseconds
+//   - uint32: Normalized relative timestamp (for stats/logging)
 func (r *ParticipantRecorder) videoClockTime(ts uint32) (gst.ClockTime, uint32) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -853,6 +1167,44 @@ func (r *ParticipantRecorder) videoClockTime(ts uint32) (gst.ClockTime, uint32) 
 	return gst.ClockTime(ptsNs), relative
 }
 
+// audioClockTime converts an RTP timestamp to GStreamer ClockTime (nanoseconds).
+//
+// This function is the audio counterpart to videoClockTime(). It performs the same
+// two transformations but uses the Opus audio clock rate (48kHz) instead of the
+// H.264 video clock rate (90kHz).
+//
+// Algorithm:
+//  1. On first call: Initialize timestamp base (audioTimestampBase = ts)
+//  2. Subtract base from current timestamp to get relative value
+//  3. Convert from 48kHz clock to nanoseconds using formula:
+//     nanoseconds = (ticks * 1_000_000_000) / 48000
+//
+// Opus RTP timestamp clock (RFC 7587):
+// Opus audio uses a 48kHz RTP timestamp clock, meaning each timestamp unit
+// represents 1/48000 of a second (approximately 20.8 microseconds).
+//
+// Example conversions (20ms audio frames, 960 samples per frame):
+//
+//	First packet:   RTP TS = 2160000000 → Base = 2160000000 → Relative = 0       → PTS = 0ns
+//	Second packet:  RTP TS = 2160000960 → Base = 2160000000 → Relative = 960     → PTS = 20000000ns (20ms)
+//	Third packet:   RTP TS = 2160001920 → Base = 2160000000 → Relative = 1920    → PTS = 40000000ns (40ms)
+//	Frame at 1sec:  RTP TS = 2160048000 → Base = 2160000000 → Relative = 48000   → PTS = 1000000000ns (1.0s)
+//
+// Why separate audio and video timestamp bases:
+// Audio and video RTP streams have independent timestamp origins. For HLS muxing,
+// both streams must start at PTS=0, so we normalize each stream independently.
+// The muxer (mpegtsmux) synchronizes the streams based on their PTS values.
+//
+// Thread-safety:
+//   - Protected by r.mu mutex (same mutex as video, safe because we lock)
+//   - audioTimestampInit and audioTimestampBase are accessed under lock
+//
+// Parameters:
+//   - ts: RTP timestamp from audio packet (32-bit, 48kHz clock)
+//
+// Returns:
+//   - ClockTime: GStreamer presentation timestamp in nanoseconds
+//   - uint32: Normalized relative timestamp (for stats/logging)
 func (r *ParticipantRecorder) audioClockTime(ts uint32) (gst.ClockTime, uint32) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -865,6 +1217,39 @@ func (r *ParticipantRecorder) audioClockTime(ts uint32) (gst.ClockTime, uint32) 
 	return gst.ClockTime(ptsNs), relative
 }
 
+// signalVideoReady marks the video stream as ready and triggers callbacks.
+//
+// This function is called when the first video keyframe is received during the
+// handshake/warm-up phase. It performs four critical state transitions:
+//  1. Set videoReady flag (atomic, prevents duplicate signals)
+//  2. Set handshakeReady flag (indicates SPS/PPS established)
+//  3. Close videoReadyCh channel (unblocks goroutines waiting for video)
+//  4. Invoke onVideoReady callback (notifies handler that recording can start)
+//
+// State management:
+// The function uses CompareAndSwap to ensure it only executes once, even if
+// called multiple times (which can happen if multiple keyframe packets arrive
+// in quick succession).
+//
+// Handshake ready vs video ready:
+//   - videoReady: Internal flag indicating first keyframe processed
+//   - handshakeReady: Exported flag (via HandshakeReady()) for external checks
+//   - Both are set atomically by this function
+//
+// Channel closure:
+// Closing videoReadyCh is a Go idiom for broadcasting to multiple goroutines
+// that video is ready. Any goroutine blocking on <-r.videoReadyCh will unblock.
+// The sync.Once ensures the channel is closed exactly once (closing twice panics).
+//
+// Callback invocation:
+// The onVideoReady callback (set via SetOnVideoReady) is typically used by the
+// agent handler to transition from handshake publisher to recording publisher.
+//
+// Thread-safety:
+//   - videoReady: atomic.Bool (lock-free)
+//   - handshakeReady: atomic.Bool (lock-free)
+//   - videoReadyOnce: sync.Once (ensures single channel close)
+//   - onVideoReady callback access: protected by r.mu mutex
 func (r *ParticipantRecorder) signalVideoReady() {
 	if r.videoReady.CompareAndSwap(false, true) {
 		r.handshakeReady.Store(true)
@@ -881,6 +1266,45 @@ func (r *ParticipantRecorder) signalVideoReady() {
 	}
 }
 
+// requestPLI sends a Picture Loss Indication (PLI) request to the video sender.
+//
+// PLI is an RTCP feedback message (RFC 4585) that requests the sender to generate
+// a new keyframe (IDR frame). This is used in two scenarios:
+//  1. Initial keyframe request: When track is first attached (no video received yet)
+//  2. Recovery from packet loss: When waiting for keyframe during recording activation
+//
+// Why PLI is needed:
+// WebRTC senders typically send keyframes infrequently (every few seconds) to
+// reduce bandwidth. When the recorder needs a keyframe immediately (e.g., to start
+// recording or recover from errors), it sends PLI to request one.
+//
+// PLI vs FIR:
+// PLI (Picture Loss Indication) is preferred over FIR (Full Intra Request) in
+// modern WebRTC implementations because it's simpler and doesn't require maintaining
+// sequence numbers. Both achieve the same goal: requesting a keyframe.
+//
+// The writer function:
+// The writer function is typically a closure over the WebRTC PeerConnection's
+// WriteRTCP method. It sends the PLI RTCP packet to the video sender.
+//
+// Example usage in AttachVideoTrack:
+//
+//	if handshakeWait%200 == 0 {
+//	    log.Printf("waiting for keyframe, sending PLI")
+//	    r.requestPLI(pliWriter, track.SSRC())
+//	}
+//
+// Statistics:
+// This function increments videoPLIRequests counter (protected by mutex) for
+// debugging and monitoring purposes.
+//
+// Thread-safety:
+//   - videoPLIRequests: protected by r.mu mutex
+//   - writer function: assumed to be thread-safe (WebRTC SDK guarantees this)
+//
+// Parameters:
+//   - writer: Function to send PLI (typically PeerConnection.WriteRTCP wrapper)
+//   - ssrc: SSRC of the video stream to request keyframe from
 func (r *ParticipantRecorder) requestPLI(writer func(webrtc.SSRC), ssrc webrtc.SSRC) {
 	if writer == nil {
 		return

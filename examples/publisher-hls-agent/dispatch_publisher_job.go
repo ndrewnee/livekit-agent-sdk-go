@@ -58,6 +58,10 @@ func dispatchJob() {
 	fmt.Println("When a participant publishes audio/video tracks in this room, the agent will be dispatched automatically.")
 }
 
+// init is called automatically before main() and checks for the "dispatch-job" command.
+// If "go run . dispatch-job" is executed, this function calls dispatchJob() and exits
+// immediately without running the main agent loop. This provides a convenient CLI subcommand
+// for creating pre-configured LiveKit rooms without modifying the main agent behavior.
 func init() {
 	if len(os.Args) > 1 && os.Args[1] == "dispatch-job" {
 		dispatchJob()
