@@ -64,3 +64,6 @@ examples/transcription-agent/transcription-agent
 /examples/publisher-hls-agent/hls-agent-recordings/
 /examples/publisher-hls-agent/hls-agent-recordings-local-output/
 /examples/publisher-hls-agent/hls-agent-recordings-s3-upload/
+/examples/publisher-hls-agent/publisher-hls-agent
+/examples/publisher-hls-agent/hls-agent-recordings-multi-participant/
+/.claude/
