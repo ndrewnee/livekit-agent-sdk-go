@@ -237,9 +237,7 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 		if !trackSet.mark(publication.SID()) {
 			return
 		}
-		if err := publication.SetSubscribed(true); err != nil {
-			log.Printf("[%s/%s] failed to confirm subscription for track %s: %v", roomName, targetIdentity, publication.SID(), err)
-		}
+		// Track is already subscribed at this point - no need to call SetSubscribed(true) again
 		if publication.Kind() == lksdk.TrackKindVideo {
 			if info := publication.TrackInfo(); info != nil {
 				log.Printf("[%s/%s] track info: %s", roomName, targetIdentity, info.String())
