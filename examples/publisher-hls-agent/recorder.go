@@ -515,11 +515,11 @@ func (r *ParticipantRecorder) ActivateRecording() {
 	r.audioLastTimestamp = 0
 	r.mu.Unlock()
 
-	// Keep pre-buffers to have packets available for pipeline priming
-	// This ensures segment 0 contains both audio and video
-	// Note: We rely on keyframe detection to prevent stale P-frames
-	// r.clearPreVideoBuffer()
-	// r.clearPreAudioBuffer()
+	// Clear pre-buffers to discard warm-up packets
+	// Fresh packets will be buffered while waiting for the next keyframe
+	// This ensures segment 0 only contains packets from the actual recording
+	r.clearPreVideoBuffer()
+	r.clearPreAudioBuffer()
 }
 
 // Start prepares the recorder for operation.
