@@ -171,20 +171,20 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	if err != nil {
 		return nil, fmt.Errorf("failed to create video appsrc: %w", err)
 	}
-	videoSrc.SetProperty("is-live", true)
-	videoSrc.SetProperty("format", gst.FormatTime)
-	videoSrc.SetProperty("do-timestamp", false)
-	videoSrc.SetProperty("emit-signals", true)
-	videoSrc.SetProperty("block", false)
-	videoSrc.SetProperty("stream-type", 0)
-	videoSrc.SetProperty("max-bytes", uint64(10*1024*1024))
+	_ = videoSrc.SetProperty("is-live", true)
+	_ = videoSrc.SetProperty("format", gst.FormatTime)
+	_ = videoSrc.SetProperty("do-timestamp", false)
+	_ = videoSrc.SetProperty("emit-signals", true)
+	_ = videoSrc.SetProperty("block", false)
+	_ = videoSrc.SetProperty("stream-type", 0)
+	_ = videoSrc.SetProperty("max-bytes", uint64(10*1024*1024))
 
 	videoJitter, err := gst.NewElement("rtpjitterbuffer")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create video jitterbuffer: %w", err)
 	}
-	videoJitter.SetProperty("latency", uint(200))
-	videoJitter.SetProperty("mode", int(1)) // RTP_JITTER_BUFFER_MODE_NONE to keep RTP timestamps unmodified
+	_ = videoJitter.SetProperty("latency", uint(200))
+	_ = videoJitter.SetProperty("mode", int(1)) // RTP_JITTER_BUFFER_MODE_NONE to keep RTP timestamps unmodified
 
 	videoDepay, err := gst.NewElement("rtph264depay")
 	if err != nil {
@@ -196,42 +196,42 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		return nil, fmt.Errorf("failed to create h264parse: %w", err)
 	}
 	// force SPS/PPS before every keyframe so the resulting HLS segments stay decodable
-	h264parse.SetProperty("disable-passthrough", true)
-	h264parse.SetProperty("config-interval", int32(-1))
+	_ = h264parse.SetProperty("disable-passthrough", true)
+	_ = h264parse.SetProperty("config-interval", int32(-1))
 
 	videoCapsFilter, err := gst.NewElement("capsfilter")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create video capsfilter: %w", err)
 	}
 	videoCaps := gst.NewCapsFromString("video/x-h264,stream-format=byte-stream,alignment=au")
-	videoCapsFilter.SetProperty("caps", videoCaps)
+	_ = videoCapsFilter.SetProperty("caps", videoCaps)
 
 	videoQueue, err := gst.NewElement("queue")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create video queue: %w", err)
 	}
-	videoQueue.SetProperty("max-size-buffers", uint(0))
-	videoQueue.SetProperty("max-size-bytes", uint(0))
-	videoQueue.SetProperty("max-size-time", uint64(0))
+	_ = videoQueue.SetProperty("max-size-buffers", uint(0))
+	_ = videoQueue.SetProperty("max-size-bytes", uint(0))
+	_ = videoQueue.SetProperty("max-size-time", uint64(0))
 
 	audioSrc, err := gst.NewElement("appsrc")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create audio appsrc: %w", err)
 	}
-	audioSrc.SetProperty("is-live", true)
-	audioSrc.SetProperty("format", gst.FormatTime)
-	audioSrc.SetProperty("do-timestamp", false)
-	audioSrc.SetProperty("emit-signals", true)
-	audioSrc.SetProperty("block", false)
-	audioSrc.SetProperty("stream-type", 0)
-	audioSrc.SetProperty("max-bytes", uint64(2*1024*1024))
+	_ = audioSrc.SetProperty("is-live", true)
+	_ = audioSrc.SetProperty("format", gst.FormatTime)
+	_ = audioSrc.SetProperty("do-timestamp", false)
+	_ = audioSrc.SetProperty("emit-signals", true)
+	_ = audioSrc.SetProperty("block", false)
+	_ = audioSrc.SetProperty("stream-type", 0)
+	_ = audioSrc.SetProperty("max-bytes", uint64(2*1024*1024))
 
 	audioJitter, err := gst.NewElement("rtpjitterbuffer")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create audio jitterbuffer: %w", err)
 	}
-	audioJitter.SetProperty("latency", uint(200))
-	audioJitter.SetProperty("mode", int(1)) // Disable jitterbuffer resync to preserve relative timestamps
+	_ = audioJitter.SetProperty("latency", uint(200))
+	_ = audioJitter.SetProperty("mode", int(1)) // Disable jitterbuffer resync to preserve relative timestamps
 
 	audioDepay, err := gst.NewElement("rtpopusdepay")
 	if err != nil {
@@ -262,7 +262,7 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		if err != nil {
 			return nil, fmt.Errorf("failed to create avenc_aac: %w", err)
 		}
-		aacEnc.SetProperty("bitrate", uint(128000))
+		_ = aacEnc.SetProperty("bitrate", uint(128000))
 
 		aacParse, err = gst.NewElement("aacparse")
 		if err != nil {
@@ -274,17 +274,17 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	if err != nil {
 		return nil, fmt.Errorf("failed to create audio queue: %w", err)
 	}
-	audioQueue.SetProperty("max-size-buffers", uint(0))
-	audioQueue.SetProperty("max-size-bytes", uint(0))
-	audioQueue.SetProperty("max-size-time", uint64(0))
+	_ = audioQueue.SetProperty("max-size-buffers", uint(0))
+	_ = audioQueue.SetProperty("max-size-bytes", uint(0))
+	_ = audioQueue.SetProperty("max-size-time", uint64(0))
 
 	mpegtsmux, err := gst.NewElement("mpegtsmux")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create mpegtsmux: %w", err)
 	}
-	mpegtsmux.SetProperty("alignment", int64(7))
-	mpegtsmux.SetProperty("start-time-selection", int64(0)) // Force timestamps to start at zero
-	mpegtsmux.SetProperty("start-time", uint64(0))
+	_ = mpegtsmux.SetProperty("alignment", int64(7))
+	_ = mpegtsmux.SetProperty("start-time-selection", int64(0)) // Force timestamps to start at zero
+	_ = mpegtsmux.SetProperty("start-time", uint64(0))
 
 	muxQueue, err := gst.NewElement("queue")
 	if err != nil {
@@ -305,9 +305,9 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	if err != nil {
 		return nil, fmt.Errorf("failed to create filesink: %w", err)
 	}
-	tsSink.SetProperty("location", filepath.Join(absDir, "output.ts"))
-	tsSink.SetProperty("sync", false)
-	tsSink.SetProperty("async", false)
+	_ = tsSink.SetProperty("location", filepath.Join(absDir, "output.ts"))
+	_ = tsSink.SetProperty("sync", false)
+	_ = tsSink.SetProperty("async", false)
 
 	hlsQueue, err := gst.NewElement("queue")
 	if err != nil {
@@ -318,15 +318,15 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	if err != nil {
 		return nil, fmt.Errorf("failed to create hlssink: %w", err)
 	}
-	hlsSink.SetProperty("location", filepath.Join(absDir, "segment%05d.ts"))
-	hlsSink.SetProperty("playlist-location", filepath.Join(absDir, "playlist.m3u8"))
+	_ = hlsSink.SetProperty("location", filepath.Join(absDir, "segment%05d.ts"))
+	_ = hlsSink.SetProperty("playlist-location", filepath.Join(absDir, "playlist.m3u8"))
 	segmentDuration := cfg.SegmentDurationSecs
 	if segmentDuration <= 0 {
 		segmentDuration = 2
 	}
-	hlsSink.SetProperty("target-duration", uint(segmentDuration))
-	hlsSink.SetProperty("max-files", uint(0))
-	hlsSink.SetProperty("playlist-length", uint(0))
+	_ = hlsSink.SetProperty("target-duration", uint(segmentDuration))
+	_ = hlsSink.SetProperty("max-files", uint(0))
+	_ = hlsSink.SetProperty("playlist-length", uint(0))
 
 	// Build elements list based on audio codec configuration
 	elements := []*gst.Element{
@@ -765,7 +765,7 @@ func (r *ParticipantRecorder) initVideoCaps(payloadType uint8) {
 	}
 	capsStr := fmt.Sprintf("application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,payload=%d", payloadType)
 	caps := gst.NewCapsFromString(capsStr)
-	r.videoAppSrc.SetProperty("caps", caps)
+	_ = r.videoAppSrc.SetProperty("caps", caps)
 	r.videoInitialized = true
 	log.Printf("[%s] video caps initialized: %s", r.logPrefix(), capsStr)
 }
@@ -1604,7 +1604,7 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 			if !r.audioInitialized {
 				capsStr := fmt.Sprintf("application/x-rtp,media=audio,encoding-name=OPUS,clock-rate=48000,payload=%d", rtpPacket.PayloadType)
 				caps := gst.NewCapsFromString(capsStr)
-				r.audioAppSrc.SetProperty("caps", caps)
+				_ = r.audioAppSrc.SetProperty("caps", caps)
 				r.audioInitialized = true
 				log.Printf("[%s] audio caps initialized: %s", r.logPrefix(), capsStr)
 			}
@@ -1680,7 +1680,7 @@ func (r *ParticipantRecorder) Stop() {
 			if bus := r.pipeline.GetBus(); bus != nil {
 				bus.TimedPopFiltered(gst.ClockTime(5*1_000_000_000), gst.MessageEOS|gst.MessageError)
 			}
-			r.pipeline.SetState(gst.StateNull)
+			_ = r.pipeline.SetState(gst.StateNull)
 		}
 
 		r.clearPreVideoBuffer()

@@ -174,7 +174,7 @@ func (p *GStreamerPublisher) Stop() {
 	p.mu.Lock()
 	p.stopped = true
 	p.mu.Unlock()
-	p.pipeline.SetState(gst.StateNull)
+	_ = p.pipeline.SetState(gst.StateNull)
 	p.mu.Lock()
 	log.Printf("publisher totals: video=%.3fs audio=%.3fs", p.videoTotal.Seconds(), p.audioTotal.Seconds())
 	p.mu.Unlock()

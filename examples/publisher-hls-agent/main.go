@@ -92,7 +92,7 @@ func main() {
 	case sig := <-sigCh:
 		log.Printf("received signal %v, stopping worker", sig)
 		cancel()
-		worker.Stop()
+		_ = worker.Stop()
 	case err := <-errCh:
 		if err != nil {
 			log.Fatalf("worker exited with error: %v", err)
