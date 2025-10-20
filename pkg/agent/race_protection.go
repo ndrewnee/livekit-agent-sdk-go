@@ -117,17 +117,23 @@ func (p *RaceProtector) CanAcceptJob(jobID string) (bool, string) {
 	// Check if there's an active termination for this job
 	p.mu.RLock()
 	termState, hasTermination := p.activeTerminations[jobID]
+	var isCompleted bool
+	var requestCount int
+	if hasTermination {
+		isCompleted = termState.CompletedAt != nil
+		requestCount = termState.RequestCount
+	}
 	p.mu.RUnlock()
-	
-	if hasTermination && termState.CompletedAt == nil {
+
+	if hasTermination && !isCompleted {
 		reason := "job has pending termination"
 		p.logger.Warn("Rejecting job with pending termination",
 			zap.String("jobID", jobID),
-			zap.Int("terminationRequests", termState.RequestCount),
+			zap.Int("terminationRequests", requestCount),
 		)
 		return false, reason
 	}
-	
+
 	return true, ""
 }
 
