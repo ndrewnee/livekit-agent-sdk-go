@@ -97,11 +97,13 @@ jobs:
         run: |
           echo "Waiting for LiveKit server to be ready..."
           for i in {1..30}; do
-            if curl -f -s http://localhost:7880/rtc/validate 2>/dev/null | grep -q "version"; then
-              echo "LiveKit server is ready"
+            # Check if server responds (even 401 means it's running)
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:7880/rtc/validate 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "200" ]; then
+              echo "LiveKit server is ready (HTTP $HTTP_CODE)"
               exit 0
             fi
-            echo "Attempt $i: LiveKit server not ready yet..."
+            echo "Attempt $i: LiveKit server not ready yet (HTTP $HTTP_CODE)..."
             sleep 2
           done
           echo "LiveKit server failed to start"
