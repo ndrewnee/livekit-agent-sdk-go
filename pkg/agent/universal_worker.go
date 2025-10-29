@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"encoding/json"
 	"github.com/gorilla/websocket"
 	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
@@ -67,19 +68,21 @@ type UniversalWorker struct {
 	logger Logger
 
 	// Recovery and state management
-	savedState        *WorkerState
-	recoveryManager   *JobRecoveryManager
-	timingManager     *JobTimingManager
-	raceProtector     *StatusUpdateRaceProtector
-	jobCheckpoints    map[string]*JobCheckpoint
-	jobCheckpointsMu  sync.RWMutex
-	networkHandler    *NetworkHandler
-	shutdownHandler   *ShutdownHandler
-	metricsCollector  *SystemMetricsCollector
-	resourceMonitor   *ResourceMonitor
-	resourceLimiter   *ResourceLimiter
-	messageHandler    *MessageHandler
-	protocolValidator *ProtocolValidator
+	savedState            *WorkerState
+	recoveryManager       *JobRecoveryManager
+	timingManager         *JobTimingManager
+	raceProtector         *StatusUpdateRaceProtector
+	jobCheckpoints        map[string]*JobCheckpoint
+	jobCheckpointsMu      sync.RWMutex
+	networkHandler        *NetworkHandler
+	shutdownHandler       *ShutdownHandler
+	metricsCollector      *SystemMetricsCollector
+	resourceMonitor       *ResourceMonitor
+	resourceLimiter       *ResourceLimiter
+	resourceLimiterCancel context.CancelFunc
+	resourceLimiterLogger *zap.Logger
+	messageHandler        *MessageHandler
+	protocolValidator     *ProtocolValidator
 
 	// Job queue and resource pool
 	jobQueue     *JobQueue
@@ -240,11 +243,15 @@ func NewUniversalWorker(serverURL, apiKey, apiSecret string, handler UniversalHa
 	}
 
 	// Set up custom message handlers
-	for _, handler := range opts.CustomMessageHandlers {
+	for _, h := range opts.CustomMessageHandlers {
+		// Marshal the server message to JSON bytes for handler consumption
+		// (alternatively could be proto binary; JSON is more debuggable)
+		handler := h
 		w.messageHandler.RegisterHandler(handler.GetMessageType(), func(msg *ServerMessage) error {
-			// Convert ServerMessage to bytes for the handler
-			// In a real implementation, this would marshal the message
-			return handler.HandleMessage(context.Background(), nil)
+			// Provide a minimal JSON payload including the concrete message type
+			payload := map[string]string{"type": fmt.Sprintf("%T", msg.Message)}
+			data, _ := json.Marshal(payload)
+			return handler.HandleMessage(context.Background(), data)
 		})
 	}
 
@@ -276,22 +283,16 @@ func NewUniversalWorker(serverURL, apiKey, apiSecret string, handler UniversalHa
 		// })
 	}
 
-	// Initialize resource limits
+	// Initialize resource limits (start later in Start with cancellable context)
 	if opts.EnableResourceLimits {
-		// Create a zap logger for resource limiter
 		zapLogger, _ := zap.NewProduction()
+		w.resourceLimiterLogger = zapLogger
 		w.resourceLimiter = NewResourceLimiter(zapLogger, ResourceLimiterOptions{
 			MemoryLimitMB:      opts.HardMemoryLimitMB,
 			CPUQuotaPercent:    opts.CPUQuotaPercent,
 			MaxFileDescriptors: opts.MaxFileDescriptors,
 			CheckInterval:      1 * time.Second,
 		})
-
-		// Start the resource limiter
-		if w.resourceLimiter != nil {
-			ctx := context.Background()
-			w.resourceLimiter.Start(ctx)
-		}
 	}
 
 	// Initialize load batching
@@ -310,6 +311,12 @@ func (w *UniversalWorker) Start(ctx context.Context) error {
 	}
 
 	// Start background tasks
+	if w.resourceLimiter != nil {
+		// Tie limiter lifetime to worker via cancelable context
+		rlCtx, cancel := context.WithCancel(ctx)
+		w.resourceLimiterCancel = cancel
+		w.resourceLimiter.Start(rlCtx)
+	}
 	go w.handleMessages(ctx)
 	go w.maintainConnection(ctx)
 	go w.handleStatusUpdateRetries(ctx)
@@ -352,6 +359,12 @@ func (w *UniversalWorker) Stop() error {
 		}
 
 		// Stop background services
+		if w.resourceLimiterCancel != nil {
+			w.resourceLimiterCancel()
+		}
+		if w.resourceLimiterLogger != nil {
+			_ = w.resourceLimiterLogger.Sync()
+		}
 		if w.resourceMonitor != nil {
 			w.resourceMonitor.Stop()
 		}
@@ -368,7 +381,10 @@ func (w *UniversalWorker) Stop() error {
 			w.metricsCollector.Stop()
 		}
 
-		close(w.doneCh)
+		func() {
+			defer func() { _ = recover() }()
+			close(w.doneCh)
+		}()
 	})
 
 	return err
@@ -381,9 +397,10 @@ func (w *UniversalWorker) UpdateStatus(status WorkerStatus, load float32) error 
 	w.mu.Lock()
 	w.status = status
 	jobCount := len(w.activeJobs)
+	state := w.wsState
 	w.mu.Unlock()
 
-	if w.wsState != WebSocketStateConnected {
+	if state != WebSocketStateConnected {
 		return ErrNotConnected
 	}
 
@@ -486,14 +503,30 @@ func (w *UniversalWorker) StopWithTimeout(timeout time.Duration) error {
 			w.shutdownHandler.ExecutePhase(ctx, ShutdownPhasePreStop)
 		}
 
+		// Cancel active jobs to allow handlers to exit promptly
+		w.mu.Lock()
+		for _, jc := range w.activeJobs {
+			if jc.Cancel != nil {
+				jc.Cancel()
+			}
+		}
+		w.mu.Unlock()
+
 		// Clean up resources
 		w.mu.Lock()
 		if w.conn != nil {
 			w.conn.Close()
 		}
+		w.wsState = WebSocketStateDisconnected
 		w.mu.Unlock()
 
 		// Stop background services
+		if w.resourceLimiterCancel != nil {
+			w.resourceLimiterCancel()
+		}
+		if w.resourceLimiterLogger != nil {
+			_ = w.resourceLimiterLogger.Sync()
+		}
 		if w.resourceMonitor != nil {
 			w.resourceMonitor.Stop()
 		}
@@ -513,6 +546,11 @@ func (w *UniversalWorker) StopWithTimeout(timeout time.Duration) error {
 		if w.shutdownHandler != nil {
 			w.shutdownHandler.ExecutePhase(ctx, ShutdownPhaseCleanup)
 		}
+
+		func() {
+			defer func() { _ = recover() }()
+			close(w.doneCh)
+		}()
 	})
 
 	select {
@@ -980,8 +1018,33 @@ func (w *UniversalWorker) handleJobAssignment(assignment *livekit.JobAssignment)
 	// Set up room callbacks
 	roomCallback := w.createRoomCallbacks(job)
 
-	// Connect to room
-	room, err := lksdk.ConnectToRoomWithToken(roomURL, assignment.Token, roomCallback, lksdk.WithAutoSubscribe(false))
+	// Use direct API key connection instead of agent token
+	// Agent tokens from the server don't have permissions to receive video media data
+	// This was discovered by comparing TestRobustReceiver (works with API key) vs
+	// TestParticipantHLSRecorder (fails with agent token - only gets empty video packets)
+
+	// For the connection, use metadata values if provided
+	// If ParticipantIdentity is empty, ensure we have a valid identity
+	participantIdentity := metadata.ParticipantIdentity
+	if participantIdentity == "" {
+		// Generate a unique identity for the agent
+		participantIdentity = fmt.Sprintf("agent-%s", job.Id)
+		w.logger.Info("Generated agent identity", "identity", participantIdentity, "jobID", job.Id)
+	}
+
+	// CRITICAL: Disable auto-subscribe for the agent framework connection
+	// The handler will establish its own direct connection and subscribe to tracks there
+	// If both connections subscribe to the same track, the LiveKit server may only send
+	// data to the first subscriber (the agent connection), which has restricted permissions
+	room, err := lksdk.ConnectToRoom(roomURL, lksdk.ConnectInfo{
+		APIKey:              w.apiKey,
+		APISecret:           w.apiSecret,
+		RoomName:            job.Room.Name,
+		ParticipantIdentity: participantIdentity,
+		ParticipantName:     metadata.ParticipantName,
+		ParticipantMetadata: metadata.ParticipantMetadata,
+		ParticipantKind:     lksdk.ParticipantEgress, // Use EGRESS kind to receive full media for recording
+	}, roomCallback, lksdk.WithAutoSubscribe(false)) // Disable auto-subscribe!
 	if err != nil {
 		w.logger.Error("Failed to connect to room", "error", err, "jobID", job.Id)
 		w.updateJobStatus(job.Id, livekit.JobStatus_JS_FAILED, err.Error())
@@ -1152,13 +1215,22 @@ func (w *UniversalWorker) createRoomCallbacks(job *livekit.Job) *lksdk.RoomCallb
 
 				w.handler.OnTrackUnsubscribed(context.Background(), track, publication, rp)
 			},
-			OnDataPacket: func(data lksdk.DataPacket, params lksdk.DataReceiveParams) {
-				if params.Sender != nil {
-					protoData := data.ToProto()
-					if protoData != nil {
-						w.handler.OnDataReceived(context.Background(), protoData.GetUser().GetPayload(), params.Sender, protoData.Kind)
-					}
+			OnDataPacket: func(packet lksdk.DataPacket, params lksdk.DataReceiveParams) {
+				protoPkt := packet.ToProto()
+				if protoPkt == nil || protoPkt.GetUser() == nil {
+					return
 				}
+				payload := protoPkt.GetUser().GetPayload()
+				sender := params.Sender
+				if sender == nil && params.SenderIdentity != "" {
+					// Attempt to resolve sender from tracked participants
+					w.mu.RLock()
+					if info, ok := w.participants[params.SenderIdentity]; ok && info != nil {
+						sender = info.Participant
+					}
+					w.mu.RUnlock()
+				}
+				w.handler.OnDataReceived(context.Background(), payload, sender, protoPkt.Kind)
 			},
 		},
 	}
@@ -1189,7 +1261,8 @@ func (w *UniversalWorker) runJobHandler(ctx context.Context, jobCtx *JobContext)
 		// Update metrics
 		atomic.AddInt64(&w.metrics.jobsCompleted, 1)
 
-		// Update load
+		// Notify termination and update load
+		w.handler.OnJobTerminated(context.Background(), jobCtx.Job.Id)
 		w.updateLoad()
 	}()
 

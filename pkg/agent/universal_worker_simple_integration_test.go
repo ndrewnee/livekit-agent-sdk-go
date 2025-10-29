@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/livekit/protocol/livekit"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestUniversalWorker_SimpleConnection(t *testing.T) {
@@ -38,11 +38,8 @@ func TestUniversalWorker_SimpleConnection(t *testing.T) {
 		errCh <- worker.Start(ctx)
 	}()
 
-	// Wait for connection
-	time.Sleep(2 * time.Second)
-
-	// Check if connected
-	assert.True(t, worker.IsConnected(), "Worker should be connected")
+	// Wait for connection deterministically
+	require.Eventually(t, func() bool { return worker.IsConnected() }, 10*time.Second, 100*time.Millisecond)
 
 	// Stop worker
 	worker.Stop()

@@ -4,11 +4,11 @@ LiveKit supports three distinct agent types, each designed for specific use case
 
 ## Overview
 
-| Agent Type | Job Type | Purpose | Key Features |
-|------------|----------|---------|--------------|
-| Room Agent | JT_ROOM | Monitor and manage entire rooms | Access all participants, room-wide operations |
+| Agent Type | Job Type       | Purpose | Key Features |
+|------------|----------------|---------|--------------|
+| Room Agent | JT_ROOM        | Monitor and manage entire rooms | Access all participants, room-wide operations |
 | Participant Agent | JT_PARTICIPANT | Individual participant interactions | Per-participant logic, targeted processing |
-| Publisher Agent | JT_PUBLISHER | Publish media to rooms | Audio/video generation, synthetic participants |
+| Publisher Agent | v              | Publish media to rooms | Audio/video generation, synthetic participants |
 
 ## Room Agents
 

@@ -596,7 +596,8 @@ func (mp *MediaPipeline) startMediaReceiver(ctx context.Context, track *webrtc.T
 		getLogger.Debugw("video track processing not implemented", "trackID", track.ID())
 
 	default:
-		return fmt.Errorf("unsupported track type: %v", track.Kind())
+		// Avoid panicking on unexpected kinds; surface a clear error
+		return fmt.Errorf("unsupported track kind: %v", track.Kind())
 	}
 
 	return nil

@@ -154,20 +154,16 @@ func (pool *ResourcePool) Release(resource Resource) {
 	atomic.AddInt64(&pool.inUse, -1)
 
 	if pool.closed {
-		err := resource.Close()
-		if err != nil {
-			panic(err)
-		}
+		// Pool is closed; close resource best-effort without panicking
+		_ = resource.Close()
 		atomic.AddInt64(&pool.destroyed, 1)
 		return
 	}
 
 	// Check if resource is still healthy
 	if !resource.IsHealthy() {
-		err := resource.Close()
-		if err != nil {
-			panic(err)
-		}
+		// Destroy unhealthy resource, ignoring close errors
+		_ = resource.Close()
 		atomic.AddInt64(&pool.destroyed, 1)
 
 		// Try to maintain minimum pool size
@@ -182,11 +178,8 @@ func (pool *ResourcePool) Release(resource Resource) {
 	case pool.resources <- resource:
 		atomic.AddInt64(&pool.available, 1)
 	default:
-		// Pool is full, close the resource
-		err := resource.Close()
-		if err != nil {
-			panic(err)
-		}
+		// Pool is full, close the resource; ignore close errors
+		_ = resource.Close()
 		atomic.AddInt64(&pool.destroyed, 1)
 	}
 }
@@ -275,10 +268,8 @@ func (pool *ResourcePool) createAsync() {
 	pool.mu.Lock()
 	if pool.closed {
 		pool.mu.Unlock()
-		err := resource.Close()
-		if err != nil {
-			panic(err)
-		}
+		// Pool closed; best-effort close without panicking on error
+		_ = resource.Close()
 		return
 	}
 	pool.mu.Unlock()
@@ -288,10 +279,8 @@ func (pool *ResourcePool) createAsync() {
 		atomic.AddInt64(&pool.created, 1)
 		atomic.AddInt64(&pool.available, 1)
 	default:
-		err := resource.Close()
-		if err != nil {
-			panic(err)
-		}
+		// Pool is full; close the resource and ignore close errors to avoid crashing
+		_ = resource.Close()
 		atomic.AddInt64(&pool.destroyed, 1)
 	}
 }
@@ -326,10 +315,8 @@ func (pool *ResourcePool) cleanupIdle() {
 		select {
 		case resource := <-pool.resources:
 			atomic.AddInt64(&pool.available, -1)
-			err := resource.Close()
-			if err != nil {
-				panic(err)
-			}
+			// Ignore close errors on cleanup; the pool should not panic during maintenance
+			_ = resource.Close()
 			atomic.AddInt64(&pool.destroyed, 1)
 		default:
 			return

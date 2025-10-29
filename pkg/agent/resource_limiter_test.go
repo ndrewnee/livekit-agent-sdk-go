@@ -382,8 +382,7 @@ func TestWorkerResourceLimiterIntegration(t *testing.T) {
 
 	// Verify limiter was created
 	if worker.resourceLimiter == nil {
-		t.Logf("Resource limiter is nil, EnableResourceLimits=%v", worker.opts.EnableResourceLimits)
-		t.Skip("Resource limiter not initialized in UniversalWorker - skipping integration test")
+		t.Fatalf("expected resource limiter to be initialized when EnableResourceLimits=true")
 	}
 
 	// Check metrics through health

@@ -256,7 +256,7 @@ room, err := roomClient.CreateRoom(context.Background(), &livekit.CreateRoomRequ
 
 ## Examples
 
-The repository includes three complete, working examples that demonstrate different agent types and use cases:
+The repository includes several complete, working examples that demonstrate different agent types and use cases:
 
 ### 1. Simple Room Agent
 
@@ -276,25 +276,7 @@ go run .
 - Data message publishing
 - Graceful shutdown handling
 
-### 2. Participant Monitoring Agent
-
-Provides personalized monitoring for individual participants.
-
-```bash
-cd examples/participant-monitoring-agent
-export LIVEKIT_URL="ws://localhost:7880"
-export LIVEKIT_API_KEY="devkey"
-export LIVEKIT_API_SECRET="secret"
-go run .
-```
-
-**Features:**
-- Individual participant tracking
-- Audio level monitoring & speaking detection
-- Connection quality tracking
-- Personalized welcome messages
-
-### 3. Media Publisher Agent
+### 2. Media Publisher Agent
 
 Demonstrates publishing audio and video content to LiveKit rooms.
 
@@ -312,28 +294,80 @@ go run .
 - Multiple publishing modes (audio/video/both)
 - Interactive control via data messages
 
-### Running Examples
+### 3. Publisher HLS Agent
 
-Each example includes dispatch scripts to create rooms with proper agent configuration:
+Advanced HLS recording agent with GStreamer-based media pipeline.
 
 ```bash
-# In one terminal, run the agent
+cd examples/publisher-hls-agent
+export LIVEKIT_URL="ws://localhost:7880"
+export LIVEKIT_API_KEY="devkey"
+export LIVEKIT_API_SECRET="secret"
 go run .
+```
 
-# In another terminal, dispatch a job
-go run . dispatch
+**Features:**
+- HLS playlist generation and recording
+- Multi-codec support (H.264, Opus, VP8)
+- S3-compatible storage integration
+- Real-time segment upload
+
+### 4. Universal Worker Demo
+
+Demonstrates the universal worker pattern with dynamic job handling.
+
+```bash
+cd examples/universal-worker-demo
+export LIVEKIT_URL="ws://localhost:7880"
+export LIVEKIT_API_KEY="devkey"
+export LIVEKIT_API_SECRET="secret"
+go run .
+```
+
+### 5. LiveKit Cloud Example
+
+Example configuration for deploying agents to LiveKit Cloud.
+
+```bash
+cd examples/livekit-cloud-example
+go run .
+```
+
+### 6. Minimal Reproduction
+
+Minimal example for testing and debugging agent behavior.
+
+```bash
+cd examples/minimal-repro
+go run .
+```
+
+### Running Examples
+
+Each example can be run independently with proper LiveKit server configuration:
+
+```bash
+# Start LiveKit server
+docker run --rm -p 7880:7880 livekit/livekit-server --dev
+
+# Run any example
+cd examples/<example-name>
+export LIVEKIT_URL="ws://localhost:7880"
+export LIVEKIT_API_KEY="devkey"
+export LIVEKIT_API_SECRET="secret"
+go run .
 ```
 
 ### Testing All Examples
 
-A comprehensive test script is provided to verify all examples:
+A comprehensive test script is provided to verify all examples build correctly:
 
 ```bash
 cd examples
 ./test-all-examples.sh
 ```
 
-This will build and briefly run each example to ensure they're working correctly.
+This will build each example to ensure they compile successfully.
 
 ## Architecture
 
