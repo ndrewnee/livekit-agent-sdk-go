@@ -203,11 +203,20 @@ func (w *UniversalWorker) handleMessages(ctx context.Context) {
 		default:
 			var msg livekit.ServerMessage
 			if err := w.readMessage(&msg); err != nil {
+				// Check if context was cancelled (expected during reconnection)
+				if ctx.Err() != nil {
+					w.logger.Info("Message handler stopping due to context cancellation")
+					return
+				}
+
+				// Check for normal WebSocket closure
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 					w.logger.Info("WebSocket closed normally")
 					return
 				}
-				w.logger.Error("Failed to read message", "error", err)
+
+				// Unexpected error - log as WARN instead of ERROR (reconnection will handle it)
+				w.logger.Warn("Connection read error, triggering reconnection", "error", err)
 				w.handleConnectionError(err)
 				return
 			}
@@ -426,8 +435,27 @@ func (w *UniversalWorker) sendPing() error {
 	})
 }
 
+// stopMessageHandler stops the current message handler goroutine
+func (w *UniversalWorker) stopMessageHandler() {
+	w.messageHandlerMu.Lock()
+	defer w.messageHandlerMu.Unlock()
+
+	if w.messageHandlerCancel != nil {
+		w.logger.Info("Stopping old message handler goroutine")
+		w.messageHandlerCancel()
+		w.messageHandlerCancel = nil
+		w.messageHandlerCtx = nil
+	}
+}
+
 // handleConnectionError handles connection errors
 func (w *UniversalWorker) handleConnectionError(err error) {
+	// Prevent concurrent reconnection attempts
+	if !w.reconnecting.CompareAndSwap(false, true) {
+		w.logger.Info("Reconnection already in progress, skipping")
+		return
+	}
+
 	w.mu.Lock()
 	w.wsState = WebSocketStateDisconnected
 	if w.conn != nil {
@@ -436,11 +464,15 @@ func (w *UniversalWorker) handleConnectionError(err error) {
 	}
 	w.mu.Unlock()
 
-	// Trigger reconnection
+	// Stop old message handler goroutine
+	w.stopMessageHandler()
+
+	// Trigger reconnection (non-blocking)
 	select {
 	case w.reconnectChan <- struct{}{}:
 	default:
 		// Already queued
+		w.reconnecting.Store(false) // Reset flag if channel is full
 	}
 }
 
@@ -459,9 +491,21 @@ func (w *UniversalWorker) reconnect(ctx context.Context) error {
 
 	// Attempt to connect
 	if err := w.connect(ctx); err != nil {
+		w.reconnecting.Store(false) // Allow retry
 		return err
 	}
 
+	// Create NEW context for NEW message handler
+	w.messageHandlerMu.Lock()
+	w.messageHandlerCtx, w.messageHandlerCancel = context.WithCancel(ctx)
+	messageCtx := w.messageHandlerCtx
+	w.messageHandlerMu.Unlock()
+
+	// Start NEW message handler with NEW context
+	go w.handleMessages(messageCtx)
+
+	// Send initial load update to announce availability
+	w.updateLoad()
 	// Recover jobs if enabled
 	// TODO: Recovery manager needs to be updated for UniversalWorker
 	// if w.recoveryManager != nil {
@@ -478,6 +522,7 @@ func (w *UniversalWorker) reconnect(ctx context.Context) error {
 	}
 
 	w.logger.Info("Successfully reconnected")
+	w.reconnecting.Store(false) // Allow future reconnections
 	return nil
 }
 

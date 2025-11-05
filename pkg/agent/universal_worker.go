@@ -45,8 +45,12 @@ type UniversalWorker struct {
 	jobStartTimes map[string]time.Time
 
 	// WebSocket state
-	wsState       WebSocketState
-	reconnectChan chan struct{}
+	wsState              WebSocketState
+	reconnectChan        chan struct{}
+	messageHandlerCtx    context.Context
+	messageHandlerCancel context.CancelFunc
+	messageHandlerMu     sync.Mutex
+	reconnecting         atomic.Bool // Prevents concurrent reconnections
 
 	// Shared capabilities
 	rooms               map[string]*lksdk.Room
@@ -317,7 +321,14 @@ func (w *UniversalWorker) Start(ctx context.Context) error {
 		w.resourceLimiterCancel = cancel
 		w.resourceLimiter.Start(rlCtx)
 	}
-	go w.handleMessages(ctx)
+
+	// Create cancellable context for message handler
+	w.messageHandlerMu.Lock()
+	w.messageHandlerCtx, w.messageHandlerCancel = context.WithCancel(ctx)
+	messageCtx := w.messageHandlerCtx
+	w.messageHandlerMu.Unlock()
+
+	go w.handleMessages(messageCtx) // Use dedicated context
 	go w.maintainConnection(ctx)
 	go w.handleStatusUpdateRetries(ctx)
 
@@ -342,6 +353,9 @@ func (w *UniversalWorker) Stop() error {
 	var err error
 	w.stopOnce.Do(func() {
 		close(w.stopCh)
+
+		// Stop message handler first
+		w.stopMessageHandler()
 
 		// Stop all active jobs
 		w.mu.Lock()
@@ -502,6 +516,9 @@ func (w *UniversalWorker) StopWithTimeout(timeout time.Duration) error {
 		if w.shutdownHandler != nil {
 			w.shutdownHandler.ExecutePhase(ctx, ShutdownPhasePreStop)
 		}
+
+		// Stop message handler first
+		w.stopMessageHandler()
 
 		// Cancel active jobs to allow handlers to exit promptly
 		w.mu.Lock()
