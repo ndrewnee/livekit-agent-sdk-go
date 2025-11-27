@@ -58,6 +58,12 @@ type Config struct {
 
 	// S3 contains S3-compatible storage configuration for uploads.
 	S3 S3Config
+
+	// E2EEPassphrase is the passphrase used to derive the E2EE encryption key.
+	// When set, the agent will decrypt incoming E2EE-encrypted audio and video tracks.
+	// The passphrase must match the one used by the publishing client.
+	// Environment variable: E2EE_PASSPHRASE (default: empty, E2EE disabled)
+	E2EEPassphrase string
 }
 
 // loadConfig reads all configuration from environment variables.
@@ -75,6 +81,7 @@ func loadConfig() *Config {
 		KeepOpus:            getEnvBool("KEEP_OPUS", false),
 		AgentName:           getEnv("AGENT_NAME", "publisher-hls-recorder"),
 		S3RealTimeUpload:    getEnvBool("S3_REALTIME_UPLOAD", false),
+		E2EEPassphrase:      getEnv("E2EE_PASSPHRASE", ""),
 		S3: S3Config{
 			Endpoint:       getEnv("S3_ENDPOINT", ""),
 			Bucket:         getEnv("S3_BUCKET", ""),
@@ -181,4 +188,9 @@ type S3Config struct {
 // Requires Endpoint, Bucket, AccessKey, and SecretKey to be non-empty.
 func (s S3Config) Enabled() bool {
 	return s.Endpoint != "" && s.Bucket != "" && s.AccessKey != "" && s.SecretKey != ""
+}
+
+// E2EEEnabled returns true if E2EE decryption is configured with a passphrase.
+func (c *Config) E2EEEnabled() bool {
+	return c.E2EEPassphrase != ""
 }
