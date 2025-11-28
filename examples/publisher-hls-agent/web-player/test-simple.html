@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Simple A/V Test</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      max-width: 900px;
+      margin: 50px auto;
+      padding: 20px;
+      background: #1a1a1a;
+      color: #fff;
+    }
+    h1 { text-align: center; }
+    .player-container {
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      margin: 20px 0;
+    }
+    video {
+      width: 100%;
+      display: block;
+    }
+    .controls {
+      padding: 15px;
+      background: #2a2a2a;
+      display: flex;
+      gap: 15px;
+      align-items: center;
+    }
+    button {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 5px;
+      background: #4a9eff;
+      color: white;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:hover { background: #3a8eef; }
+    button:disabled { background: #555; cursor: not-allowed; }
+    input[type="text"] {
+      flex: 1;
+      padding: 10px;
+      border: 1px solid #444;
+      border-radius: 5px;
+      background: #333;
+      color: #fff;
+      font-size: 14px;
+    }
+    .status {
+      padding: 10px;
+      margin: 10px 0;
+      border-radius: 5px;
+      background: #333;
+    }
+    .status.error { background: #633; }
+    .status.success { background: #363; }
+    #timeDisplay {
+      font-family: monospace;
+      color: #aaa;
+    }
+  </style>
+</head>
+<body>
+  <h1>Simple A/V Sync Test</h1>
+
+  <div class="controls">
+    <input type="text" id="urlInput" placeholder="Enter video.m3u8 URL or base path"
+           value="http://127.0.0.1:57294/publisher-hls/publisher-tests/publisher-hls-s3-room/publisher-hls-s3-participant/video.m3u8">
+    <button onclick="loadMedia()">Load</button>
+  </div>
+
+  <div class="player-container">
+    <video id="video" controls playsinline></video>
+  </div>
+
+  <div class="controls">
+    <button id="playBtn" onclick="togglePlay()" disabled>Play</button>
+    <span id="timeDisplay">0:00 / 0:00</span>
+    <label>
+      Volume: <input type="range" id="volumeSlider" min="0" max="100" value="100"
+                     oninput="setVolume(this.value)">
+    </label>
+  </div>
+
+  <div id="status" class="status">Enter URL and click Load</div>
+
+  <!-- Hidden audio element for audio track -->
+  <audio id="audio" style="display:none"></audio>
+
+  <script type="module">
+    import { SimpleAudioPlayer } from './simple-audio-player.js';
+
+    const video = document.getElementById('video');
+    const audio = document.getElementById('audio');
+    const status = document.getElementById('status');
+    const playBtn = document.getElementById('playBtn');
+    const timeDisplay = document.getElementById('timeDisplay');
+
+    let videoHls = null;
+    let audioPlayer = null;
+    let audioContext = null;
+
+    function showStatus(msg, type = '') {
+      status.textContent = msg;
+      status.className = 'status ' + type;
+      console.log(msg);
+    }
+
+    function formatTime(sec) {
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60);
+      return `${m}:${s.toString().padStart(2, '0')}`;
+    }
+
+    window.loadMedia = async function() {
+      const url = document.getElementById('urlInput').value.trim();
+      if (!url) {
+        showStatus('Please enter a URL', 'error');
+        return;
+      }
+
+      // Extract base URL
+      let baseUrl = url;
+      if (baseUrl.match(/\.(m3u8|json)$/i)) {
+        baseUrl = baseUrl.substring(0, baseUrl.lastIndexOf('/'));
+      }
+
+      const videoUrl = baseUrl + '/video.m3u8';
+      const audioUrl = baseUrl + '/audio.m3u8';
+
+      showStatus('Loading video...');
+
+      // Cleanup previous
+      if (videoHls) {
+        videoHls.destroy();
+        videoHls = null;
+      }
+      if (audioPlayer) {
+        audioPlayer.destroy();
+        audioPlayer = null;
+      }
+
+      try {
+        // Load video with HLS.js
+        if (Hls.isSupported()) {
+          videoHls = new Hls({ enableWorker: true });
+          videoHls.loadSource(videoUrl);
+          videoHls.attachMedia(video);
+
+          await new Promise((resolve, reject) => {
+            videoHls.once(Hls.Events.MANIFEST_PARSED, resolve);
+            videoHls.once(Hls.Events.ERROR, (e, data) => {
+              if (data.fatal) reject(new Error(data.details));
+            });
+          });
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = videoUrl;
+          await new Promise(r => video.addEventListener('loadedmetadata', r, { once: true }));
+        }
+
+        showStatus('Loading audio...');
+
+        // Create AudioContext for mixing support
+        if (!audioContext) {
+          audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+        }
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+
+        // Load audio using SimpleAudioPlayer
+        audioPlayer = new SimpleAudioPlayer(baseUrl, video, audioContext);
+        await audioPlayer.init();
+
+        // Connect to speakers
+        audioPlayer.connect(audioContext.destination);
+
+        showStatus('Ready! Click Play to start.', 'success');
+        playBtn.disabled = false;
+
+      } catch (err) {
+        showStatus('Error: ' + err.message, 'error');
+        console.error(err);
+      }
+    };
+
+    window.togglePlay = async function() {
+      if (video.paused) {
+        // Resume AudioContext if needed
+        if (audioContext && audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+        video.play();
+        playBtn.textContent = 'Pause';
+      } else {
+        video.pause();
+        playBtn.textContent = 'Play';
+      }
+    };
+
+    window.setVolume = function(val) {
+      if (audioPlayer) {
+        audioPlayer.setVolume(val / 100);
+      }
+    };
+
+    // Update time display
+    video.addEventListener('timeupdate', () => {
+      timeDisplay.textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration || 0)}`;
+    });
+
+    video.addEventListener('play', () => { playBtn.textContent = 'Pause'; });
+    video.addEventListener('pause', () => { playBtn.textContent = 'Play'; });
+  </script>
+</body>
+</html>

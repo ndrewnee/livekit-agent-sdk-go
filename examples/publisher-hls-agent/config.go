@@ -39,12 +39,11 @@ type Config struct {
 	// Environment variable: HLS_MAX_SEGMENTS (default: 0)
 	MaxPlaylistEntries int
 
-	// KeepOpus determines whether to preserve Opus audio without transcoding.
-	// When true, HLS output contains H.264 + Opus (no AAC transcoding).
-	// When false, audio is transcoded from Opus to AAC.
-	// Note: Not all HLS players support Opus audio in MPEG-TS containers.
-	// Environment variable: KEEP_OPUS (default: false)
-	KeepOpus bool
+	// MaxMixerParticipants is the maximum number of participants whose audio
+	// can be mixed simultaneously in the web player. This is used for generating
+	// the audio manifest metadata.
+	// Environment variable: MAX_MIXER_PARTICIPANTS (default: 10)
+	MaxMixerParticipants int
 
 	// AgentName is the name used for job matching and identification.
 	// Environment variable: AGENT_NAME (default: publisher-hls-recorder)
@@ -71,17 +70,17 @@ type Config struct {
 // Panics via log.Fatalf if required variables (API key/secret) are missing.
 func loadConfig() *Config {
 	return &Config{
-		LiveKitURL:          getEnv("LIVEKIT_URL", "ws://localhost:7880"),
-		APIKey:              mustGetEnv("LIVEKIT_API_KEY"),
-		APISecret:           mustGetEnv("LIVEKIT_API_SECRET"),
-		OutputDir:           getEnv("OUTPUT_DIR", "publisher-hls-output"),
-		AutoActivate:        getEnvBool("AUTO_ACTIVATE_RECORDING", false),
-		SegmentDurationSecs: getEnvInt("HLS_SEGMENT_DURATION", 2),
-		MaxPlaylistEntries:  getEnvInt("HLS_MAX_SEGMENTS", 0),
-		KeepOpus:            getEnvBool("KEEP_OPUS", false),
-		AgentName:           getEnv("AGENT_NAME", "publisher-hls-recorder"),
-		S3RealTimeUpload:    getEnvBool("S3_REALTIME_UPLOAD", false),
-		E2EEPassphrase:      getEnv("E2EE_PASSPHRASE", ""),
+		LiveKitURL:           getEnv("LIVEKIT_URL", "ws://localhost:7880"),
+		APIKey:               mustGetEnv("LIVEKIT_API_KEY"),
+		APISecret:            mustGetEnv("LIVEKIT_API_SECRET"),
+		OutputDir:            getEnv("OUTPUT_DIR", "publisher-hls-output"),
+		AutoActivate:         getEnvBool("AUTO_ACTIVATE_RECORDING", false),
+		SegmentDurationSecs:  getEnvInt("HLS_SEGMENT_DURATION", 2),
+		MaxPlaylistEntries:   getEnvInt("HLS_MAX_SEGMENTS", 0),
+		MaxMixerParticipants: getEnvInt("MAX_MIXER_PARTICIPANTS", 10),
+		AgentName:            getEnv("AGENT_NAME", "publisher-hls-recorder"),
+		S3RealTimeUpload:     getEnvBool("S3_REALTIME_UPLOAD", false),
+		E2EEPassphrase:       getEnv("E2EE_PASSPHRASE", ""),
 		S3: S3Config{
 			Endpoint:       getEnv("S3_ENDPOINT", ""),
 			Bucket:         getEnv("S3_BUCKET", ""),

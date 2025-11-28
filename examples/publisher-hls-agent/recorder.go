@@ -18,13 +18,18 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// ParticipantRecorder records a participant's audio and video streams to HLS format.
+// ParticipantRecorder records a participant's audio and video streams to separate HLS outputs.
 //
 // It creates a GStreamer pipeline that:
 //   - Receives RTP packets (H.264 video, Opus audio)
-//   - Optionally transcodes audio to AAC (or keeps Opus)
-//   - Muxes to MPEG-TS format
-//   - Generates HLS playlists and segments via hlssink
+//   - Outputs video-only HLS (H.264 in MPEG-TS segments)
+//   - Outputs audio-only fMP4 segments (Opus in CMAF format)
+//   - Creates audio.json manifest for web player consumption
+//
+// The separate A/V output enables:
+//   - iOS-compatible playback with single video tag
+//   - WebAudio-based mixing of multiple participants' audio
+//   - Efficient participant switching without re-buffering audio
 //
 // The recorder implements delayed pipeline start to ensure all HLS segments
 // begin with valid H.264 keyframes containing SPS/PPS headers.
@@ -32,13 +37,17 @@ type ParticipantRecorder struct {
 	participant string
 	room        string
 	outputDir   string
-	keepOpus    bool
 
 	pipeline    *gst.Pipeline
 	videoAppSrc *app.Source
 	audioAppSrc *app.Source
 	videoDepay  *gst.Element
 	audioDepay  *gst.Element
+
+	// Audio manifest writer for fMP4 segments
+	audioManifest     *AudioManifestWriter
+	audioSegmentIndex int
+	audioSegmentStart float64
 
 	videoInitialized bool
 	audioInitialized bool
@@ -164,10 +173,17 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 
 	gst.Init(nil)
 
+	startTime := time.Now()
+
 	pipeline, err := gst.NewPipeline("participant-recorder")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GStreamer pipeline: %w", err)
 	}
+
+	// =========================================================================
+	// VIDEO PIPELINE: appsrc → jitter → depay → h264parse → capsfilter → queue
+	//                 → mpegtsmux (video-only) → hlssink (video.m3u8)
+	// =========================================================================
 
 	videoSrc, err := gst.NewElement("appsrc")
 	if err != nil {
@@ -186,7 +202,7 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		return nil, fmt.Errorf("failed to create video jitterbuffer: %w", err)
 	}
 	_ = videoJitter.SetProperty("latency", uint(200))
-	_ = videoJitter.SetProperty("mode", int(1)) // RTP_JITTER_BUFFER_MODE_NONE to keep RTP timestamps unmodified
+	_ = videoJitter.SetProperty("mode", int(1))
 
 	videoDepay, err := gst.NewElement("rtph264depay")
 	if err != nil {
@@ -197,7 +213,6 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	if err != nil {
 		return nil, fmt.Errorf("failed to create h264parse: %w", err)
 	}
-	// force SPS/PPS before every keyframe so the resulting HLS segments stay decodable
 	_ = h264parse.SetProperty("disable-passthrough", true)
 	_ = h264parse.SetProperty("config-interval", int32(-1))
 
@@ -216,6 +231,39 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	_ = videoQueue.SetProperty("max-size-bytes", uint(0))
 	_ = videoQueue.SetProperty("max-size-time", uint64(0))
 
+	// Video-only muxer
+	videoMux, err := gst.NewElement("mpegtsmux")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create video mpegtsmux: %w", err)
+	}
+	_ = videoMux.SetProperty("alignment", int64(7))
+	_ = videoMux.SetProperty("start-time-selection", int64(0))
+	_ = videoMux.SetProperty("start-time", uint64(0))
+
+	videoMuxQueue, err := gst.NewElement("queue")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create video mux queue: %w", err)
+	}
+
+	videoHlsSink, err := gst.NewElement("hlssink")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create video hlssink: %w", err)
+	}
+	_ = videoHlsSink.SetProperty("location", filepath.Join(absDir, "video%05d.ts"))
+	_ = videoHlsSink.SetProperty("playlist-location", filepath.Join(absDir, "video.m3u8"))
+	segmentDuration := cfg.SegmentDurationSecs
+	if segmentDuration <= 0 {
+		segmentDuration = 2
+	}
+	_ = videoHlsSink.SetProperty("target-duration", uint(segmentDuration))
+	_ = videoHlsSink.SetProperty("max-files", uint(0))
+	_ = videoHlsSink.SetProperty("playlist-length", uint(0))
+
+	// =========================================================================
+	// AUDIO PIPELINE: appsrc → jitter → depay → opusparse → queue
+	//                 → splitmuxsink (audio fMP4 segments)
+	// =========================================================================
+
 	audioSrc, err := gst.NewElement("appsrc")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create audio appsrc: %w", err)
@@ -233,43 +281,16 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		return nil, fmt.Errorf("failed to create audio jitterbuffer: %w", err)
 	}
 	_ = audioJitter.SetProperty("latency", uint(200))
-	_ = audioJitter.SetProperty("mode", int(1)) // Disable jitterbuffer resync to preserve relative timestamps
+	_ = audioJitter.SetProperty("mode", int(1))
 
 	audioDepay, err := gst.NewElement("rtpopusdepay")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create rtpopusdepay: %w", err)
 	}
 
-	// Audio processing pipeline depends on KeepOpus configuration
-	var opusDec, audioConvert, aacEnc, aacParse, opusParse *gst.Element
-	if cfg.KeepOpus {
-		// Keep Opus without transcoding
-		opusParse, err = gst.NewElement("opusparse")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create opusparse: %w", err)
-		}
-	} else {
-		// Transcode Opus to AAC
-		opusDec, err = gst.NewElement("opusdec")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create opusdec: %w", err)
-		}
-
-		audioConvert, err = gst.NewElement("audioconvert")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create audioconvert: %w", err)
-		}
-
-		aacEnc, err = gst.NewElement("avenc_aac")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create avenc_aac: %w", err)
-		}
-		_ = aacEnc.SetProperty("bitrate", uint(128000))
-
-		aacParse, err = gst.NewElement("aacparse")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create aacparse: %w", err)
-		}
+	opusParse, err := gst.NewElement("opusparse")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create opusparse: %w", err)
 	}
 
 	audioQueue, err := gst.NewElement("queue")
@@ -280,72 +301,28 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	_ = audioQueue.SetProperty("max-size-bytes", uint(0))
 	_ = audioQueue.SetProperty("max-size-time", uint64(0))
 
-	mpegtsmux, err := gst.NewElement("mpegtsmux")
+	// Audio fMP4 segmenter using splitmuxsink with cmafmux
+	audioSplitMux, err := gst.NewElement("splitmuxsink")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create mpegtsmux: %w", err)
+		return nil, fmt.Errorf("failed to create audio splitmuxsink: %w", err)
 	}
-	_ = mpegtsmux.SetProperty("alignment", int64(7))
-	_ = mpegtsmux.SetProperty("start-time-selection", int64(0)) // Force timestamps to start at zero
-	_ = mpegtsmux.SetProperty("start-time", uint64(0))
+	_ = audioSplitMux.SetProperty("location", filepath.Join(absDir, "audio%05d.m4s"))
+	_ = audioSplitMux.SetProperty("max-size-time", uint64(segmentDuration)*uint64(time.Second))
+	_ = audioSplitMux.SetProperty("muxer-factory", "cmafmux")
+	_ = audioSplitMux.SetProperty("async-finalize", false) // Ensure segments are finalized synchronously before EOS
+	_ = audioSplitMux.SetProperty("send-keyframe-requests", false)
 
-	muxQueue, err := gst.NewElement("queue")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create mux queue: %w", err)
-	}
+	// =========================================================================
+	// ADD ELEMENTS TO PIPELINE
+	// =========================================================================
 
-	outputTee, err := gst.NewElement("tee")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create tee: %w", err)
-	}
-
-	tsQueue, err := gst.NewElement("queue")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ts queue: %w", err)
-	}
-
-	tsSink, err := gst.NewElement("filesink")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create filesink: %w", err)
-	}
-	_ = tsSink.SetProperty("location", filepath.Join(absDir, "output.ts"))
-	_ = tsSink.SetProperty("sync", false)
-	_ = tsSink.SetProperty("async", false)
-
-	hlsQueue, err := gst.NewElement("queue")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create hls queue: %w", err)
-	}
-
-	hlsSink, err := gst.NewElement("hlssink")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create hlssink: %w", err)
-	}
-	_ = hlsSink.SetProperty("location", filepath.Join(absDir, "segment%05d.ts"))
-	_ = hlsSink.SetProperty("playlist-location", filepath.Join(absDir, "playlist.m3u8"))
-	segmentDuration := cfg.SegmentDurationSecs
-	if segmentDuration <= 0 {
-		segmentDuration = 2
-	}
-	_ = hlsSink.SetProperty("target-duration", uint(segmentDuration))
-	_ = hlsSink.SetProperty("max-files", uint(0))
-	_ = hlsSink.SetProperty("playlist-length", uint(0))
-
-	// Build elements list based on audio codec configuration
 	elements := []*gst.Element{
+		// Video path
 		videoSrc, videoJitter, videoDepay, h264parse, videoCapsFilter, videoQueue,
-		audioSrc, audioJitter, audioDepay,
+		videoMux, videoMuxQueue, videoHlsSink,
+		// Audio path
+		audioSrc, audioJitter, audioDepay, opusParse, audioQueue, audioSplitMux,
 	}
-	if cfg.KeepOpus {
-		elements = append(elements, opusParse)
-	} else {
-		elements = append(elements, opusDec, audioConvert, aacEnc, aacParse)
-	}
-	elements = append(elements,
-		audioQueue,
-		mpegtsmux, muxQueue, outputTee,
-		tsQueue, tsSink,
-		hlsQueue, hlsSink,
-	)
 
 	for _, elem := range elements {
 		if err := pipeline.Add(elem); err != nil {
@@ -353,25 +330,18 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		}
 	}
 
+	// =========================================================================
+	// LINK VIDEO PIPELINE
+	// =========================================================================
+
 	if err := gst.ElementLinkMany(videoSrc, videoJitter, videoDepay, h264parse, videoCapsFilter, videoQueue); err != nil {
-		return nil, fmt.Errorf("failed to link video chain: %w", err)
+		return nil, fmt.Errorf("failed to link video processing chain: %w", err)
 	}
 
-	// Link audio pipeline based on codec configuration
-	if cfg.KeepOpus {
-		if err := gst.ElementLinkMany(audioSrc, audioJitter, audioDepay, opusParse, audioQueue); err != nil {
-			return nil, fmt.Errorf("failed to link audio chain (opus): %w", err)
-		}
-	} else {
-		if err := gst.ElementLinkMany(audioSrc, audioJitter, audioDepay, opusDec, audioConvert, aacEnc, aacParse, audioQueue); err != nil {
-			return nil, fmt.Errorf("failed to link audio chain (aac): %w", err)
-		}
-	}
-
-	// mpegtsmux requires request pads, cannot use ElementLinkMany
-	videoMuxPad := mpegtsmux.GetRequestPad("sink_%d")
+	// Link video queue to mpegtsmux (request pad)
+	videoMuxPad := videoMux.GetRequestPad("sink_%d")
 	if videoMuxPad == nil {
-		return nil, fmt.Errorf("failed to get request pad from mpegtsmux for video")
+		return nil, fmt.Errorf("failed to get request pad from video mpegtsmux")
 	}
 	videoQueueSrc := videoQueue.GetStaticPad("src")
 	if videoQueueSrc == nil {
@@ -381,63 +351,70 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		return nil, fmt.Errorf("failed to link video queue to mux: %s", linkRet.String())
 	}
 
-	audioMuxPad := mpegtsmux.GetRequestPad("sink_%d")
-	if audioMuxPad == nil {
-		return nil, fmt.Errorf("failed to get request pad from mpegtsmux for audio")
+	if err := gst.ElementLinkMany(videoMux, videoMuxQueue, videoHlsSink); err != nil {
+		return nil, fmt.Errorf("failed to link video mux to hlssink: %w", err)
+	}
+
+	// =========================================================================
+	// LINK AUDIO PIPELINE
+	// =========================================================================
+
+	if err := gst.ElementLinkMany(audioSrc, audioJitter, audioDepay, opusParse, audioQueue); err != nil {
+		return nil, fmt.Errorf("failed to link audio processing chain: %w", err)
+	}
+
+	// Link audio queue to splitmuxsink (request pad)
+	audioSplitPad := audioSplitMux.GetRequestPad("audio_%u")
+	if audioSplitPad == nil {
+		// Try alternative pad name
+		audioSplitPad = audioSplitMux.GetRequestPad("audio")
+	}
+	if audioSplitPad == nil {
+		return nil, fmt.Errorf("failed to get request pad from audio splitmuxsink")
 	}
 	audioQueueSrc := audioQueue.GetStaticPad("src")
 	if audioQueueSrc == nil {
 		return nil, fmt.Errorf("failed to get src pad from audio queue")
 	}
-	if linkRet := audioQueueSrc.Link(audioMuxPad); linkRet != gst.PadLinkOK {
-		return nil, fmt.Errorf("failed to link audio queue to mux: %s", linkRet.String())
-	}
-
-	if err := gst.ElementLinkMany(mpegtsmux, muxQueue, outputTee); err != nil {
-		return nil, fmt.Errorf("failed to link mux branch: %w", err)
-	}
-
-	if err := gst.ElementLinkMany(tsQueue, tsSink); err != nil {
-		return nil, fmt.Errorf("failed to link ts branch: %w", err)
-	}
-	if err := gst.ElementLinkMany(hlsQueue, hlsSink); err != nil {
-		return nil, fmt.Errorf("failed to link hls branch: %w", err)
-	}
-
-	teePad1 := outputTee.GetRequestPad("src_%u")
-	tsQueueSink := tsQueue.GetStaticPad("sink")
-	if linkRet := teePad1.Link(tsQueueSink); linkRet != gst.PadLinkOK {
-		return nil, fmt.Errorf("failed to link tee to ts queue: %s", linkRet.String())
-	}
-
-	teePad2 := outputTee.GetRequestPad("src_%u")
-	hlsQueueSink := hlsQueue.GetStaticPad("sink")
-	if linkRet := teePad2.Link(hlsQueueSink); linkRet != gst.PadLinkOK {
-		return nil, fmt.Errorf("failed to link tee to hls queue: %s", linkRet.String())
+	if linkRet := audioQueueSrc.Link(audioSplitPad); linkRet != gst.PadLinkOK {
+		return nil, fmt.Errorf("failed to link audio queue to splitmuxsink: %s", linkRet.String())
 	}
 
 	_ = os.Setenv("GST_DEBUG_DUMP_DOT_DIR", absDir)
 
+	// Initialize audio manifest writer
+	audioManifest := NewAudioManifestWriter(absDir, cfg, startTime)
+
 	recorder := &ParticipantRecorder{
-		participant:  participant,
-		room:         roomName,
-		outputDir:    absDir,
-		keepOpus:     cfg.KeepOpus,
-		pipeline:     pipeline,
-		videoAppSrc:  app.SrcFromElement(videoSrc),
-		audioAppSrc:  app.SrcFromElement(audioSrc),
-		videoDepay:   videoDepay,
-		audioDepay:   audioDepay,
-		startTime:    time.Now(),
-		videoReadyCh: make(chan struct{}),
-		s3Uploader:   s3Uploader,
+		participant:   participant,
+		room:          roomName,
+		outputDir:     absDir,
+		pipeline:      pipeline,
+		videoAppSrc:   app.SrcFromElement(videoSrc),
+		audioAppSrc:   app.SrcFromElement(audioSrc),
+		videoDepay:    videoDepay,
+		audioDepay:    audioDepay,
+		startTime:     startTime,
+		videoReadyCh:  make(chan struct{}),
+		s3Uploader:    s3Uploader,
+		audioManifest: audioManifest,
 	}
 
-	audioCodec := "AAC"
-	if cfg.KeepOpus {
-		audioCodec = "Opus"
-	}
-	log.Printf("[%s/%s] recorder initialized with H.264 + %s", roomName, participant, audioCodec)
+	// Connect to splitmuxsink signals for audio manifest tracking
+	audioSplitMux.Connect("format-location-full", func(self *gst.Element, fragmentID uint, firstSample *gst.Sample, fileName string) string {
+		segmentFile := fmt.Sprintf("audio%05d.m4s", fragmentID)
+		segmentStartTime := float64(fragmentID) * float64(segmentDuration)
+
+		recorder.mu.Lock()
+		recorder.audioSegmentIndex = int(fragmentID)
+		recorder.audioSegmentStart = segmentStartTime
+		recorder.mu.Unlock()
+
+		log.Printf("[%s] audio segment %d started at %.2fs", recorder.logPrefix(), fragmentID, segmentStartTime)
+		return filepath.Join(absDir, segmentFile)
+	})
+
+	log.Printf("[%s/%s] recorder initialized with separate A/V (H.264 video + Opus audio fMP4)", roomName, participant)
 
 	bus := pipeline.GetPipelineBus()
 	bus.AddWatch(func(msg *gst.Message) bool {
@@ -1757,6 +1734,72 @@ func (r *ParticipantRecorder) Stop() {
 			log.Printf("[%s] fixed HLS playlist final segment duration", r.logPrefix())
 		}
 
+		// Process audio segments to extract init and strip duplicate moov data
+		// This converts self-contained segments (with ftyp+moov in each) to proper CMAF format
+		// with a separate init segment (audio_init.mp4) and media-only segments
+		if err := r.processAudioSegments(); err != nil {
+			log.Printf("[%s] failed to process audio segments: %v", r.logPrefix(), err)
+		}
+
+		// Finalize audio manifest with all segments using ACTUAL timing from segment data
+		// CRITICAL: We must use the tfdt (track fragment decode time) from each segment
+		// to determine its actual start time. GStreamer may have startup delays or
+		// produce segments with timing that doesn't start at 0.
+		if r.audioManifest != nil {
+			const opusTimescale = 48000 // Opus uses 48kHz sample rate
+			var cumulativeStartTime float64 = 0
+
+			for i := 0; ; i++ {
+				segmentFile := fmt.Sprintf("audio%05d.m4s", i)
+				segmentPath := filepath.Join(r.outputDir, segmentFile)
+				if _, err := os.Stat(segmentPath); os.IsNotExist(err) {
+					break
+				}
+
+				// Parse segment to get actual timing from tfdt and duration from trun
+				segInfo, err := getAudioSegmentInfo(segmentPath, opusTimescale)
+				if err != nil {
+					// Fall back to cumulative duration if parsing fails
+					log.Printf("[%s] warning: failed to parse segment %d timing: %v, using cumulative", r.logPrefix(), i, err)
+					duration := float64(r.audioManifest.manifest.SegmentDuration)
+					r.audioManifest.AddSegment(i, segmentFile, duration, cumulativeStartTime)
+					cumulativeStartTime += duration
+					continue
+				}
+
+				// Use tfdt-based start time if it's valid (non-zero or first segment)
+				// If all segments have tfdt=0 (splitmuxsink resets timing), use cumulative
+				startTime := segInfo.StartTimeSeconds
+				if i > 0 && segInfo.BaseDecodeTime == 0 {
+					// tfdt is 0 for non-first segment, means splitmuxsink resets timing per segment
+					// Fall back to cumulative approach
+					log.Printf("[%s] segment %d: tfdt=0 (reset), using cumulative startTime=%.3fs, duration=%.3fs",
+						r.logPrefix(), i, cumulativeStartTime, segInfo.Duration)
+					r.audioManifest.AddSegment(i, segmentFile, segInfo.Duration, cumulativeStartTime)
+					cumulativeStartTime += segInfo.Duration
+				} else {
+					log.Printf("[%s] segment %d: tfdt=%.3fs, duration=%.3fs (tfdt_samples=%d)",
+						r.logPrefix(), i, startTime, segInfo.Duration, segInfo.BaseDecodeTime)
+					r.audioManifest.AddSegment(i, segmentFile, segInfo.Duration, startTime)
+					// Update cumulative for potential fallback
+					cumulativeStartTime = startTime + segInfo.Duration
+				}
+			}
+
+			if err := r.audioManifest.Write(); err != nil {
+				log.Printf("[%s] failed to write audio manifest: %v", r.logPrefix(), err)
+			} else {
+				log.Printf("[%s] wrote audio manifest with %d segments", r.logPrefix(), r.audioManifest.SegmentCount())
+			}
+
+			// Also write HLS playlist for standard player compatibility
+			if err := r.audioManifest.WriteHLSPlaylist(); err != nil {
+				log.Printf("[%s] failed to write audio HLS playlist: %v", r.logPrefix(), err)
+			} else {
+				log.Printf("[%s] wrote audio.m3u8 HLS playlist", r.logPrefix())
+			}
+		}
+
 		// Close real-time S3 uploader if enabled
 		if r.s3Uploader != nil {
 			if err := r.s3Uploader.Close(); err != nil {
@@ -1817,4 +1860,56 @@ func (r *ParticipantRecorder) Summary() RecordingSummary {
 	summary.AudioPackets = r.audioPacketCount
 
 	return summary
+}
+
+// processAudioSegments processes all audio segments to create proper CMAF format.
+// It extracts the init segment from the first audio segment (audio_init.mp4) and
+// strips the duplicate init data from all segments, leaving only media data.
+//
+// This is necessary because GStreamer's splitmuxsink+cmafmux creates self-contained
+// segments where each .m4s has ftyp+moov (init data) + moof+mdat (media). For proper
+// HLS/CMAF playback, we need a separate init segment referenced by EXT-X-MAP.
+func (r *ParticipantRecorder) processAudioSegments() error {
+	initPath := filepath.Join(r.outputDir, "audio_init.mp4")
+	segmentsProcessed := 0
+
+	// Process all audio segments
+	for i := 0; ; i++ {
+		segmentName := fmt.Sprintf("audio%05d.m4s", i)
+		segmentPath := filepath.Join(r.outputDir, segmentName)
+
+		// Check if segment exists
+		if _, err := os.Stat(segmentPath); os.IsNotExist(err) {
+			break // No more segments
+		}
+
+		// Process the segment
+		mediaData, err := processAudioSegment(segmentPath, i, initPath)
+		if err != nil {
+			log.Printf("[%s] failed to process %s: %v (keeping original)", r.logPrefix(), segmentName, err)
+			continue
+		}
+
+		// Ensure styp prefix for CMAF compliance
+		mediaData = ensureStypPrefix(mediaData)
+
+		// Overwrite the segment file with processed data
+		if err := os.WriteFile(segmentPath, mediaData, 0644); err != nil {
+			log.Printf("[%s] failed to write processed %s: %v", r.logPrefix(), segmentName, err)
+			continue
+		}
+
+		segmentsProcessed++
+	}
+
+	// Check if init was created
+	if info, err := os.Stat(initPath); err == nil {
+		log.Printf("[%s] audio segment processing complete: %d segments, init=%d bytes",
+			r.logPrefix(), segmentsProcessed, info.Size())
+	} else if segmentsProcessed > 0 {
+		log.Printf("[%s] warning: processed %d segments but audio_init.mp4 was not created",
+			r.logPrefix(), segmentsProcessed)
+	}
+
+	return nil
 }

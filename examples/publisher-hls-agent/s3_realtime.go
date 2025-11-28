@@ -20,11 +20,11 @@ import (
 // they're written by hlssink. By watching playlist updates (rather than file creation),
 // we ensure segments are fully written before uploading, avoiding interference.
 //
-// The uploader:
-//   - Polls playlist.m3u8 for updates every 500ms
-//   - Uploads newly referenced segments immediately
+// The uploader handles separate A/V outputs:
+//   - Polls video.m3u8 for video segment updates every 500ms
+//   - Monitors for audio fMP4 segments (audio*.m4s)
+//   - Uploads audio.json manifest at the end
 //   - Deletes local segments after successful upload to minimize storage
-//   - Keeps playlist.m3u8 until recording completes (uploaded in final sweep)
 type RealtimeS3Uploader struct {
 	cfg         S3Config
 	room        string
@@ -110,23 +110,154 @@ func NewRealtimeS3Uploader(cfg S3Config, room, participant, watchDir string) (*R
 //   - Fast enough to upload segments promptly (HLS target duration is ~2s)
 //   - Slow enough to avoid excessive file I/O and CPU usage
 //
-// Thread-safety: This goroutine is the only reader of playlist.m3u8,
+// Thread-safety: This goroutine is the only reader of video.m3u8,
 // while hlssink is the only writer, avoiding read/write conflicts.
 func (u *RealtimeS3Uploader) monitorPlaylist() {
 	defer u.wg.Done()
 
+	log.Printf("[%s/%s] monitorPlaylist started, watching %s", u.room, u.participant, u.watchDir)
+
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	playlistPath := filepath.Join(u.watchDir, "playlist.m3u8")
+	videoPlaylistPath := filepath.Join(u.watchDir, "video.m3u8")
+	var lastAudioSegmentCheck int // Track last audio segment index checked
 
 	for {
 		select {
 		case <-u.ctx.Done():
 			return
 		case <-ticker.C:
-			u.checkPlaylistUpdates(playlistPath)
+			// Monitor video playlist for video segments
+			u.checkPlaylistUpdates(videoPlaylistPath)
+
+			// Monitor for new audio segments (audio*.m4s)
+			lastAudioSegmentCheck = u.checkAudioSegments(lastAudioSegmentCheck)
 		}
+	}
+}
+
+// checkAudioSegments monitors and uploads new audio fMP4 segments.
+// Returns the last segment index that was checked.
+//
+// This function handles the fact that splitmuxsink+cmafmux creates self-contained
+// segments where each .m4s has ftyp+moov (init data) + moof+mdat (media).
+// For proper HLS/CMAF playback, we need:
+//   - A separate init segment (audio_init.mp4) with just ftyp+moov
+//   - Media segments (.m4s) with just styp+moof+mdat
+//
+// The function:
+//  1. Extracts init segment from the first audio segment (audio00000.m4s)
+//  2. Strips init data from all segments before upload
+//  3. Adds styp box prefix to ensure CMAF compliance
+func (u *RealtimeS3Uploader) checkAudioSegments(lastIndex int) int {
+	// Check for audio media segments (audio00000.m4s, audio00001.m4s, ...)
+	for i := lastIndex; ; i++ {
+		segmentName := fmt.Sprintf("audio%05d.m4s", i)
+		segmentPath := filepath.Join(u.watchDir, segmentName)
+
+		// Check if this segment exists
+		info, err := os.Stat(segmentPath)
+		if os.IsNotExist(err) {
+			// No more segments
+			return i
+		}
+		if err != nil {
+			log.Printf("[%s/%s] error checking %s: %v", u.room, u.participant, segmentName, err)
+			return i
+		}
+		log.Printf("[%s/%s] found audio segment: %s (%d bytes)", u.room, u.participant, segmentName, info.Size())
+
+		// Check if already uploaded
+		u.uploadedMu.Lock()
+		_, alreadyUploaded := u.uploadedFiles[segmentName]
+		u.uploadedMu.Unlock()
+
+		if !alreadyUploaded {
+			// Process and upload this segment
+			u.wg.Add(1)
+			go u.processAndUploadAudioSegment(segmentName, i)
+		}
+
+		lastIndex = i + 1
+	}
+}
+
+// processAndUploadAudioSegment processes an audio segment to strip duplicate init data,
+// then uploads the media-only segment to S3.
+//
+// For the first segment (index 0), it also extracts and uploads audio_init.mp4.
+func (u *RealtimeS3Uploader) processAndUploadAudioSegment(segmentName string, segmentIndex int) {
+	defer u.wg.Done()
+
+	segmentPath := filepath.Join(u.watchDir, segmentName)
+	initPath := filepath.Join(u.watchDir, "audio_init.mp4")
+
+	log.Printf("[%s/%s] processing audio segment %s (index %d)", u.room, u.participant, segmentName, segmentIndex)
+
+	// Process the segment: extract init (first segment only) and strip init data
+	mediaData, err := processAudioSegment(segmentPath, segmentIndex, initPath)
+	if err != nil {
+		log.Printf("[%s/%s] failed to process audio segment %s: %v", u.room, u.participant, segmentName, err)
+		// Fall back to uploading original file
+		if err := u.uploadFile(segmentPath, segmentName); err != nil {
+			log.Printf("[%s/%s] failed to upload %s: %v", u.room, u.participant, segmentName, err)
+		}
+		return
+	}
+
+	log.Printf("[%s/%s] processed segment %s: media size %d bytes", u.room, u.participant, segmentName, len(mediaData))
+
+	// For first segment, upload the init segment
+	if segmentIndex == 0 {
+		if initInfo, err := os.Stat(initPath); err == nil {
+			log.Printf("[%s/%s] found init file: %s (%d bytes)", u.room, u.participant, initPath, initInfo.Size())
+			if err := u.uploadFile(initPath, "audio_init.mp4"); err != nil {
+				log.Printf("[%s/%s] failed to upload audio_init.mp4: %v", u.room, u.participant, err)
+			} else {
+				log.Printf("[%s/%s] uploaded audio_init.mp4", u.room, u.participant)
+				// Mark init as uploaded
+				u.uploadedMu.Lock()
+				u.uploadedFiles["audio_init.mp4"] = struct{}{}
+				u.uploadedMu.Unlock()
+			}
+		} else {
+			log.Printf("[%s/%s] init file not found at %s: %v", u.room, u.participant, initPath, err)
+		}
+	}
+
+	// Ensure media data has styp prefix for CMAF compliance
+	mediaData = ensureStypPrefix(mediaData)
+
+	// Write processed media data to a temp file for upload
+	processedPath := segmentPath + ".processed"
+	if err := os.WriteFile(processedPath, mediaData, 0644); err != nil {
+		log.Printf("[%s/%s] failed to write processed segment %s: %v", u.room, u.participant, segmentName, err)
+		// Fall back to uploading original file
+		if err := u.uploadFile(segmentPath, segmentName); err != nil {
+			log.Printf("[%s/%s] failed to upload %s: %v", u.room, u.participant, segmentName, err)
+		}
+		return
+	}
+
+	// Upload processed segment
+	if err := u.uploadFile(processedPath, segmentName); err != nil {
+		log.Printf("[%s/%s] failed to upload processed %s: %v", u.room, u.participant, segmentName, err)
+		os.Remove(processedPath)
+		return
+	}
+
+	// Mark as uploaded
+	u.uploadedMu.Lock()
+	u.uploadedFiles[segmentName] = struct{}{}
+	u.uploadedMu.Unlock()
+
+	// Delete local files
+	os.Remove(processedPath)
+	if err := os.Remove(segmentPath); err != nil && !os.IsNotExist(err) {
+		log.Printf("[%s/%s] warning: failed to delete %s: %v", u.room, u.participant, segmentName, err)
+	} else {
+		log.Printf("[%s/%s] processed, uploaded and deleted: %s (media only, %d bytes)", u.room, u.participant, segmentName, len(mediaData))
 	}
 }
 
@@ -316,6 +447,10 @@ func (u *RealtimeS3Uploader) uploadFile(localPath, fileName string) error {
 		contentType = "application/vnd.apple.mpegurl"
 	} else if strings.HasSuffix(fileName, ".ts") {
 		contentType = "video/MP2T"
+	} else if strings.HasSuffix(fileName, ".m4s") || strings.HasSuffix(fileName, ".mp4") {
+		contentType = "video/mp4" // fMP4/CMAF segments
+	} else if fileName == "audio.json" {
+		contentType = "application/json"
 	}
 
 	// Upload with timeout
@@ -403,7 +538,7 @@ func (u *RealtimeS3Uploader) Close() error {
 	u.cancel()
 	u.wg.Wait()
 
-	// Upload any remaining files (playlist.m3u8 and any missed segments)
+	// Upload any remaining files (video.m3u8, audio.json, and any missed segments)
 	// Note: output.ts is intentionally skipped as it's redundant
 	if err := u.finalUploadSweep(); err != nil {
 		log.Printf("[%s/%s] final sweep error: %v", u.room, u.participant, err)
@@ -416,10 +551,20 @@ func (u *RealtimeS3Uploader) Close() error {
 	return nil
 }
 
-// finalUploadSweep uploads all HLS files to S3 and deletes them from local storage.
+// finalUploadSweep uploads all HLS and audio files to S3 and deletes them from local storage.
 // This is called after recording completes to minimize local storage costs.
-// Note: output.ts is NOT uploaded as it's redundant (HLS segments contain all data).
+// Uploads: video.m3u8, video*.ts, audio.json, audio.m3u8, audio_init.mp4, audio*.m4s
+//
+// For audio segments, this function also processes them to create proper CMAF format:
+// - Extracts init segment from first audio segment as audio_init.mp4
+// - Strips init data from all audio segments
 func (u *RealtimeS3Uploader) finalUploadSweep() error {
+	// First, process all audio segments to extract init and strip duplicate moov data
+	if err := u.processAudioSegmentsForUpload(); err != nil {
+		log.Printf("[%s/%s] warning: audio segment processing failed: %v", u.room, u.participant, err)
+		// Continue with upload even if processing fails
+	}
+
 	entries, err := filepath.Glob(filepath.Join(u.watchDir, "*"))
 	if err != nil {
 		return fmt.Errorf("glob directory: %w", err)
@@ -434,8 +579,15 @@ func (u *RealtimeS3Uploader) finalUploadSweep() error {
 			continue
 		}
 
-		// Only upload HLS files (playlist and segments)
-		if !strings.HasSuffix(fileName, ".ts") && !strings.HasSuffix(fileName, ".m3u8") {
+		// Skip .processed temp files
+		if strings.HasSuffix(fileName, ".processed") {
+			continue
+		}
+
+		// Upload HLS files (playlist and video segments) and audio files
+		isVideoFile := strings.HasSuffix(fileName, ".ts") || strings.HasSuffix(fileName, ".m3u8")
+		isAudioFile := strings.HasSuffix(fileName, ".m4s") || strings.HasSuffix(fileName, ".mp4") || fileName == "audio.json"
+		if !isVideoFile && !isAudioFile {
 			continue
 		}
 
@@ -452,6 +604,50 @@ func (u *RealtimeS3Uploader) finalUploadSweep() error {
 				log.Printf("[%s/%s] warning: failed to delete %s: %v", u.room, u.participant, fileName, err)
 			}
 		}
+	}
+
+	return nil
+}
+
+// processAudioSegmentsForUpload processes all audio segments to create proper CMAF format.
+// It extracts the init segment from the first audio segment and strips init data from all segments.
+func (u *RealtimeS3Uploader) processAudioSegmentsForUpload() error {
+	initPath := filepath.Join(u.watchDir, "audio_init.mp4")
+
+	// Process all audio segments
+	for i := 0; ; i++ {
+		segmentName := fmt.Sprintf("audio%05d.m4s", i)
+		segmentPath := filepath.Join(u.watchDir, segmentName)
+
+		// Check if segment exists
+		if _, err := os.Stat(segmentPath); os.IsNotExist(err) {
+			break // No more segments
+		}
+
+		log.Printf("[%s/%s] processing audio segment %s for final upload", u.room, u.participant, segmentName)
+
+		// Process the segment
+		mediaData, err := processAudioSegment(segmentPath, i, initPath)
+		if err != nil {
+			log.Printf("[%s/%s] failed to process %s: %v (uploading original)", u.room, u.participant, segmentName, err)
+			continue
+		}
+
+		// Ensure styp prefix for CMAF compliance
+		mediaData = ensureStypPrefix(mediaData)
+
+		// Overwrite the segment file with processed data
+		if err := os.WriteFile(segmentPath, mediaData, 0644); err != nil {
+			log.Printf("[%s/%s] failed to write processed %s: %v", u.room, u.participant, segmentName, err)
+			continue
+		}
+
+		log.Printf("[%s/%s] processed %s: %d bytes (media only)", u.room, u.participant, segmentName, len(mediaData))
+	}
+
+	// Check if init was created
+	if info, err := os.Stat(initPath); err == nil {
+		log.Printf("[%s/%s] created audio_init.mp4: %d bytes", u.room, u.participant, info.Size())
 	}
 
 	return nil
