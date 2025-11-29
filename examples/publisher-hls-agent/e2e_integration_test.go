@@ -47,7 +47,8 @@ type e2eScenario struct {
 	participant      string
 	outputDir        string
 	agentEnv         map[string]string
-	skipS3Validation bool // Skip built-in S3 validation in runE2EScenario (for custom validation)
+	skipS3Validation bool   // Skip built-in S3 validation in runE2EScenario (for custom validation)
+	e2eePassphrase   string // E2EE passphrase for encrypted tracks (empty = no encryption)
 }
 
 // e2eResult contains the output paths and identifiers from a completed end-to-end test.
@@ -101,12 +102,16 @@ func TestPublisherHLSAgentUploadsToS3(t *testing.T) {
 	// Use unique agent name to avoid conflicts with stale workers from previous test runs
 	uniqueAgentName := fmt.Sprintf("publisher-hls-s3-agent-%d", time.Now().UnixNano())
 
+	// E2EE passphrase for encrypted tracks (shared between publisher and agent)
+	e2eePassphrase := "test-e2ee-secret-123"
+
 	scenario := e2eScenario{
-		name:        "s3-upload",
-		agentName:   uniqueAgentName,
-		roomName:    "publisher-hls-s3-room",
-		participant: "publisher-hls-s3-participant",
-		outputDir:   "",
+		name:           "s3-upload",
+		agentName:      uniqueAgentName,
+		roomName:       "publisher-hls-s3-room",
+		participant:    "publisher-hls-s3-participant",
+		outputDir:      "",
+		e2eePassphrase: e2eePassphrase, // Enable E2EE encryption
 		agentEnv: map[string]string{
 			// Note: KEEP_OPUS is no longer needed - pipeline always uses separate A/V outputs
 			"S3_ENDPOINT":             ms.Endpoint,
@@ -119,6 +124,7 @@ func TestPublisherHLSAgentUploadsToS3(t *testing.T) {
 			"S3_PREFIX":               "publisher-tests",
 			"S3_OBJECT_ACL":           "public-read",
 			"AUTO_ACTIVATE_RECORDING": "true",
+			"E2EE_PASSPHRASE":         e2eePassphrase, // Agent decryption passphrase
 		},
 	}
 
@@ -809,15 +815,30 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	videoTrack.OnBind(func() { close(videoReady) })
 	audioTrack.OnBind(func() { close(audioReady) })
 
+	// Derive E2EE key if passphrase is set
+	var e2eeKey []byte
+	var encryptionType livekit.Encryption_Type
+	if scenario.e2eePassphrase != "" {
+		var err error
+		e2eeKey, err = lksdk.DeriveKeyFromString(scenario.e2eePassphrase)
+		if err != nil {
+			t.Fatalf("failed to derive E2EE key: %v", err)
+		}
+		encryptionType = livekit.Encryption_GCM
+		t.Logf("E2EE enabled with passphrase, derived %d-byte key", len(e2eeKey))
+	}
+
 	if _, err := participantRoom.LocalParticipant.PublishTrack(videoTrack, &lksdk.TrackPublicationOptions{
-		Name:   "publisher-e2e-video",
-		Source: livekit.TrackSource_CAMERA,
+		Name:       "publisher-e2e-video",
+		Source:     livekit.TrackSource_CAMERA,
+		Encryption: encryptionType,
 	}); err != nil {
 		t.Fatalf("failed to publish video track: %v", err)
 	}
 
 	if _, err := participantRoom.LocalParticipant.PublishTrack(audioTrack, &lksdk.TrackPublicationOptions{
-		Name: "publisher-e2e-audio",
+		Name:       "publisher-e2e-audio",
+		Encryption: encryptionType,
 	}); err != nil {
 		t.Fatalf("failed to publish audio track: %v", err)
 	}
@@ -837,6 +858,13 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	publisher, err := NewGStreamerPublisher(testVideo, videoTrack, audioTrack)
 	if err != nil {
 		t.Fatalf("failed to create GStreamer publisher: %v", err)
+	}
+
+	// Set E2EE key on publisher if encryption is enabled
+	if e2eeKey != nil {
+		if err := publisher.SetE2EEKey(e2eeKey); err != nil {
+			t.Fatalf("failed to set E2EE key on publisher: %v", err)
+		}
 	}
 
 	if err := publisher.Start(); err != nil {
@@ -1438,6 +1466,13 @@ func validateS3Recording(t *testing.T, client *minio.Client, bucket, prefix, ref
 		t.Logf("validating web player timing (manifest vs tfdt)...")
 		if err := validateWebPlayerTiming(t, client, bucket, prefix, referenceVideo, 0.7); err != nil {
 			return fmt.Errorf("web player timing validation failed: %w", err)
+		}
+
+		// Validate video is valid H264 and playable
+		// This catches issues like encrypted SPS/PPS causing garbage codec info
+		t.Logf("validating video H264 playback...")
+		if err := validateVideoH264Playback(t, client, bucket, prefix, referenceVideo); err != nil {
+			return fmt.Errorf("video H264 playback validation failed: %w", err)
 		}
 	}
 
@@ -2450,4 +2485,280 @@ func findAudioOnset(samples []float32, threshold float64, windowSize int) int {
 		}
 	}
 	return 0
+}
+
+// validateVideoH264Playback validates that the recorded video is a valid, playable H264 file.
+// It downloads video segments from S3, combines them, and uses ffprobe/ffmpeg to verify:
+//   - The video stream codec is valid H264/AVC
+//   - The codec profile is valid (not garbage from encrypted SPS/PPS)
+//   - Resolution is reasonable (matches source or within expected bounds)
+//   - Frame count and duration are reasonable
+//   - The video can actually be decoded (playable)
+//
+// Parameters:
+//   - t: Testing object for logging
+//   - client: MinIO client for S3 access
+//   - bucket: S3 bucket name
+//   - prefix: S3 prefix for the recording (e.g., "publisher-tests/room/participant")
+//   - sourceMP4: Path to the original source MP4 file for comparison
+//
+// Returns nil on success, error if validation fails.
+func validateVideoH264Playback(t *testing.T, client *minio.Client, bucket, prefix, sourceMP4 string) error {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+
+	t.Logf("validating video H264 playback from S3 (bucket=%s, prefix=%s)", bucket, prefix)
+
+	// Step 1: Get source video properties for comparison
+	sourceInfo, err := ffprobeVideoInfo(sourceMP4)
+	if err != nil {
+		return fmt.Errorf("probe source video: %w", err)
+	}
+	t.Logf("source video: codec=%s, profile=%s, resolution=%dx%d, fps=%.2f, duration=%.2fs",
+		sourceInfo.codec, sourceInfo.profile, sourceInfo.width, sourceInfo.height,
+		sourceInfo.frameRate, sourceInfo.duration)
+
+	// Step 2: Download video segments from S3
+	var segmentPaths []string
+	for i := 0; ; i++ {
+		segmentName := fmt.Sprintf("video%05d.ts", i)
+		segmentKey := path.Join(prefix, segmentName)
+		segmentPath := filepath.Join(tempDir, segmentName)
+
+		err := client.FGetObject(ctx, bucket, segmentKey, segmentPath, minio.GetObjectOptions{})
+		if err != nil {
+			// No more segments
+			break
+		}
+		segmentPaths = append(segmentPaths, segmentPath)
+	}
+
+	if len(segmentPaths) == 0 {
+		return fmt.Errorf("no video segments found in S3")
+	}
+	t.Logf("downloaded %d video segments", len(segmentPaths))
+
+	// Step 3: Create concat file for ffmpeg
+	concatListPath := filepath.Join(tempDir, "concat.txt")
+	concatFile, err := os.Create(concatListPath)
+	if err != nil {
+		return fmt.Errorf("create concat list: %w", err)
+	}
+	for _, segPath := range segmentPaths {
+		fmt.Fprintf(concatFile, "file '%s'\n", segPath)
+	}
+	concatFile.Close()
+
+	// Step 4: Concatenate segments into a single TS file
+	combinedTSPath := filepath.Join(tempDir, "combined.ts")
+	concatCmd := exec.Command("ffmpeg", "-y",
+		"-f", "concat", "-safe", "0",
+		"-i", concatListPath,
+		"-c", "copy",
+		combinedTSPath,
+	)
+	concatOut, err := concatCmd.CombinedOutput()
+	if err != nil {
+		t.Logf("FFmpeg concat output: %s", string(concatOut))
+		return fmt.Errorf("concatenate video segments: %w", err)
+	}
+	t.Logf("concatenated %d segments into combined.ts", len(segmentPaths))
+
+	// Step 5: Probe the combined video file
+	recordedInfo, err := ffprobeVideoInfo(combinedTSPath)
+	if err != nil {
+		return fmt.Errorf("probe recorded video: %w", err)
+	}
+	t.Logf("recorded video: codec=%s, profile=%s, resolution=%dx%d, fps=%.2f, duration=%.2fs",
+		recordedInfo.codec, recordedInfo.profile, recordedInfo.width, recordedInfo.height,
+		recordedInfo.frameRate, recordedInfo.duration)
+
+	// Step 6: Validate codec is H264
+	if recordedInfo.codec != "h264" {
+		return fmt.Errorf("recorded video codec is %q, expected h264", recordedInfo.codec)
+	}
+	t.Logf("✓ video codec is h264")
+
+	// Step 7: Validate profile is valid (not garbage from encrypted SPS)
+	validProfiles := map[string]bool{
+		"Constrained Baseline":  true,
+		"Baseline":              true,
+		"Main":                  true,
+		"High":                  true,
+		"High 10":               true,
+		"High 4:2:2":            true,
+		"High 4:4:4":            true,
+		"High 4:4:4 Predictive": true,
+	}
+	if !validProfiles[recordedInfo.profile] && recordedInfo.profile != "" {
+		// Check if profile looks like garbage (e.g., contains non-printable chars or unusual values)
+		for _, c := range recordedInfo.profile {
+			if c < 32 || c > 126 {
+				return fmt.Errorf("recorded video has invalid/garbage profile: %q (likely encrypted SPS)", recordedInfo.profile)
+			}
+		}
+		// Unknown but not garbage - log warning but continue
+		t.Logf("⚠ unknown H264 profile %q (not in common profiles list)", recordedInfo.profile)
+	} else {
+		t.Logf("✓ video profile is valid: %s", recordedInfo.profile)
+	}
+
+	// Step 8: Validate resolution is reasonable
+	if recordedInfo.width < 16 || recordedInfo.height < 16 {
+		return fmt.Errorf("recorded video has invalid resolution: %dx%d (too small, likely encrypted SPS)",
+			recordedInfo.width, recordedInfo.height)
+	}
+	if recordedInfo.width > 7680 || recordedInfo.height > 4320 {
+		return fmt.Errorf("recorded video has invalid resolution: %dx%d (too large)",
+			recordedInfo.width, recordedInfo.height)
+	}
+	// Check if resolution matches source (allowing for some variance due to encoding)
+	widthDiff := math.Abs(float64(recordedInfo.width - sourceInfo.width))
+	heightDiff := math.Abs(float64(recordedInfo.height - sourceInfo.height))
+	if widthDiff > 16 || heightDiff > 16 {
+		t.Logf("⚠ resolution mismatch: source=%dx%d, recorded=%dx%d",
+			sourceInfo.width, sourceInfo.height, recordedInfo.width, recordedInfo.height)
+	} else {
+		t.Logf("✓ video resolution matches source: %dx%d", recordedInfo.width, recordedInfo.height)
+	}
+
+	// Step 9: Validate duration is reasonable (within 10% of source or at least 50% for partial recordings)
+	if recordedInfo.duration < 1.0 {
+		return fmt.Errorf("recorded video too short: %.2fs", recordedInfo.duration)
+	}
+	durationRatio := recordedInfo.duration / sourceInfo.duration
+	if durationRatio < 0.5 {
+		t.Logf("⚠ recorded video shorter than expected: %.2fs vs source %.2fs (ratio=%.2f)",
+			recordedInfo.duration, sourceInfo.duration, durationRatio)
+	} else {
+		t.Logf("✓ video duration reasonable: %.2fs (source: %.2fs, ratio: %.2f)",
+			recordedInfo.duration, sourceInfo.duration, durationRatio)
+	}
+
+	// Step 10: Verify video is actually playable by decoding some frames
+	t.Logf("verifying video is decodable (extracting frames)...")
+	framesDir := filepath.Join(tempDir, "frames")
+	if err := os.MkdirAll(framesDir, 0755); err != nil {
+		return fmt.Errorf("create frames dir: %w", err)
+	}
+
+	// Extract 5 frames from different parts of the video
+	decodeCmd := exec.Command("ffmpeg", "-y",
+		"-i", combinedTSPath,
+		"-vf", "select='eq(n,0)+eq(n,30)+eq(n,60)+eq(n,90)+eq(n,120)'", // frames 0, 30, 60, 90, 120
+		"-vsync", "vfr",
+		"-frames:v", "5",
+		filepath.Join(framesDir, "frame_%03d.png"),
+	)
+	decodeOut, err := decodeCmd.CombinedOutput()
+	if err != nil {
+		t.Logf("FFmpeg decode output: %s", string(decodeOut))
+		return fmt.Errorf("failed to decode video frames: %w (video may be corrupted or encrypted)", err)
+	}
+
+	// Count extracted frames
+	frames, err := filepath.Glob(filepath.Join(framesDir, "frame_*.png"))
+	if err != nil {
+		return fmt.Errorf("list extracted frames: %w", err)
+	}
+	if len(frames) == 0 {
+		return fmt.Errorf("no frames extracted - video is not playable")
+	}
+
+	// Verify frames are not empty/black (check file size)
+	for _, framePath := range frames {
+		info, err := os.Stat(framePath)
+		if err != nil {
+			return fmt.Errorf("stat frame %s: %w", framePath, err)
+		}
+		if info.Size() < 1000 {
+			t.Logf("⚠ frame %s is suspiciously small (%d bytes)", filepath.Base(framePath), info.Size())
+		}
+	}
+	t.Logf("✓ successfully decoded %d frames from video", len(frames))
+
+	// Step 11: Additional validation - check for valid frame rate
+	if recordedInfo.frameRate < 1.0 || recordedInfo.frameRate > 120.0 {
+		return fmt.Errorf("recorded video has invalid frame rate: %.2f fps", recordedInfo.frameRate)
+	}
+	t.Logf("✓ video frame rate is valid: %.2f fps", recordedInfo.frameRate)
+
+	t.Logf("VIDEO H264 PLAYBACK VALIDATION PASSED")
+	return nil
+}
+
+// videoInfo contains parsed video stream information from ffprobe.
+type videoInfo struct {
+	codec     string  // e.g., "h264"
+	profile   string  // e.g., "High", "Main", "Baseline"
+	width     int     // video width in pixels
+	height    int     // video height in pixels
+	frameRate float64 // frames per second
+	duration  float64 // duration in seconds
+}
+
+// ffprobeVideoInfo uses ffprobe to extract video stream information from a file.
+func ffprobeVideoInfo(filePath string) (*videoInfo, error) {
+	// Get video stream info as JSON
+	cmd := exec.Command("ffprobe",
+		"-v", "error",
+		"-select_streams", "v:0",
+		"-show_entries", "stream=codec_name,profile,width,height,r_frame_rate,duration",
+		"-show_entries", "format=duration",
+		"-of", "json",
+		filePath,
+	)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ffprobe failed: %w", err)
+	}
+
+	// Parse JSON response
+	var result struct {
+		Streams []struct {
+			CodecName  string `json:"codec_name"`
+			Profile    string `json:"profile"`
+			Width      int    `json:"width"`
+			Height     int    `json:"height"`
+			RFrameRate string `json:"r_frame_rate"`
+			Duration   string `json:"duration"`
+		} `json:"streams"`
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
+	}
+
+	if err := json.Unmarshal(output, &result); err != nil {
+		return nil, fmt.Errorf("parse ffprobe output: %w", err)
+	}
+
+	if len(result.Streams) == 0 {
+		return nil, fmt.Errorf("no video streams found")
+	}
+
+	stream := result.Streams[0]
+	info := &videoInfo{
+		codec:   stream.CodecName,
+		profile: stream.Profile,
+		width:   stream.Width,
+		height:  stream.Height,
+	}
+
+	// Parse frame rate (e.g., "30/1" or "30000/1001")
+	if parts := strings.Split(stream.RFrameRate, "/"); len(parts) == 2 {
+		num, _ := strconv.ParseFloat(parts[0], 64)
+		den, _ := strconv.ParseFloat(parts[1], 64)
+		if den > 0 {
+			info.frameRate = num / den
+		}
+	}
+
+	// Parse duration (prefer stream duration, fall back to format duration)
+	if stream.Duration != "" {
+		info.duration, _ = strconv.ParseFloat(stream.Duration, 64)
+	} else if result.Format.Duration != "" {
+		info.duration, _ = strconv.ParseFloat(result.Format.Duration, 64)
+	}
+
+	return info, nil
 }

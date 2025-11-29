@@ -94,7 +94,8 @@ type ParticipantRecorder struct {
 
 	s3Uploader *RealtimeS3Uploader // Real-time S3 uploader (nil if disabled)
 
-	e2eeCtx *E2EEContext // E2EE decryption context (nil if disabled)
+	e2eeCtx          *E2EEContext               // E2EE decryption context (nil if disabled)
+	h264Depacketizer *EncryptedH264Depacketizer // H264 frame assembler for E2EE (nil if disabled)
 }
 
 // Pre-buffer configuration for video and audio packets.
@@ -401,7 +402,9 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	}
 
 	// Connect to splitmuxsink signals for audio manifest tracking
-	audioSplitMux.Connect("format-location-full", func(self *gst.Element, fragmentID uint, firstSample *gst.Sample, fileName string) string {
+	// Note: format-location-full signal has 3 parameters (element, fragment_id, first_sample)
+	// and returns the filename - we don't receive the filename as a parameter
+	audioSplitMux.Connect("format-location-full", func(self *gst.Element, fragmentID uint, firstSample *gst.Sample) string {
 		segmentFile := fmt.Sprintf("audio%05d.m4s", fragmentID)
 		segmentStartTime := float64(fragmentID) * float64(segmentDuration)
 
@@ -459,6 +462,12 @@ func (r *ParticipantRecorder) SetE2EEContext(ctx *E2EEContext) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.e2eeCtx = ctx
+	// Create H264 depacketizer for frame-level video decryption
+	// Video E2EE requires frame-level decryption because H264 NAL units
+	// are split across multiple RTP packets (FU-A fragmentation)
+	if ctx != nil && ctx.Enabled() {
+		r.h264Depacketizer = NewEncryptedH264Depacketizer(ctx)
+	}
 }
 
 // E2EEEnabled returns true if E2EE decryption is enabled for this recorder.
@@ -1373,29 +1382,35 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 					return
 				}
 
-				// Decrypt E2EE-encrypted payload if E2EE is enabled
-				if r.E2EEEnabled() && len(rtpPacket.Payload) > 0 {
-					r.mu.Lock()
-					e2eeCtx := r.e2eeCtx
-					r.mu.Unlock()
-
-					decrypted, err := e2eeCtx.DecryptVideo(rtpPacket.Payload)
-					if err != nil {
-						// Decryption failed - log and skip packet
-						log.Printf("[%s] video E2EE decryption error (seq=%d): %v", r.logPrefix(), rtpPacket.SequenceNumber, err)
-						continue
-					}
-					if decrypted == nil {
-						// Server Injected Frame - drop it
-						continue
-					}
-					rtpPacket.Payload = decrypted
-				}
-
+				// Request initial keyframe on first packet (before any processing)
 				if firstPacket {
 					firstPacket = false
 					log.Printf("[%s] requesting initial keyframe via PLI (seq=%d)", r.logPrefix(), rtpPacket.SequenceNumber)
 					r.requestPLI(pliWriter, track.SSRC())
+				}
+
+				// For E2EE video: use frame-level decryption
+				// H264 NAL units are split across multiple RTP packets (FU-A fragmentation),
+				// so we must reassemble complete NAL units before decryption.
+				e2eeEnabled := r.E2EEEnabled()
+				if e2eeEnabled && len(rtpPacket.Payload) > 0 {
+					r.mu.Lock()
+					depacketizer := r.h264Depacketizer
+					r.mu.Unlock()
+
+					if depacketizer != nil {
+						decryptedNALU, err := depacketizer.ProcessRTP(rtpPacket)
+						if err != nil {
+							// Decryption failed - skip
+							continue
+						}
+						if decryptedNALU == nil {
+							// Still accumulating fragments or SIF frame - continue to next packet
+							continue
+						}
+						// Replace payload with decrypted NAL unit
+						rtpPacket.Payload = decryptedNALU
+					}
 				}
 			}
 
