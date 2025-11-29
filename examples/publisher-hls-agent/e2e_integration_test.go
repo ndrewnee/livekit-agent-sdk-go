@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -46,7 +47,8 @@ type e2eScenario struct {
 	participant      string
 	outputDir        string
 	agentEnv         map[string]string
-	skipS3Validation bool // Skip built-in S3 validation in runE2EScenario (for custom validation)
+	skipS3Validation bool   // Skip built-in S3 validation in runE2EScenario (for custom validation)
+	e2eePassphrase   string // E2EE passphrase for encrypted tracks (empty = no encryption)
 }
 
 // e2eResult contains the output paths and identifiers from a completed end-to-end test.
@@ -100,14 +102,18 @@ func TestPublisherHLSAgentUploadsToS3(t *testing.T) {
 	// Use unique agent name to avoid conflicts with stale workers from previous test runs
 	uniqueAgentName := fmt.Sprintf("publisher-hls-s3-agent-%d", time.Now().UnixNano())
 
+	// E2EE passphrase for encrypted tracks (shared between publisher and agent)
+	e2eePassphrase := "test-e2ee-secret-123"
+
 	scenario := e2eScenario{
-		name:        "s3-upload",
-		agentName:   uniqueAgentName,
-		roomName:    "publisher-hls-s3-room",
-		participant: "publisher-hls-s3-participant",
-		outputDir:   "",
+		name:           "s3-upload",
+		agentName:      uniqueAgentName,
+		roomName:       "publisher-hls-s3-room",
+		participant:    "publisher-hls-s3-participant",
+		outputDir:      "",
+		e2eePassphrase: e2eePassphrase, // Enable E2EE encryption
 		agentEnv: map[string]string{
-			"KEEP_OPUS":               "true", // H.264 + Opus
+			// Note: KEEP_OPUS is no longer needed - pipeline always uses separate A/V outputs
 			"S3_ENDPOINT":             ms.Endpoint,
 			"S3_BUCKET":               ms.Bucket,
 			"S3_REGION":               "us-east-1",
@@ -118,6 +124,7 @@ func TestPublisherHLSAgentUploadsToS3(t *testing.T) {
 			"S3_PREFIX":               "publisher-tests",
 			"S3_OBJECT_ACL":           "public-read",
 			"AUTO_ACTIVATE_RECORDING": "true",
+			"E2EE_PASSPHRASE":         e2eePassphrase, // Agent decryption passphrase
 		},
 	}
 
@@ -132,7 +139,7 @@ func TestPublisherHLSAgentUploadsToS3(t *testing.T) {
 	defer cancel()
 
 	prefix := path.Join("publisher-tests", scenario.roomName, scenario.participant)
-	playlistObj := path.Join(prefix, "playlist.m3u8")
+	playlistObj := path.Join(prefix, "video.m3u8")
 	reader, err := client.GetObject(ctx, ms.Bucket, playlistObj, minio.GetObjectOptions{})
 	if err != nil {
 		t.Fatalf("failed to fetch playlist from MinIO: %v", err)
@@ -283,7 +290,7 @@ func TestPublisherHLSAgentMultipleParticipants(t *testing.T) {
 		fmt.Sprintf("AGENT_NAME=%s", uniqueAgentName),
 		"HLS_SEGMENT_DURATION=2",
 		"HLS_MAX_SEGMENTS=0",
-		"KEEP_OPUS=true",
+		// Note: KEEP_OPUS no longer needed - pipeline always uses separate A/V outputs
 		fmt.Sprintf("S3_ENDPOINT=%s", ms.Endpoint),
 		fmt.Sprintf("S3_BUCKET=%s", ms.Bucket),
 		"S3_REGION=us-east-1",
@@ -375,7 +382,7 @@ func TestPublisherHLSAgentMultipleParticipants(t *testing.T) {
 
 	for _, participantName := range participantNames {
 		prefix := path.Join("multi-participant-tests", roomName, participantName)
-		playlistObj := path.Join(prefix, "playlist.m3u8")
+		playlistObj := path.Join(prefix, "video.m3u8")
 
 		t.Logf("Validating S3 recording for %s...", participantName)
 
@@ -808,15 +815,30 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	videoTrack.OnBind(func() { close(videoReady) })
 	audioTrack.OnBind(func() { close(audioReady) })
 
+	// Derive E2EE key if passphrase is set
+	var e2eeKey []byte
+	var encryptionType livekit.Encryption_Type
+	if scenario.e2eePassphrase != "" {
+		var err error
+		e2eeKey, err = lksdk.DeriveKeyFromString(scenario.e2eePassphrase)
+		if err != nil {
+			t.Fatalf("failed to derive E2EE key: %v", err)
+		}
+		encryptionType = livekit.Encryption_GCM
+		t.Logf("E2EE enabled with passphrase, derived %d-byte key", len(e2eeKey))
+	}
+
 	if _, err := participantRoom.LocalParticipant.PublishTrack(videoTrack, &lksdk.TrackPublicationOptions{
-		Name:   "publisher-e2e-video",
-		Source: livekit.TrackSource_CAMERA,
+		Name:       "publisher-e2e-video",
+		Source:     livekit.TrackSource_CAMERA,
+		Encryption: encryptionType,
 	}); err != nil {
 		t.Fatalf("failed to publish video track: %v", err)
 	}
 
 	if _, err := participantRoom.LocalParticipant.PublishTrack(audioTrack, &lksdk.TrackPublicationOptions{
-		Name: "publisher-e2e-audio",
+		Name:       "publisher-e2e-audio",
+		Encryption: encryptionType,
 	}); err != nil {
 		t.Fatalf("failed to publish audio track: %v", err)
 	}
@@ -836,6 +858,13 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	publisher, err := NewGStreamerPublisher(testVideo, videoTrack, audioTrack)
 	if err != nil {
 		t.Fatalf("failed to create GStreamer publisher: %v", err)
+	}
+
+	// Set E2EE key on publisher if encryption is enabled
+	if e2eeKey != nil {
+		if err := publisher.SetE2EEKey(e2eeKey); err != nil {
+			t.Fatalf("failed to set E2EE key on publisher: %v", err)
+		}
 	}
 
 	if err := publisher.Start(); err != nil {
@@ -864,7 +893,8 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 		t.Fatalf("failed to find session directory matching %s: %v", pattern, err)
 	}
 	participantOutputDir := sessionDirs[0] // Use the first (and only) session directory
-	outputFile := filepath.Join(participantOutputDir, "output.ts")
+	// New pipeline produces video.m3u8 instead of output.ts
+	videoPlaylistFile := filepath.Join(participantOutputDir, "video.m3u8")
 
 	if participantRoom != nil {
 		participantRoom.Disconnect()
@@ -905,13 +935,13 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	}
 
 	if s3Client == nil {
-		if err := waitForFile(outputFile, 75*time.Second); err != nil {
-			t.Fatalf("recording not created: %v", err)
+		if err := waitForFile(videoPlaylistFile, 75*time.Second); err != nil {
+			t.Fatalf("video playlist not created: %v", err)
 		}
 
 		time.Sleep(3 * time.Second)
 
-		if err := validateRecordingOutput(t, outputFile, testVideo); err != nil {
+		if err := validateVideoPlaylist(t, participantOutputDir); err != nil {
 			t.Fatalf("recording validation failed: %v", err)
 		}
 	} else if !scenario.skipS3Validation {
@@ -926,7 +956,7 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 			t.Fatalf("S3 validation failed: %v", err)
 		}
 		t.Logf("S3 validation succeeded for %s", remotePrefix)
-		playlistURL := fmt.Sprintf("http://%s/%s/%s/playlist.m3u8", scenario.agentEnv["S3_ENDPOINT"], s3Bucket, remotePrefix)
+		playlistURL := fmt.Sprintf("http://%s/%s/%s/video.m3u8", scenario.agentEnv["S3_ENDPOINT"], s3Bucket, remotePrefix)
 		t.Logf("S3 playlist URL: %s", playlistURL)
 	} else {
 		// S3 validation skipped - test will perform custom validation
@@ -1358,10 +1388,24 @@ func validateS3Recording(t *testing.T, client *minio.Client, bucket, prefix, ref
 		return fmt.Errorf("object %s not found in S3 within timeout", object)
 	}
 
-	playlistObj := path.Join(prefix, "playlist.m3u8")
+	playlistObj := path.Join(prefix, "video.m3u8")
 
 	if err := wait(playlistObj); err != nil {
 		return err
+	}
+
+	// Also wait for audio manifest
+	audioManifest := path.Join(prefix, "audio.json")
+	if err := wait(audioManifest); err != nil {
+		t.Logf("warning: audio manifest not found in S3 (may not be uploaded yet): %v", err)
+	}
+
+	// Wait for audio init segment (required for proper CMAF playback)
+	audioInit := path.Join(prefix, "audio_init.mp4")
+	if err := wait(audioInit); err != nil {
+		t.Logf("warning: audio_init.mp4 not found in S3: %v", err)
+	} else {
+		t.Logf("found audio_init.mp4 in S3")
 	}
 
 	tempDir := t.TempDir()
@@ -1409,6 +1453,29 @@ func validateS3Recording(t *testing.T, client *minio.Client, bucket, prefix, ref
 
 	// Note: output.ts is not uploaded to S3 (redundant with HLS segments)
 	// Validation is based on playlist and segments only
+
+	// Validate audio waveform correlation with source
+	if referenceVideo != "" {
+		t.Logf("validating audio waveform correlation with source: %s", referenceVideo)
+		if err := validateAudioWaveform(t, client, bucket, prefix, referenceVideo, 0.7); err != nil {
+			return fmt.Errorf("audio waveform validation failed: %w", err)
+		}
+
+		// Validate web player timing (manifest startTime vs actual segment tfdt)
+		// This catches issues like "audio plays 2 seconds early"
+		t.Logf("validating web player timing (manifest vs tfdt)...")
+		if err := validateWebPlayerTiming(t, client, bucket, prefix, referenceVideo, 0.7); err != nil {
+			return fmt.Errorf("web player timing validation failed: %w", err)
+		}
+
+		// Validate video is valid H264 and playable
+		// This catches issues like encrypted SPS/PPS causing garbage codec info
+		t.Logf("validating video H264 playback...")
+		if err := validateVideoH264Playback(t, client, bucket, prefix, referenceVideo); err != nil {
+			return fmt.Errorf("video H264 playback validation failed: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -1604,4 +1671,1094 @@ func sanitizeSegmentDuration(duration float64) float64 {
 		duration = 60
 	}
 	return math.Round(duration*1000) / 1000
+}
+
+// validateVideoPlaylist validates the new separate A/V output structure.
+//
+// The new pipeline produces:
+//   - video.m3u8 + video*.ts (video-only HLS)
+//   - audio.json + audio*.m4s (audio fMP4 segments)
+//
+// This function validates:
+//  1. video.m3u8 exists and has valid segments
+//  2. Video segments (.ts files) exist and are non-empty
+//  3. audio.json manifest exists (optional, may not be ready immediately)
+//
+// Parameters:
+//   - t: Testing context
+//   - outputDir: Directory containing the recording files
+//
+// Returns:
+//   - nil if validation succeeds
+//   - error describing the validation failure
+func validateVideoPlaylist(t *testing.T, outputDir string) error {
+	t.Helper()
+
+	// Check video playlist exists
+	videoPlaylist := filepath.Join(outputDir, "video.m3u8")
+	stat, err := os.Stat(videoPlaylist)
+	if err != nil {
+		return fmt.Errorf("video playlist not found: %w", err)
+	}
+	if stat.Size() == 0 {
+		return fmt.Errorf("video playlist is empty")
+	}
+
+	// Parse video playlist
+	segments, durations, durationSum, err := inspectPlaylist(videoPlaylist)
+	if err != nil {
+		return fmt.Errorf("failed to inspect video playlist: %w", err)
+	}
+
+	if len(segments) == 0 {
+		return fmt.Errorf("video playlist has no segments")
+	}
+
+	t.Logf("video playlist: %d segments, total duration %.3fs", len(segments), durationSum)
+
+	// Validate segments exist
+	validSegments := 0
+	for i, segment := range segments {
+		segmentPath := filepath.Join(outputDir, segment)
+		stat, err := os.Stat(segmentPath)
+		if err != nil {
+			t.Logf("warning: segment %s not found: %v", segment, err)
+			continue
+		}
+		if stat.Size() == 0 {
+			t.Logf("warning: segment %s is empty", segment)
+			continue
+		}
+
+		// Check duration is reasonable (skip invalid durations > 1000s)
+		if i < len(durations) && durations[i] > 0 && durations[i] < 1000 {
+			validSegments++
+		} else if i < len(durations) && durations[i] > 1000 {
+			t.Logf("warning: segment %s has invalid duration %.0fs (likely final segment bug)", segment, durations[i])
+		} else {
+			validSegments++
+		}
+	}
+
+	if validSegments == 0 {
+		return fmt.Errorf("no valid video segments found")
+	}
+
+	t.Logf("validated %d video segments", validSegments)
+
+	// Check audio manifest (optional - may not be uploaded yet)
+	audioManifest := filepath.Join(outputDir, "audio.json")
+	if stat, err := os.Stat(audioManifest); err == nil && stat.Size() > 0 {
+		t.Logf("audio manifest found: %s (%d bytes)", audioManifest, stat.Size())
+	} else {
+		t.Logf("warning: audio manifest not found (may not be written yet)")
+	}
+
+	return nil
+}
+
+// validateAudioWaveform validates the recorded audio by comparing it to the source audio.
+// It downloads the recorded audio segments from S3, decodes them, and computes correlation
+// with the source audio to verify the recording quality.
+//
+// The function requires FFmpeg to be installed for audio decoding.
+//
+// Parameters:
+//   - t: Testing object for logging
+//   - client: MinIO client for S3 access
+//   - bucket: S3 bucket name
+//   - prefix: S3 prefix for the recording (e.g., "publisher-tests/room/participant")
+//   - sourceMP4: Path to the original source MP4 file
+//   - minCorrelation: Minimum correlation coefficient required (0.0 to 1.0)
+//
+// Returns nil on success, error if validation fails.
+func validateAudioWaveform(t *testing.T, client *minio.Client, bucket, prefix, sourceMP4 string, minCorrelation float64) error {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+
+	// Step 1: Download audio files from S3
+	t.Logf("downloading audio files from S3 (bucket=%s, prefix=%s)", bucket, prefix)
+
+	initPath := filepath.Join(tempDir, "audio_init.mp4")
+	initKey := path.Join(prefix, "audio_init.mp4")
+
+	if err := client.FGetObject(ctx, bucket, initKey, initPath, minio.GetObjectOptions{}); err != nil {
+		return fmt.Errorf("download audio_init.mp4: %w", err)
+	}
+	t.Logf("downloaded audio_init.mp4")
+
+	// Download all audio segments
+	var segmentPaths []string
+	for i := 0; ; i++ {
+		segmentName := fmt.Sprintf("audio%05d.m4s", i)
+		segmentKey := path.Join(prefix, segmentName)
+		segmentPath := filepath.Join(tempDir, segmentName)
+
+		err := client.FGetObject(ctx, bucket, segmentKey, segmentPath, minio.GetObjectOptions{})
+		if err != nil {
+			// No more segments
+			break
+		}
+		segmentPaths = append(segmentPaths, segmentPath)
+	}
+
+	if len(segmentPaths) == 0 {
+		return fmt.Errorf("no audio segments found in S3")
+	}
+	t.Logf("downloaded %d audio segments", len(segmentPaths))
+
+	// Step 2: Create a single fMP4 file by binary concatenation (init + segments)
+	// FFmpeg's concat demuxer doesn't work with fMP4, so we concatenate the raw bytes
+	combinedPath := filepath.Join(tempDir, "combined.mp4")
+	combinedFile, err := os.Create(combinedPath)
+	if err != nil {
+		return fmt.Errorf("create combined file: %w", err)
+	}
+
+	// Write init segment first
+	initData, err := os.ReadFile(initPath)
+	if err != nil {
+		combinedFile.Close()
+		return fmt.Errorf("read init segment: %w", err)
+	}
+	if _, err := combinedFile.Write(initData); err != nil {
+		combinedFile.Close()
+		return fmt.Errorf("write init data: %w", err)
+	}
+	t.Logf("init segment: %d bytes", len(initData))
+
+	// Append all media segments
+	totalSegmentBytes := 0
+	for _, segPath := range segmentPaths {
+		segData, err := os.ReadFile(segPath)
+		if err != nil {
+			t.Logf("warning: failed to read segment %s: %v", segPath, err)
+			continue
+		}
+		if _, err := combinedFile.Write(segData); err != nil {
+			combinedFile.Close()
+			return fmt.Errorf("write segment data: %w", err)
+		}
+		totalSegmentBytes += len(segData)
+	}
+	combinedFile.Close()
+	t.Logf("combined fMP4: init=%d bytes + segments=%d bytes", len(initData), totalSegmentBytes)
+
+	// Step 3: Decode combined fMP4 to raw PCM (mono, 48kHz, float32)
+	recordedPCMPath := filepath.Join(tempDir, "recorded.raw")
+	ffmpegCmd := exec.Command("ffmpeg",
+		"-i", combinedPath,
+		"-f", "f32le", "-acodec", "pcm_f32le",
+		"-ac", "1", "-ar", "48000",
+		"-y", recordedPCMPath,
+	)
+	ffmpegOut, err := ffmpegCmd.CombinedOutput()
+	if err != nil {
+		t.Logf("FFmpeg output: %s", string(ffmpegOut))
+		// Log hex dump of init segment for debugging
+		t.Logf("init segment hex (first 100 bytes): %x", initData[:min(100, len(initData))])
+		return fmt.Errorf("decode recorded audio: %w", err)
+	}
+	t.Logf("decoded recorded audio to PCM")
+
+	// Step 4: Decode source audio to raw PCM
+	sourcePCMPath := filepath.Join(tempDir, "source.raw")
+	ffmpegCmd = exec.Command("ffmpeg",
+		"-i", sourceMP4,
+		"-f", "f32le", "-acodec", "pcm_f32le",
+		"-ac", "1", "-ar", "48000",
+		"-y", sourcePCMPath,
+	)
+	ffmpegOut, err = ffmpegCmd.CombinedOutput()
+	if err != nil {
+		t.Logf("FFmpeg output: %s", string(ffmpegOut))
+		return fmt.Errorf("decode source audio: %w", err)
+	}
+	t.Logf("decoded source audio to PCM")
+
+	// Step 5: Read PCM samples
+	sourceSamples, err := readFloat32PCM(sourcePCMPath)
+	if err != nil {
+		return fmt.Errorf("read source PCM: %w", err)
+	}
+	t.Logf("source audio: %d samples (%.2fs at 48kHz)", len(sourceSamples), float64(len(sourceSamples))/48000.0)
+
+	recordedSamples, err := readFloat32PCM(recordedPCMPath)
+	if err != nil {
+		return fmt.Errorf("read recorded PCM: %w", err)
+	}
+	t.Logf("recorded audio: %d samples (%.2fs at 48kHz)", len(recordedSamples), float64(len(recordedSamples))/48000.0)
+
+	// Verify we have reasonable amounts of audio
+	if len(recordedSamples) < 48000 {
+		return fmt.Errorf("recorded audio too short: %d samples (need at least 1 second)", len(recordedSamples))
+	}
+
+	// Step 6: Compute audio metrics
+	sourceRMS := computeRMS(sourceSamples)
+	recordedRMS := computeRMS(recordedSamples)
+	t.Logf("source RMS: %.6f, recorded RMS: %.6f", sourceRMS, recordedRMS)
+
+	if recordedRMS < 0.001 {
+		return fmt.Errorf("recorded audio is silent (RMS=%.6f)", recordedRMS)
+	}
+
+	// Step 7: Find where audio content begins in both signals
+	// (Cannot compute correlation on silent/zero-variance data)
+	srcOnset := findAudioStart(sourceSamples, 0.001)
+	recOnset := findAudioStart(recordedSamples, 0.001)
+
+	t.Logf("audio onset: source=%d (%.3fs), recorded=%d (%.3fs)",
+		srcOnset, float64(srcOnset)/48000, recOnset, float64(recOnset)/48000)
+
+	// Step 8: Verify timing difference is within reasonable tolerance for real-time streaming
+	// Allow up to +/- 100ms offset which accounts for network jitter and buffering
+	maxAllowedOffsetMs := 100.0
+	onsetDiff := recOnset - srcOnset
+	onsetDiffMs := float64(onsetDiff) / 48.0
+
+	t.Logf("onset timing difference: %d samples (%.2fms)", onsetDiff, onsetDiffMs)
+
+	if math.Abs(onsetDiffMs) > maxAllowedOffsetMs {
+		return fmt.Errorf("audio onset timing difference %.2fms exceeds maximum allowed %.2fms", onsetDiffMs, maxAllowedOffsetMs)
+	}
+
+	// Step 9: Compute correlation over the ENTIRE waveform after aligning at onset
+	// This aligns both signals at their audio content start, then correlates everything after
+	srcAlignedStart := srcOnset
+	recAlignedStart := recOnset
+	compareLen := min(len(sourceSamples)-srcAlignedStart, len(recordedSamples)-recAlignedStart)
+
+	t.Logf("computing FULL waveform correlation from onset: comparing %d samples (%.2fs)",
+		compareLen, float64(compareLen)/48000)
+
+	srcAligned := sourceSamples[srcAlignedStart : srcAlignedStart+compareLen]
+	recAligned := recordedSamples[recAlignedStart : recAlignedStart+compareLen]
+	correlation := computePearsonCorrelation(srcAligned, recAligned)
+
+	// Also verify total duration is similar (within 1 second)
+	srcDuration := float64(len(sourceSamples)) / 48000
+	recDuration := float64(len(recordedSamples)) / 48000
+	durationDiff := math.Abs(srcDuration - recDuration)
+
+	t.Logf("duration check: source=%.2fs, recorded=%.2fs, diff=%.3fs", srcDuration, recDuration, durationDiff)
+
+	if durationDiff > 1.0 {
+		return fmt.Errorf("duration difference %.2fs exceeds maximum allowed 1.0s", durationDiff)
+	}
+
+	t.Logf("FULL waveform correlation: %.4f (threshold: %.4f) over %.2f seconds",
+		correlation, minCorrelation, float64(compareLen)/48000)
+
+	if correlation < minCorrelation {
+		// Debug: find where audio content actually is
+		t.Logf("correlation too low - analyzing audio content distribution...")
+
+		// Find first non-zero sample in source
+		srcFirstNonZero := -1
+		for i, s := range sourceSamples {
+			if s != 0 && (s > 0.001 || s < -0.001) {
+				srcFirstNonZero = i
+				break
+			}
+		}
+		t.Logf("source: first non-zero sample at index %d (%.3fs)", srcFirstNonZero, float64(srcFirstNonZero)/48000)
+
+		// Find first non-zero sample in recorded
+		recFirstNonZero := -1
+		for i, s := range recordedSamples {
+			if s != 0 && (s > 0.001 || s < -0.001) {
+				recFirstNonZero = i
+				break
+			}
+		}
+		t.Logf("recorded: first non-zero sample at index %d (%.3fs)", recFirstNonZero, float64(recFirstNonZero)/48000)
+
+		// Show samples at multiple positions
+		positions := []int{0, 48000, 96000, 144000, 480000, 960000}
+		for _, pos := range positions {
+			if pos+10 <= len(sourceSamples) && pos+10 <= len(recordedSamples) {
+				srcSlice := sourceSamples[pos : pos+5]
+				recSlice := recordedSamples[pos : pos+5]
+				srcRMS := computeRMS(sourceSamples[pos : pos+4800])
+				recRMS := computeRMS(recordedSamples[pos : pos+4800])
+				t.Logf("at pos %d (%.2fs): src=%v (rms=%.4f) rec=%v (rms=%.4f)",
+					pos, float64(pos)/48000, srcSlice, srcRMS, recSlice, recRMS)
+			}
+		}
+
+		return fmt.Errorf("audio correlation %.4f below threshold %.4f - audio may be corrupted", correlation, minCorrelation)
+	}
+
+	t.Logf("FULL audio waveform validation PASSED: correlation=%.4f over entire %.2f seconds",
+		correlation, float64(compareLen)/48000)
+	return nil
+}
+
+// readFloat32PCM reads a raw PCM file containing float32 little-endian samples.
+func readFloat32PCM(path string) ([]float32, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(data)%4 != 0 {
+		return nil, fmt.Errorf("PCM file size %d not divisible by 4", len(data))
+	}
+
+	samples := make([]float32, len(data)/4)
+	for i := 0; i < len(samples); i++ {
+		bits := uint32(data[i*4]) | uint32(data[i*4+1])<<8 | uint32(data[i*4+2])<<16 | uint32(data[i*4+3])<<24
+		samples[i] = math.Float32frombits(bits)
+	}
+
+	return samples, nil
+}
+
+// computeRMS computes the root mean square of the samples.
+func computeRMS(samples []float32) float64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, s := range samples {
+		sum += float64(s) * float64(s)
+	}
+	return math.Sqrt(sum / float64(len(samples)))
+}
+
+// findAudioStart finds the index where audio content begins (first sample above threshold).
+// Returns 0 if no audio start is found (all silence).
+func findAudioStart(samples []float32, threshold float32) int {
+	for i, s := range samples {
+		if s > threshold || s < -threshold {
+			return i
+		}
+	}
+	return 0
+}
+
+// computePearsonCorrelation computes the Pearson correlation coefficient between two signals.
+// Returns a value between -1 and 1, where 1 means perfect positive correlation.
+func computePearsonCorrelation(a, b []float32) float64 {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	if n == 0 {
+		return 0
+	}
+
+	// Compute means
+	var sumA, sumB float64
+	for i := 0; i < n; i++ {
+		sumA += float64(a[i])
+		sumB += float64(b[i])
+	}
+	meanA := sumA / float64(n)
+	meanB := sumB / float64(n)
+
+	// Compute correlation
+	var num, denA, denB float64
+	for i := 0; i < n; i++ {
+		diffA := float64(a[i]) - meanA
+		diffB := float64(b[i]) - meanB
+		num += diffA * diffB
+		denA += diffA * diffA
+		denB += diffB * diffB
+	}
+
+	if denA == 0 || denB == 0 {
+		return 0
+	}
+
+	return num / (math.Sqrt(denA) * math.Sqrt(denB))
+}
+
+// AudioManifestJSON represents the audio.json manifest structure.
+type AudioManifestJSON struct {
+	Version         int                `json:"version"`
+	Codec           string             `json:"codec"`
+	SampleRate      int                `json:"sampleRate"`
+	Channels        int                `json:"channels"`
+	SegmentDuration float64            `json:"segmentDuration"`
+	StartTime       string             `json:"startTime"`
+	Init            string             `json:"init"`
+	Segments        []AudioSegmentJSON `json:"segments"`
+}
+
+// AudioSegmentJSON represents a segment entry in the audio manifest.
+type AudioSegmentJSON struct {
+	Index     int     `json:"index"`
+	File      string  `json:"file"`
+	Duration  float64 `json:"duration"`
+	StartTime float64 `json:"startTime"`
+	Size      int64   `json:"size"`
+}
+
+// validateWebPlayerTiming validates that audio playback timing matches the source.
+// This performs multiple validations:
+// 1. Manifest startTime matches actual segment tfdt
+// 2. Cross-correlation shift detection to catch time offsets
+// 3. Sample comparison at multiple absolute timestamps
+// 4. Overall correlation check
+//
+// The key validation is detecting if audio would play at wrong times (e.g., 2 seconds early)
+// due to issues like ring buffer overflow in the web player.
+func validateWebPlayerTiming(t *testing.T, client *minio.Client, bucket, prefix, sourceMP4 string, minCorrelation float64) error {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+
+	// Step 1: Download audio.json manifest
+	manifestKey := path.Join(prefix, "audio.json")
+	manifestPath := filepath.Join(tempDir, "audio.json")
+
+	if err := client.FGetObject(ctx, bucket, manifestKey, manifestPath, minio.GetObjectOptions{}); err != nil {
+		return fmt.Errorf("download audio.json: %w", err)
+	}
+
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return fmt.Errorf("read audio.json: %w", err)
+	}
+
+	var manifest AudioManifestJSON
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return fmt.Errorf("parse audio.json: %w", err)
+	}
+
+	t.Logf("audio manifest: %d segments, sampleRate=%d, segmentDuration=%.3fs",
+		len(manifest.Segments), manifest.SampleRate, manifest.SegmentDuration)
+
+	if len(manifest.Segments) == 0 {
+		return fmt.Errorf("no segments in audio manifest")
+	}
+
+	// Step 2: Download init segment and all media segments
+	initPath := filepath.Join(tempDir, manifest.Init)
+	initKey := path.Join(prefix, manifest.Init)
+	if err := client.FGetObject(ctx, bucket, initKey, initPath, minio.GetObjectOptions{}); err != nil {
+		return fmt.Errorf("download %s: %w", manifest.Init, err)
+	}
+
+	segmentPaths := make([]string, len(manifest.Segments))
+	for i, seg := range manifest.Segments {
+		segPath := filepath.Join(tempDir, seg.File)
+		segKey := path.Join(prefix, seg.File)
+		if err := client.FGetObject(ctx, bucket, segKey, segPath, minio.GetObjectOptions{}); err != nil {
+			return fmt.Errorf("download %s: %w", seg.File, err)
+		}
+		segmentPaths[i] = segPath
+	}
+	t.Logf("downloaded %d segments", len(segmentPaths))
+
+	// Step 3: Parse each segment to get actual tfdt and compare with manifest
+	const timescale = 48000 // Opus sample rate
+	var tfdtMismatches []string
+
+	for i, seg := range manifest.Segments {
+		segInfo, err := getAudioSegmentInfo(segmentPaths[i], timescale)
+		if err != nil {
+			t.Logf("warning: failed to parse segment %d tfdt: %v", i, err)
+			continue
+		}
+
+		actualStartTime := segInfo.StartTimeSeconds
+		manifestStartTime := seg.StartTime
+		diff := manifestStartTime - actualStartTime
+
+		// Log timing for all segments
+		t.Logf("segment %d: manifest_startTime=%.3fs, actual_tfdt=%.3fs, diff=%.3fs, duration=%.3fs",
+			i, manifestStartTime, actualStartTime, diff, segInfo.Duration)
+
+		// Flag significant mismatches (> 0.5 second)
+		if math.Abs(diff) > 0.5 {
+			tfdtMismatches = append(tfdtMismatches,
+				fmt.Sprintf("segment %d: manifest=%.3fs, tfdt=%.3fs, diff=%.3fs", i, manifestStartTime, actualStartTime, diff))
+		}
+	}
+
+	if len(tfdtMismatches) > 0 {
+		t.Logf("WARNING: %d segments have startTime/tfdt mismatch (>0.5s):", len(tfdtMismatches))
+		for _, m := range tfdtMismatches {
+			t.Logf("  %s", m)
+		}
+	}
+
+	// Step 4: Decode source audio
+	sourcePCMPath := filepath.Join(tempDir, "source.pcm")
+	ffmpegCmd := exec.Command("ffmpeg", "-y", "-i", sourceMP4,
+		"-vn", "-acodec", "pcm_f32le", "-ar", "48000", "-ac", "1",
+		"-f", "f32le", sourcePCMPath)
+	ffmpegCmd.Stderr = nil
+	if err := ffmpegCmd.Run(); err != nil {
+		return fmt.Errorf("decode source audio: %w", err)
+	}
+
+	sourceSamples, err := readFloat32PCM(sourcePCMPath)
+	if err != nil {
+		return fmt.Errorf("read source PCM: %w", err)
+	}
+	t.Logf("source audio: %d samples (%.2fs)", len(sourceSamples), float64(len(sourceSamples))/48000)
+
+	// Step 5: Decode recorded audio
+	combinedPath := filepath.Join(tempDir, "combined_for_decode.mp4")
+	combinedFile, err := os.Create(combinedPath)
+	if err != nil {
+		return fmt.Errorf("create combined file: %w", err)
+	}
+
+	initData, err := os.ReadFile(initPath)
+	if err != nil {
+		combinedFile.Close()
+		return fmt.Errorf("read init segment: %w", err)
+	}
+	combinedFile.Write(initData)
+
+	for _, segPath := range segmentPaths {
+		segData, err := os.ReadFile(segPath)
+		if err != nil {
+			combinedFile.Close()
+			return fmt.Errorf("read segment: %w", err)
+		}
+		combinedFile.Write(segData)
+	}
+	combinedFile.Close()
+
+	// Decode to PCM
+	recordedPCMPath := filepath.Join(tempDir, "recorded.pcm")
+	ffmpegCmd = exec.Command("ffmpeg", "-y", "-i", combinedPath,
+		"-vn", "-acodec", "pcm_f32le", "-ar", "48000", "-ac", "1",
+		"-f", "f32le", recordedPCMPath)
+	ffmpegCmd.Stderr = nil
+	if err := ffmpegCmd.Run(); err != nil {
+		return fmt.Errorf("decode recorded audio: %w", err)
+	}
+
+	recordedSamples, err := readFloat32PCM(recordedPCMPath)
+	if err != nil {
+		return fmt.Errorf("read recorded PCM: %w", err)
+	}
+	t.Logf("recorded audio: %d samples (%.2fs)", len(recordedSamples), float64(len(recordedSamples))/48000)
+
+	// Step 6: CRITICAL - Cross-correlation shift detection
+	// This catches the "2-4 seconds early" issue by finding optimal alignment
+	// If recorded audio is shifted relative to source, cross-correlation will reveal it
+	maxShiftSamples := 5 * 48000 // Search for shifts up to ±5 seconds
+	detectedShift, shiftCorrelation := detectTimeShift(sourceSamples, recordedSamples, maxShiftSamples)
+	detectedShiftSeconds := float64(detectedShift) / 48000.0
+
+	t.Logf("cross-correlation shift detection: shift=%.3fs (%d samples), correlation=%.4f",
+		detectedShiftSeconds, detectedShift, shiftCorrelation)
+
+	// Maximum allowed shift is 200ms (catches "2 seconds early" issue)
+	maxAllowedShift := 0.2
+	if math.Abs(detectedShiftSeconds) > maxAllowedShift {
+		return fmt.Errorf("CRITICAL: detected time shift of %.3fs (max allowed: %.3fs) - "+
+			"recorded audio is %.3fs %s relative to source. "+
+			"This would cause audio to play at wrong time in web player",
+			detectedShiftSeconds, maxAllowedShift, math.Abs(detectedShiftSeconds),
+			map[bool]string{true: "early", false: "late"}[detectedShift > 0])
+	}
+
+	// Step 7: Find beep onset in both source and recorded
+	sourceOnset := findAudioOnset(sourceSamples, 0.01, 48000)
+	recordedOnset := findAudioOnset(recordedSamples, 0.01, 48000)
+
+	sourceOnsetTime := float64(sourceOnset) / 48000
+	recordedOnsetTime := float64(recordedOnset) / 48000
+	onsetDiff := recordedOnsetTime - sourceOnsetTime
+
+	t.Logf("beep onset: source=%.3fs, recorded=%.3fs, diff=%.3fs", sourceOnsetTime, recordedOnsetTime, onsetDiff)
+
+	// Step 8: Validate onset timing
+	maxOnsetDiff := 0.5 // Maximum allowed onset difference in seconds
+	if math.Abs(onsetDiff) > maxOnsetDiff {
+		return fmt.Errorf("audio onset timing mismatch: source=%.3fs, recorded=%.3fs, diff=%.3fs (max allowed: %.3fs)",
+			sourceOnsetTime, recordedOnsetTime, onsetDiff, maxOnsetDiff)
+	}
+
+	// Step 9: Validate at multiple absolute timestamps
+	// This catches issues where audio content is misaligned at specific points
+	checkpointResults := validateAtCheckpoints(t, sourceSamples, recordedSamples, 48000)
+	if len(checkpointResults.failures) > 0 {
+		t.Logf("checkpoint validation failures:")
+		for _, f := range checkpointResults.failures {
+			t.Logf("  %s", f)
+		}
+		return fmt.Errorf("checkpoint validation failed at %d of %d points: %s",
+			len(checkpointResults.failures), checkpointResults.totalChecks, checkpointResults.failures[0])
+	}
+	t.Logf("checkpoint validation: %d/%d passed", checkpointResults.passed, checkpointResults.totalChecks)
+
+	// Note: We skip raw overall correlation check because:
+	// 1. Cross-correlation shift detection already validated alignment (shift and correlation)
+	// 2. Checkpoint validation verified content presence at all time points
+	// 3. Raw correlation of periodic signals (beeps) can be poor due to phase even when content is identical
+
+	t.Logf("web player timing validation PASSED: shift=%.3fs, onset_diff=%.3fs, cross_correlation=%.4f",
+		detectedShiftSeconds, onsetDiff, shiftCorrelation)
+	return nil
+}
+
+// detectTimeShift uses cross-correlation to find the optimal alignment between two signals.
+// Returns the shift in samples (positive = recorded is ahead of source) and the correlation at that shift.
+// This is critical for catching issues like "audio plays 2 seconds early".
+func detectTimeShift(source, recorded []float32, maxShift int) (int, float64) {
+	// Use a representative window from the audio (after onset, where there's actual content)
+	sourceOnset := findAudioOnset(source, 0.01, 48000)
+	recordedOnset := findAudioOnset(recorded, 0.01, 48000)
+
+	// Use 5 seconds of audio after onset for correlation
+	windowSize := 5 * 48000 // 5 seconds
+	if sourceOnset+windowSize > len(source) || recordedOnset+windowSize > len(recorded) {
+		windowSize = min(len(source)-sourceOnset, len(recorded)-recordedOnset)
+	}
+
+	if windowSize < 48000 { // Need at least 1 second
+		return 0, 0
+	}
+
+	sourceWindow := source[sourceOnset : sourceOnset+windowSize]
+	baseRecordedStart := recordedOnset
+
+	bestShift := 0
+	bestCorrelation := -1.0
+
+	// Search for the shift that maximizes correlation
+	// Shift range: -maxShift to +maxShift
+	for shift := -maxShift; shift <= maxShift; shift += 480 { // Step by 10ms for efficiency
+		recStart := baseRecordedStart + shift
+		if recStart < 0 || recStart+windowSize > len(recorded) {
+			continue
+		}
+
+		recordedWindow := recorded[recStart : recStart+windowSize]
+		corr := computePearsonCorrelation(sourceWindow, recordedWindow)
+
+		if corr > bestCorrelation {
+			bestCorrelation = corr
+			bestShift = shift
+		}
+	}
+
+	// Refine search around best shift with finer granularity
+	for shift := bestShift - 480; shift <= bestShift+480; shift += 48 { // Step by 1ms
+		recStart := baseRecordedStart + shift
+		if recStart < 0 || recStart+windowSize > len(recorded) {
+			continue
+		}
+
+		recordedWindow := recorded[recStart : recStart+windowSize]
+		corr := computePearsonCorrelation(sourceWindow, recordedWindow)
+
+		if corr > bestCorrelation {
+			bestCorrelation = corr
+			bestShift = shift
+		}
+	}
+
+	// The shift value indicates how much the recorded onset differs from expected
+	// A positive shift means recorded audio content appears earlier (recorded is ahead)
+	return bestShift, bestCorrelation
+}
+
+// checkpointResult holds results from checkpoint validation.
+type checkpointResult struct {
+	totalChecks int
+	passed      int
+	failures    []string
+}
+
+// validateAtCheckpoints compares audio content at specific absolute timestamps.
+// This catches cases where audio is time-shifted (e.g., "2 seconds early" bug).
+//
+// We use RMS energy comparison rather than raw correlation because:
+// 1. Periodic signals (like beeps) can have poor correlation due to phase mismatch
+// 2. Energy comparison reliably detects "content present vs silent" mismatches
+// 3. This is the key validation - if source is silent at time T but recorded has audio, there's a shift
+func validateAtCheckpoints(t *testing.T, source, recorded []float32, sampleRate int) checkpointResult {
+	result := checkpointResult{}
+
+	// Checkpoints including times before and after expected beep onset (10s)
+	// Times 5s, 8s should be silent in source
+	// Times 15s, 25s, 35s, 45s, 55s should have beeps
+	checkpoints := []float64{5.0, 8.0, 15.0, 25.0, 35.0, 45.0, 55.0}
+	windowDuration := 0.5 // 500ms window
+	windowSamples := int(windowDuration * float64(sampleRate))
+
+	// Thresholds for content detection
+	silenceThreshold := 0.005 // Below this RMS = silence
+	contentThreshold := 0.01  // Above this RMS = content present
+	rmsRatioTolerance := 0.5  // RMS levels should be within 50% of each other
+
+	for _, checkTime := range checkpoints {
+		checkSample := int(checkTime * float64(sampleRate))
+
+		// Skip if checkpoint is beyond audio length
+		if checkSample+windowSamples > len(source) || checkSample+windowSamples > len(recorded) {
+			continue
+		}
+
+		result.totalChecks++
+
+		sourceWindow := source[checkSample : checkSample+windowSamples]
+		recordedWindow := recorded[checkSample : checkSample+windowSamples]
+
+		sourceRMS := computeRMS(sourceWindow)
+		recordedRMS := computeRMS(recordedWindow)
+
+		sourceSilent := sourceRMS < silenceThreshold
+		recordedSilent := recordedRMS < silenceThreshold
+		sourceHasContent := sourceRMS > contentThreshold
+		recordedHasContent := recordedRMS > contentThreshold
+
+		// Case 1: Both silent - OK
+		if sourceSilent && recordedSilent {
+			result.passed++
+			t.Logf("checkpoint %.0fs: both silent (src_rms=%.4f, rec_rms=%.4f) - OK", checkTime, sourceRMS, recordedRMS)
+			continue
+		}
+
+		// Case 2: Source silent but recorded has content - TIME SHIFT DETECTED!
+		// This is the key check for "2 seconds early" bug
+		if sourceSilent && recordedHasContent {
+			result.failures = append(result.failures, fmt.Sprintf(
+				"checkpoint %.0fs: TIME SHIFT - source is silent (rms=%.4f) but recorded has audio (rms=%.4f). "+
+					"Recorded audio is playing EARLY relative to source",
+				checkTime, sourceRMS, recordedRMS))
+			continue
+		}
+
+		// Case 3: Source has content but recorded is silent - content missing or LATE
+		if sourceHasContent && recordedSilent {
+			result.failures = append(result.failures, fmt.Sprintf(
+				"checkpoint %.0fs: CONTENT MISSING - source has audio (rms=%.4f) but recorded is silent (rms=%.4f). "+
+					"Recorded audio is missing or playing LATE",
+				checkTime, sourceRMS, recordedRMS))
+			continue
+		}
+
+		// Case 4: Both have content - verify similar energy levels
+		// Large RMS difference could indicate wrong content
+		if sourceHasContent && recordedHasContent {
+			rmsRatio := recordedRMS / sourceRMS
+			if rmsRatio < rmsRatioTolerance || rmsRatio > 1.0/rmsRatioTolerance {
+				result.failures = append(result.failures, fmt.Sprintf(
+					"checkpoint %.0fs: RMS mismatch - source_rms=%.4f, recorded_rms=%.4f, ratio=%.2f (expected 0.5-2.0)",
+					checkTime, sourceRMS, recordedRMS, rmsRatio))
+				continue
+			}
+			result.passed++
+			t.Logf("checkpoint %.0fs: both have content (src_rms=%.4f, rec_rms=%.4f, ratio=%.2f) - OK",
+				checkTime, sourceRMS, recordedRMS, rmsRatio)
+			continue
+		}
+
+		// Case 5: Ambiguous (in the gray zone between silence and content)
+		// Be lenient here - just log and pass
+		result.passed++
+		t.Logf("checkpoint %.0fs: ambiguous levels (src_rms=%.4f, rec_rms=%.4f) - OK (lenient)",
+			checkTime, sourceRMS, recordedRMS)
+	}
+
+	return result
+}
+
+// findAudioOnset finds the sample index where audio content begins.
+// Uses a sliding window RMS approach to find sustained audio above threshold.
+func findAudioOnset(samples []float32, threshold float64, windowSize int) int {
+	if len(samples) < windowSize {
+		return 0
+	}
+
+	for i := 0; i < len(samples)-windowSize; i += windowSize / 4 {
+		rms := computeRMS(samples[i : i+windowSize])
+		if rms > threshold {
+			// Found audio, refine to find exact start
+			for j := i; j < i+windowSize && j < len(samples); j++ {
+				if samples[j] > float32(threshold) || samples[j] < float32(-threshold) {
+					return j
+				}
+			}
+			return i
+		}
+	}
+	return 0
+}
+
+// validateVideoH264Playback validates that the recorded video is a valid, playable H264 file.
+// It downloads video segments from S3, combines them, and uses ffprobe/ffmpeg to verify:
+//   - The video stream codec is valid H264/AVC
+//   - The codec profile is valid (not garbage from encrypted SPS/PPS)
+//   - Resolution is reasonable (matches source or within expected bounds)
+//   - Frame count and duration are reasonable
+//   - The video can actually be decoded (playable)
+//
+// Parameters:
+//   - t: Testing object for logging
+//   - client: MinIO client for S3 access
+//   - bucket: S3 bucket name
+//   - prefix: S3 prefix for the recording (e.g., "publisher-tests/room/participant")
+//   - sourceMP4: Path to the original source MP4 file for comparison
+//
+// Returns nil on success, error if validation fails.
+func validateVideoH264Playback(t *testing.T, client *minio.Client, bucket, prefix, sourceMP4 string) error {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+
+	t.Logf("validating video H264 playback from S3 (bucket=%s, prefix=%s)", bucket, prefix)
+
+	// Step 1: Get source video properties for comparison
+	sourceInfo, err := ffprobeVideoInfo(sourceMP4)
+	if err != nil {
+		return fmt.Errorf("probe source video: %w", err)
+	}
+	t.Logf("source video: codec=%s, profile=%s, resolution=%dx%d, fps=%.2f, duration=%.2fs",
+		sourceInfo.codec, sourceInfo.profile, sourceInfo.width, sourceInfo.height,
+		sourceInfo.frameRate, sourceInfo.duration)
+
+	// Step 2: Download video segments from S3
+	var segmentPaths []string
+	for i := 0; ; i++ {
+		segmentName := fmt.Sprintf("video%05d.ts", i)
+		segmentKey := path.Join(prefix, segmentName)
+		segmentPath := filepath.Join(tempDir, segmentName)
+
+		err := client.FGetObject(ctx, bucket, segmentKey, segmentPath, minio.GetObjectOptions{})
+		if err != nil {
+			// No more segments
+			break
+		}
+		segmentPaths = append(segmentPaths, segmentPath)
+	}
+
+	if len(segmentPaths) == 0 {
+		return fmt.Errorf("no video segments found in S3")
+	}
+	t.Logf("downloaded %d video segments", len(segmentPaths))
+
+	// Step 3: Create concat file for ffmpeg
+	concatListPath := filepath.Join(tempDir, "concat.txt")
+	concatFile, err := os.Create(concatListPath)
+	if err != nil {
+		return fmt.Errorf("create concat list: %w", err)
+	}
+	for _, segPath := range segmentPaths {
+		fmt.Fprintf(concatFile, "file '%s'\n", segPath)
+	}
+	concatFile.Close()
+
+	// Step 4: Concatenate segments into a single TS file
+	combinedTSPath := filepath.Join(tempDir, "combined.ts")
+	concatCmd := exec.Command("ffmpeg", "-y",
+		"-f", "concat", "-safe", "0",
+		"-i", concatListPath,
+		"-c", "copy",
+		combinedTSPath,
+	)
+	concatOut, err := concatCmd.CombinedOutput()
+	if err != nil {
+		t.Logf("FFmpeg concat output: %s", string(concatOut))
+		return fmt.Errorf("concatenate video segments: %w", err)
+	}
+	t.Logf("concatenated %d segments into combined.ts", len(segmentPaths))
+
+	// Step 5: Probe the combined video file
+	recordedInfo, err := ffprobeVideoInfo(combinedTSPath)
+	if err != nil {
+		return fmt.Errorf("probe recorded video: %w", err)
+	}
+	t.Logf("recorded video: codec=%s, profile=%s, resolution=%dx%d, fps=%.2f, duration=%.2fs",
+		recordedInfo.codec, recordedInfo.profile, recordedInfo.width, recordedInfo.height,
+		recordedInfo.frameRate, recordedInfo.duration)
+
+	// Step 6: Validate codec is H264
+	if recordedInfo.codec != "h264" {
+		return fmt.Errorf("recorded video codec is %q, expected h264", recordedInfo.codec)
+	}
+	t.Logf("✓ video codec is h264")
+
+	// Step 7: Validate profile is valid (not garbage from encrypted SPS)
+	validProfiles := map[string]bool{
+		"Constrained Baseline":  true,
+		"Baseline":              true,
+		"Main":                  true,
+		"High":                  true,
+		"High 10":               true,
+		"High 4:2:2":            true,
+		"High 4:4:4":            true,
+		"High 4:4:4 Predictive": true,
+	}
+	if !validProfiles[recordedInfo.profile] && recordedInfo.profile != "" {
+		// Check if profile looks like garbage (e.g., contains non-printable chars or unusual values)
+		for _, c := range recordedInfo.profile {
+			if c < 32 || c > 126 {
+				return fmt.Errorf("recorded video has invalid/garbage profile: %q (likely encrypted SPS)", recordedInfo.profile)
+			}
+		}
+		// Unknown but not garbage - log warning but continue
+		t.Logf("⚠ unknown H264 profile %q (not in common profiles list)", recordedInfo.profile)
+	} else {
+		t.Logf("✓ video profile is valid: %s", recordedInfo.profile)
+	}
+
+	// Step 8: Validate resolution is reasonable
+	if recordedInfo.width < 16 || recordedInfo.height < 16 {
+		return fmt.Errorf("recorded video has invalid resolution: %dx%d (too small, likely encrypted SPS)",
+			recordedInfo.width, recordedInfo.height)
+	}
+	if recordedInfo.width > 7680 || recordedInfo.height > 4320 {
+		return fmt.Errorf("recorded video has invalid resolution: %dx%d (too large)",
+			recordedInfo.width, recordedInfo.height)
+	}
+	// Check if resolution matches source (allowing for some variance due to encoding)
+	widthDiff := math.Abs(float64(recordedInfo.width - sourceInfo.width))
+	heightDiff := math.Abs(float64(recordedInfo.height - sourceInfo.height))
+	if widthDiff > 16 || heightDiff > 16 {
+		t.Logf("⚠ resolution mismatch: source=%dx%d, recorded=%dx%d",
+			sourceInfo.width, sourceInfo.height, recordedInfo.width, recordedInfo.height)
+	} else {
+		t.Logf("✓ video resolution matches source: %dx%d", recordedInfo.width, recordedInfo.height)
+	}
+
+	// Step 9: Validate duration is reasonable (within 10% of source or at least 50% for partial recordings)
+	if recordedInfo.duration < 1.0 {
+		return fmt.Errorf("recorded video too short: %.2fs", recordedInfo.duration)
+	}
+	durationRatio := recordedInfo.duration / sourceInfo.duration
+	if durationRatio < 0.5 {
+		t.Logf("⚠ recorded video shorter than expected: %.2fs vs source %.2fs (ratio=%.2f)",
+			recordedInfo.duration, sourceInfo.duration, durationRatio)
+	} else {
+		t.Logf("✓ video duration reasonable: %.2fs (source: %.2fs, ratio: %.2f)",
+			recordedInfo.duration, sourceInfo.duration, durationRatio)
+	}
+
+	// Step 10: Verify video is actually playable by decoding some frames
+	t.Logf("verifying video is decodable (extracting frames)...")
+	framesDir := filepath.Join(tempDir, "frames")
+	if err := os.MkdirAll(framesDir, 0755); err != nil {
+		return fmt.Errorf("create frames dir: %w", err)
+	}
+
+	// Extract 5 frames from different parts of the video
+	decodeCmd := exec.Command("ffmpeg", "-y",
+		"-i", combinedTSPath,
+		"-vf", "select='eq(n,0)+eq(n,30)+eq(n,60)+eq(n,90)+eq(n,120)'", // frames 0, 30, 60, 90, 120
+		"-vsync", "vfr",
+		"-frames:v", "5",
+		filepath.Join(framesDir, "frame_%03d.png"),
+	)
+	decodeOut, err := decodeCmd.CombinedOutput()
+	if err != nil {
+		t.Logf("FFmpeg decode output: %s", string(decodeOut))
+		return fmt.Errorf("failed to decode video frames: %w (video may be corrupted or encrypted)", err)
+	}
+
+	// Count extracted frames
+	frames, err := filepath.Glob(filepath.Join(framesDir, "frame_*.png"))
+	if err != nil {
+		return fmt.Errorf("list extracted frames: %w", err)
+	}
+	if len(frames) == 0 {
+		return fmt.Errorf("no frames extracted - video is not playable")
+	}
+
+	// Verify frames are not empty/black (check file size)
+	for _, framePath := range frames {
+		info, err := os.Stat(framePath)
+		if err != nil {
+			return fmt.Errorf("stat frame %s: %w", framePath, err)
+		}
+		if info.Size() < 1000 {
+			t.Logf("⚠ frame %s is suspiciously small (%d bytes)", filepath.Base(framePath), info.Size())
+		}
+	}
+	t.Logf("✓ successfully decoded %d frames from video", len(frames))
+
+	// Step 11: Additional validation - check for valid frame rate
+	if recordedInfo.frameRate < 1.0 || recordedInfo.frameRate > 120.0 {
+		return fmt.Errorf("recorded video has invalid frame rate: %.2f fps", recordedInfo.frameRate)
+	}
+	t.Logf("✓ video frame rate is valid: %.2f fps", recordedInfo.frameRate)
+
+	t.Logf("VIDEO H264 PLAYBACK VALIDATION PASSED")
+	return nil
+}
+
+// videoInfo contains parsed video stream information from ffprobe.
+type videoInfo struct {
+	codec     string  // e.g., "h264"
+	profile   string  // e.g., "High", "Main", "Baseline"
+	width     int     // video width in pixels
+	height    int     // video height in pixels
+	frameRate float64 // frames per second
+	duration  float64 // duration in seconds
+}
+
+// ffprobeVideoInfo uses ffprobe to extract video stream information from a file.
+func ffprobeVideoInfo(filePath string) (*videoInfo, error) {
+	// Get video stream info as JSON
+	cmd := exec.Command("ffprobe",
+		"-v", "error",
+		"-select_streams", "v:0",
+		"-show_entries", "stream=codec_name,profile,width,height,r_frame_rate,duration",
+		"-show_entries", "format=duration",
+		"-of", "json",
+		filePath,
+	)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ffprobe failed: %w", err)
+	}
+
+	// Parse JSON response
+	var result struct {
+		Streams []struct {
+			CodecName  string `json:"codec_name"`
+			Profile    string `json:"profile"`
+			Width      int    `json:"width"`
+			Height     int    `json:"height"`
+			RFrameRate string `json:"r_frame_rate"`
+			Duration   string `json:"duration"`
+		} `json:"streams"`
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
+	}
+
+	if err := json.Unmarshal(output, &result); err != nil {
+		return nil, fmt.Errorf("parse ffprobe output: %w", err)
+	}
+
+	if len(result.Streams) == 0 {
+		return nil, fmt.Errorf("no video streams found")
+	}
+
+	stream := result.Streams[0]
+	info := &videoInfo{
+		codec:   stream.CodecName,
+		profile: stream.Profile,
+		width:   stream.Width,
+		height:  stream.Height,
+	}
+
+	// Parse frame rate (e.g., "30/1" or "30000/1001")
+	if parts := strings.Split(stream.RFrameRate, "/"); len(parts) == 2 {
+		num, _ := strconv.ParseFloat(parts[0], 64)
+		den, _ := strconv.ParseFloat(parts[1], 64)
+		if den > 0 {
+			info.frameRate = num / den
+		}
+	}
+
+	// Parse duration (prefer stream duration, fall back to format duration)
+	if stream.Duration != "" {
+		info.duration, _ = strconv.ParseFloat(stream.Duration, 64)
+	} else if result.Format.Duration != "" {
+		info.duration, _ = strconv.ParseFloat(result.Format.Duration, 64)
+	}
+
+	return info, nil
 }

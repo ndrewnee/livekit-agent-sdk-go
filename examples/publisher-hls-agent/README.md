@@ -6,6 +6,7 @@ A production-ready LiveKit agent that records participant tracks to **HLS (HTTP 
 
 - **🎥 HLS Recording**: Records H.264 video + Opus/AAC audio to HLS playlists (M3U8) and MPEG-TS segments
 - **☁️ S3 Integration**: Real-time or batch upload to S3-compatible storage (AWS S3, MinIO, DigitalOcean Spaces)
+- **🔐 E2EE Support**: Decrypt end-to-end encrypted audio and video tracks using shared passphrase
 - **🔄 Delayed Pipeline Start**: Ensures all HLS segments begin with valid keyframes for immediate playback
 - **⚡ Pre-buffering**: Synchronizes audio/video streams for gapless segment 0 playback
 - **🛠️ Timestamp Normalization**: Fixes GStreamer timestamp issues for player compatibility
@@ -217,6 +218,20 @@ All configuration is via **environment variables**:
 | `S3_OBJECT_ACL` | - | Canned ACL (e.g., `public-read`) |
 | `S3_REALTIME_UPLOAD` | `false` | Upload segments during recording |
 
+### Optional - E2EE (End-to-End Encryption)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `E2EE_PASSPHRASE` | - | Shared passphrase for E2EE decryption |
+
+When `E2EE_PASSPHRASE` is set, the agent will:
+1. Derive a 128-bit AES key from the passphrase using PBKDF2
+2. Decrypt incoming audio and video RTP payloads using AES-GCM
+3. Drop Server Injected Frames (SIF) automatically
+4. Process decrypted media through the normal HLS pipeline
+
+**Important:** The passphrase must match the one used by the publishing client. LiveKit does not store or transport encryption keys.
+
 ## Usage
 
 ### Quick Start
@@ -300,6 +315,57 @@ export S3_SECRET_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 
 **Benefits**: No upload interruptions during recording, atomic uploads
 **Use case**: Short recordings, reliable networks
+
+### E2EE Recording (End-to-End Encryption)
+
+Record E2EE-protected streams by providing the shared passphrase:
+
+```bash
+# Set credentials
+export LIVEKIT_API_KEY="devkey"
+export LIVEKIT_API_SECRET="secret"
+export LIVEKIT_URL="ws://localhost:7880"
+
+# Enable E2EE decryption with shared passphrase
+export E2EE_PASSPHRASE="my-secret-passphrase"
+
+# Enable auto-activation
+export AUTO_ACTIVATE_RECORDING="true"
+
+# Run agent
+./publisher-hls-agent
+```
+
+**How E2EE works:**
+
+1. The publishing client encrypts media frames using AES-GCM with a key derived from the passphrase
+2. Encrypted RTP packets are sent through the LiveKit server (server cannot decrypt)
+3. The agent receives encrypted packets, derives the same key from the passphrase
+4. Each packet is decrypted before being passed to the GStreamer pipeline
+5. Decrypted media is recorded to HLS segments normally
+
+**Security notes:**
+- The passphrase is never sent to or stored by LiveKit servers
+- Use a secure channel to distribute the passphrase to clients and the agent
+- All participants in an E2EE room must use the same passphrase
+- The recorded HLS output is **not encrypted** - secure your storage accordingly
+
+**Testing E2EE locally:**
+
+```bash
+# Terminal 1: Start LiveKit server in dev mode
+docker run --rm -p 7880:7880 -p 7881:7881 -p 7882:7882/udp livekit/livekit-server --dev
+
+# Terminal 2: Run the HLS agent with E2EE
+export LIVEKIT_API_KEY="devkey"
+export LIVEKIT_API_SECRET="secret"
+export E2EE_PASSPHRASE="test123"
+export AUTO_ACTIVATE_RECORDING="true"
+./publisher-hls-agent
+
+# Terminal 3: Connect a client with E2EE enabled using the same passphrase
+# Use the LiveKit SDK with E2EE enabled (e.g., client-sdk-js with e2ee option)
+```
 
 ## How It Works
 
@@ -526,6 +592,35 @@ aws s3 ls s3://$S3_BUCKET
 - Verify auto-activation waits for both tracks (`markActivatedIfReady`)
 - Inspect segment: `ffprobe -show_streams segment00000.ts` should show both streams
 
+### E2EE decryption fails
+
+**Symptoms:** `E2EE decryption error` in logs, no segments generated
+**Cause:** Passphrase mismatch, non-E2EE tracks, or corrupted packets
+
+**Solution:**
+```bash
+# Verify E2EE is enabled on both client and agent
+# 1. Check client is publishing with E2EE enabled
+# 2. Check agent logs for "E2EE decryption enabled"
+
+# Verify passphrase matches
+# - Use the exact same passphrase string on client and agent
+# - Check for leading/trailing whitespace
+
+# Check if tracks are actually encrypted
+# - Look for `publication.TrackInfo().GetEncryption()` returning GCM
+# - Non-E2EE tracks will cause decryption errors
+
+# Debug with verbose logging
+export GST_DEBUG="3"
+./publisher-hls-agent 2>&1 | grep -E "(E2EE|decrypt)"
+```
+
+**Common E2EE errors:**
+- `video decryption failed: cipher: message authentication failed` - Wrong passphrase
+- `malformed encrypted payload` - Packet too short (possibly not encrypted)
+- `server injected frame detected` - Normal, these are dropped automatically
+
 ## Advanced Configuration
 
 ### Custom GStreamer Pipeline
@@ -583,6 +678,8 @@ This is an example implementation. For production use:
 ## References
 
 - [LiveKit Agent SDK](https://github.com/livekit/agent-sdk-go)
+- [LiveKit Go Server SDK](https://github.com/livekit/server-sdk-go)
+- [LiveKit E2EE Documentation](https://docs.livekit.io/home/client/tracks/encryption/)
 - [GStreamer Documentation](https://gstreamer.freedesktop.org/documentation/)
 - [HLS Specification (RFC 8216)](https://datatracker.ietf.org/doc/html/rfc8216)
 - [H.264 Specification (ITU-T H.264)](https://www.itu.int/rec/T-REC-H.264)

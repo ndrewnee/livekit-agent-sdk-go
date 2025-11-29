@@ -352,6 +352,16 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 	}
 	defer directRoom.Disconnect()
 
+	// Initialize E2EE context if enabled
+	if h.cfg.E2EEEnabled() {
+		e2eeCtx, err := NewE2EEContext(h.cfg.E2EEPassphrase, directRoom.SifTrailer())
+		if err != nil {
+			return fmt.Errorf("failed to initialize E2EE context: %w", err)
+		}
+		recorder.SetE2EEContext(e2eeCtx)
+		log.Printf("[%s/%s] E2EE decryption enabled", roomName, targetIdentity)
+	}
+
 	if rp := directRoom.GetParticipantByIdentity(targetIdentity); rp != nil {
 		for _, pub := range rp.TrackPublications() {
 			if remotePub, ok := pub.(*lksdk.RemoteTrackPublication); ok {
