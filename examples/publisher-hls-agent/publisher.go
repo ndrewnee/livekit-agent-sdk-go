@@ -42,6 +42,11 @@ type GStreamerPublisher struct {
 	videoTotal  time.Duration
 	audioTotal  time.Duration
 	cipherBlock cipher.Block // AES cipher for E2EE encryption (nil = no encryption)
+	// E2EE encryption stats (for verification)
+	videoEncryptedFrames int
+	audioEncryptedFrames int
+	videoEncryptedBytes  int64
+	audioEncryptedBytes  int64
 }
 
 // NewGStreamerPublisher creates a new GStreamer-based publisher for the given MP4 file.
@@ -108,12 +113,18 @@ func NewGStreamerPublisher(filePath string, videoTrack, audioTrack *lksdk.LocalT
 				// Copy data and optionally encrypt
 				sampleData := append([]byte{}, data...)
 				if p.cipherBlock != nil {
+					originalSize := len(sampleData)
 					var err error
 					sampleData, err = p.encryptSample(sampleData, e2eeUnencryptedVideoH264)
 					if err != nil {
 						log.Printf("failed to encrypt video sample: %v", err)
 						return gst.FlowError
 					}
+					// Track encryption stats
+					p.mu.Lock()
+					p.videoEncryptedFrames++
+					p.videoEncryptedBytes += int64(len(sampleData) - originalSize) // overhead added
+					p.mu.Unlock()
 				}
 
 				sample := media.Sample{
@@ -165,12 +176,18 @@ func NewGStreamerPublisher(filePath string, videoTrack, audioTrack *lksdk.LocalT
 				// Copy data and optionally encrypt
 				sampleData := append([]byte{}, data...)
 				if p.cipherBlock != nil {
+					originalSize := len(sampleData)
 					var err error
 					sampleData, err = p.encryptAudioSample(sampleData)
 					if err != nil {
 						log.Printf("failed to encrypt audio sample: %v", err)
 						return gst.FlowError
 					}
+					// Track encryption stats
+					p.mu.Lock()
+					p.audioEncryptedFrames++
+					p.audioEncryptedBytes += int64(len(sampleData) - originalSize) // overhead added
+					p.mu.Unlock()
 				}
 
 				if err := p.audioTrack.WriteSample(media.Sample{
@@ -207,6 +224,10 @@ func (p *GStreamerPublisher) Stop() {
 	_ = p.pipeline.SetState(gst.StateNull)
 	p.mu.Lock()
 	log.Printf("publisher totals: video=%.3fs audio=%.3fs", p.videoTotal.Seconds(), p.audioTotal.Seconds())
+	if p.cipherBlock != nil {
+		log.Printf("[publisher] E2EE stats: video=%d frames (+%d bytes overhead), audio=%d frames (+%d bytes overhead)",
+			p.videoEncryptedFrames, p.videoEncryptedBytes, p.audioEncryptedFrames, p.audioEncryptedBytes)
+	}
 	p.mu.Unlock()
 }
 
