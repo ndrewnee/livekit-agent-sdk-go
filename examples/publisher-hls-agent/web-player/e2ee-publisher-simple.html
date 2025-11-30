@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LiveKit E2EE Publisher (Simple)</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #111;
+            color: #eee;
+        }
+        h1 { color: #0af; }
+        .section {
+            background: #1a1a1a;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        label { display: block; margin: 10px 0 5px; color: #888; }
+        input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #333;
+            border-radius: 4px;
+            background: #222;
+            color: #fff;
+            font-size: 14px;
+        }
+        button {
+            padding: 12px 24px;
+            margin: 5px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        .btn-connect { background: #0af; color: #000; }
+        .btn-disconnect { background: #f44; color: #fff; }
+        button:disabled { opacity: 0.5; }
+        #localVideo {
+            width: 100%;
+            max-height: 400px;
+            background: #000;
+            border-radius: 8px;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .status.connected { background: #0a3; }
+        .status.disconnected { background: #333; }
+        .status.error { background: #a00; }
+        .status.connecting { background: #a50; }
+        #log {
+            background: #000;
+            padding: 10px;
+            border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .log-info { color: #0af; }
+        .log-success { color: #0f0; }
+        .log-error { color: #f44; }
+        .log-warn { color: #fa0; }
+        .e2ee-enabled {
+            background: #0f0;
+            color: #000;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>LiveKit E2EE Publisher</h1>
+    <p>Simple client to publish encrypted audio/video to LiveKit</p>
+
+    <div class="section">
+        <h3>Connection</h3>
+        <label>Server URL</label>
+        <input id="url" value="ws://localhost:7880">
+
+        <label>Room Name</label>
+        <input id="room" value="e2ee-web-room">
+
+        <label>Your Name</label>
+        <input id="identity" value="web-e2ee-publisher">
+
+        <label>API Key</label>
+        <input id="apiKey" value="devkey">
+
+        <label>API Secret</label>
+        <input id="apiSecret" type="password" value="secret">
+
+        <label>Agent Name (for dispatch)</label>
+        <input id="agentName" value="e2ee-web-agent">
+    </div>
+
+    <div class="section">
+        <h3>E2EE Settings <span id="e2eeBadge" class="e2ee-enabled">ENABLED</span></h3>
+        <label>Passphrase (must match other participants)</label>
+        <input id="passphrase" value="test-e2ee-secret-123">
+        <label style="margin-top: 15px;">
+            <input type="checkbox" id="e2eeCheckbox" checked onchange="toggleE2EE()">
+            Enable End-to-End Encryption
+        </label>
+    </div>
+
+    <div id="statusDiv" class="status disconnected">Status: Disconnected</div>
+
+    <video id="localVideo" autoplay muted playsinline></video>
+
+    <div style="margin: 20px 0;">
+        <button id="connectBtn" class="btn-connect" onclick="connect()">Connect & Publish</button>
+        <button id="disconnectBtn" class="btn-disconnect" onclick="disconnect()" disabled>Disconnect</button>
+    </div>
+
+    <h3>Log</h3>
+    <div id="log"></div>
+
+    <!-- LiveKit Client SDK -->
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.7/dist/livekit-client.umd.js"></script>
+
+    <script>
+        let room = null;
+
+        function log(msg, type = 'info') {
+            const el = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            el.innerHTML += `<div class="log-${type}">[${time}] ${msg}</div>`;
+            el.scrollTop = el.scrollHeight;
+            console.log(`[${type}] ${msg}`);
+        }
+
+        function setStatus(status, text) {
+            const el = document.getElementById('statusDiv');
+            el.className = `status ${status}`;
+            el.textContent = `Status: ${text}`;
+        }
+
+        function toggleE2EE() {
+            const badge = document.getElementById('e2eeBadge');
+            const checked = document.getElementById('e2eeCheckbox').checked;
+            badge.textContent = checked ? 'ENABLED' : 'DISABLED';
+            badge.style.background = checked ? '#0f0' : '#666';
+        }
+
+        // Create room with agent dispatch via LiveKit REST API
+        async function createRoomWithAgent(apiKey, apiSecret, roomName, agentName) {
+            const token = await makeToken(apiKey, apiSecret, roomName, 'room-creator', true);
+
+            // Use Twirp API to create room
+            const httpUrl = document.getElementById('url').value.replace('ws://', 'http://').replace('wss://', 'https://');
+
+            const response = await fetch(`${httpUrl}/twirp/livekit.RoomService/CreateRoom`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    name: roomName,
+                    agents: [{ agentName: agentName }]
+                })
+            });
+
+            if (!response.ok) {
+                const text = await response.text();
+                throw new Error(`Failed to create room: ${response.status} ${text}`);
+            }
+
+            return await response.json();
+        }
+
+        // Simple JWT token generator (for local dev only!)
+        async function makeToken(apiKey, apiSecret, room, identity, isAdmin = false) {
+            const header = { alg: 'HS256', typ: 'JWT' };
+            const now = Math.floor(Date.now() / 1000);
+            const payload = {
+                iss: apiKey,
+                sub: identity,
+                nbf: now,
+                exp: now + 86400,
+                iat: now,
+                jti: `${identity}-${now}`,
+                video: isAdmin
+                    ? { roomCreate: true, roomAdmin: true, roomList: true }
+                    : { room, roomJoin: true, canPublish: true, canSubscribe: true }
+            };
+
+            const b64 = obj => btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            const enc = new TextEncoder();
+            const key = await crypto.subtle.importKey('raw', enc.encode(apiSecret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+            const data = `${b64(header)}.${b64(payload)}`;
+            const sig = await crypto.subtle.sign('HMAC', key, enc.encode(data));
+            const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            return `${data}.${sigB64}`;
+        }
+
+        // Derive E2EE key from passphrase (matches LiveKit's PBKDF2 derivation)
+        async function deriveKey(passphrase) {
+            const enc = new TextEncoder();
+            const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveBits']);
+            const bits = await crypto.subtle.deriveBits({
+                name: 'PBKDF2',
+                salt: enc.encode('LKFrameEncryptionKey'),
+                iterations: 100000,
+                hash: 'SHA-256'
+            }, keyMaterial, 128);
+            return new Uint8Array(bits);
+        }
+
+        async function connect() {
+            const url = document.getElementById('url').value;
+            const roomName = document.getElementById('room').value;
+            const identity = document.getElementById('identity').value;
+            const apiKey = document.getElementById('apiKey').value;
+            const apiSecret = document.getElementById('apiSecret').value;
+            const agentName = document.getElementById('agentName').value;
+            const e2eeEnabled = document.getElementById('e2eeCheckbox').checked;
+            const passphrase = document.getElementById('passphrase').value;
+
+            try {
+                setStatus('connecting', 'Connecting...');
+                document.getElementById('connectBtn').disabled = true;
+
+                // First, create room with agent dispatch
+                log(`Creating room "${roomName}" with agent "${agentName}"...`);
+                try {
+                    await createRoomWithAgent(apiKey, apiSecret, roomName, agentName);
+                    log('Room created with agent dispatch', 'success');
+                } catch (e) {
+                    // Room might already exist, continue anyway
+                    log(`Room creation: ${e.message}`, 'warn');
+                }
+
+                log('Generating access token...');
+                const token = await makeToken(apiKey, apiSecret, roomName, identity);
+                log('Token ready', 'success');
+
+                // Room options with H264 video codec for HLS recording
+                const opts = {
+                    adaptiveStream: true,
+                    dynacast: true,
+                    publishDefaults: {
+                        videoCodec: 'h264',
+                        videoSimulcastLayers: [
+                            { width: 640, height: 360, encoding: { maxBitrate: 500000, maxFramerate: 30 } },
+                            { width: 1280, height: 720, encoding: { maxBitrate: 1500000, maxFramerate: 30 } },
+                        ],
+                    },
+                };
+
+                // E2EE setup
+                let keyProvider = null;
+                if (e2eeEnabled) {
+                    log('Setting up E2EE...');
+                    keyProvider = new LivekitClient.ExternalE2EEKeyProvider();
+
+                    // Fetch the E2EE worker and create a blob URL (workaround for CORS)
+                    log('Loading E2EE worker...');
+                    const workerUrl = 'https://cdn.jsdelivr.net/npm/livekit-client@2.5.7/dist/livekit-client.e2ee.worker.mjs';
+                    const workerResponse = await fetch(workerUrl);
+                    const workerCode = await workerResponse.text();
+                    const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
+                    const workerBlobUrl = URL.createObjectURL(workerBlob);
+
+                    opts.e2ee = {
+                        keyProvider: keyProvider,
+                        worker: new Worker(workerBlobUrl, { type: 'module' })
+                    };
+                    log('E2EE worker loaded', 'success');
+                }
+
+                log('Creating room...');
+                room = new LivekitClient.Room(opts);
+
+                // Events
+                room.on(LivekitClient.RoomEvent.Connected, () => {
+                    log('Connected to room!', 'success');
+                    setStatus('connected', `Connected to ${roomName}`);
+                });
+
+                room.on(LivekitClient.RoomEvent.Disconnected, () => {
+                    log('Disconnected', 'warn');
+                    setStatus('disconnected', 'Disconnected');
+                });
+
+                room.on(LivekitClient.RoomEvent.LocalTrackPublished, (pub) => {
+                    log(`Published ${pub.kind} track`, 'success');
+                });
+
+                room.on(LivekitClient.RoomEvent.EncryptionError, (err) => {
+                    log(`E2EE Error: ${err.message}`, 'error');
+                });
+
+                // Connect
+                log(`Connecting to ${url}...`);
+                await room.connect(url, token);
+
+                // Set E2EE key
+                if (e2eeEnabled && keyProvider) {
+                    log('Setting E2EE passphrase (SDK will derive key internally)...');
+                    // Pass passphrase as string - SDK will derive key internally using same PBKDF2 params
+                    await keyProvider.setKey(passphrase);
+                    await room.setE2EEEnabled(true);
+                    log(`E2EE encryption activated with passphrase!`, 'success');
+                }
+
+                // Get camera and mic (H264 codec is set in publishDefaults above)
+                log('Requesting camera/microphone (H264 via publishDefaults)...');
+                await room.localParticipant.setCameraEnabled(true, {
+                    resolution: { width: 1280, height: 720, frameRate: 30 }
+                });
+                await room.localParticipant.setMicrophoneEnabled(true);
+
+                // Attach local video
+                const videoTrack = room.localParticipant.getTrackPublication(LivekitClient.Track.Source.Camera)?.track;
+                if (videoTrack) {
+                    videoTrack.attach(document.getElementById('localVideo'));
+                    log('Local video attached', 'success');
+                }
+
+                log(`Publishing as "${identity}" in room "${roomName}"${e2eeEnabled ? ' with E2EE' : ''}`, 'success');
+                document.getElementById('disconnectBtn').disabled = false;
+
+            } catch (err) {
+                log(`Error: ${err.message}`, 'error');
+                console.error(err);
+                setStatus('error', err.message);
+                document.getElementById('connectBtn').disabled = false;
+            }
+        }
+
+        async function disconnect() {
+            if (room) {
+                await room.disconnect();
+                room = null;
+            }
+            document.getElementById('connectBtn').disabled = false;
+            document.getElementById('disconnectBtn').disabled = true;
+            setStatus('disconnected', 'Disconnected');
+            log('Disconnected', 'info');
+        }
+
+        log('Ready. Configure settings and click Connect.', 'info');
+    </script>
+</body>
+</html>

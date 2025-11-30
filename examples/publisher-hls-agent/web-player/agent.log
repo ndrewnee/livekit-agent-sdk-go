@@ -1,0 +1,106 @@
+2025/11/29 20:28:10.527295 starting publisher HLS agent "e2ee-web-agent" as JT_PUBLISHER worker
+2025/11/29 20:28:10.533223 [INFO] [DEBUG] Sending registration [jobType JT_PUBLISHER agentName e2ee-web-agent version  namespace ]
+2025/11/29 20:28:10.534187 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 49]
+2025/11/29 20:28:10.534247 [INFO] Worker registered [workerID AW_f3UFTqbaNgdt]
+2025/11/29 20:28:10.534258 [INFO] [DEBUG] Sending worker status update [status available load 0 jobCount 0]
+2025/11/29 20:28:10.534262 [INFO] [DEBUG] Starting message handler loop []
+2025/11/29 20:28:40.534539 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 15]
+2025/11/29 20:28:40.534653 [INFO] [DEBUG] Received message from server [messageNumber 1 messageType *livekit.ServerMessage_Pong]
+2025/11/29 20:29:10.534454 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 15]
+2025/11/29 20:29:10.534512 [INFO] [DEBUG] Received message from server [messageNumber 2 messageType *livekit.ServerMessage_Pong]
+2025/11/29 20:29:40.534312 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 15]
+2025/11/29 20:29:40.534364 [INFO] [DEBUG] Received message from server [messageNumber 3 messageType *livekit.ServerMessage_Pong]
+2025/11/29 20:30:10.534377 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 15]
+2025/11/29 20:30:10.534428 [INFO] [DEBUG] Received message from server [messageNumber 4 messageType *livekit.ServerMessage_Pong]
+2025/11/29 20:30:40.534279 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 15]
+2025/11/29 20:30:40.534333 [INFO] [DEBUG] Received message from server [messageNumber 5 messageType *livekit.ServerMessage_Pong]
+2025/11/29 20:31:10.534284 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 15]
+2025/11/29 20:31:10.534337 [INFO] [DEBUG] Received message from server [messageNumber 6 messageType *livekit.ServerMessage_Pong]
+2025/11/29 20:31:40.534091 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 15]
+2025/11/29 20:31:40.534138 [INFO] [DEBUG] Received message from server [messageNumber 7 messageType *livekit.ServerMessage_Pong]
+2025/11/29 20:32:10.534173 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 15]
+2025/11/29 20:32:10.534209 [INFO] [DEBUG] Received message from server [messageNumber 8 messageType *livekit.ServerMessage_Pong]
+2025/11/29 20:32:31.618095 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 565]
+2025/11/29 20:32:31.618470 [INFO] [DEBUG] Received message from server [messageNumber 9 messageType *livekit.ServerMessage_Availability]
+2025/11/29 20:32:31.618485 [INFO] [DEBUG] Received availability request [jobId AJ_yC6zMqwapmGs]
+2025/11/29 20:32:31.618490 accepting JT_PUBLISHER job AJ_yC6zMqwapmGs for participant web-e2ee-publisher in room e2ee-web-room
+2025/11/29 20:32:31.618637 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 1085]
+2025/11/29 20:32:31.618702 [INFO] [DEBUG] Received message from server [messageNumber 10 messageType *livekit.ServerMessage_Assignment]
+2025/11/29 20:32:31.618750 [INFO] Job assigned [jobID AJ_yC6zMqwapmGs type JT_PUBLISHER room e2ee-web-room]
+2025/11/29 20:32:31.618764 [INFO] Generated agent identity [identity agent-AJ_yC6zMqwapmGs jobID AJ_yC6zMqwapmGs]
+2025/11/29 20:32:31.632193 [INFO] [DEBUG] Sending worker status update [status available load 0.25 jobCount 1]
+2025/11/29 20:32:31.632414 [e2ee-web-room/web-e2ee-publisher] created session directory: /Users/alexeysokolov/GolandProjects/livekit-agent-sdk-go/examples/publisher-hls-agent/publisher-hls-output/e2ee-web-room_web-e2ee-publisher_20251129-203231.632
+2025/11/29 20:32:31.658248 [e2ee-web-room/web-e2ee-publisher] recorder initialized with separate A/V (H.264 video + Opus audio fMP4)
+2025/11/29 20:32:31.658315 [debug] job state: participantIdentity= status=JS_RUNNING
+2025/11/29 20:32:31.658325 [e2ee-web-room/web-e2ee-publisher] GStreamer pipeline ready (will start on first recording keyframe)
+2025/11/29 20:32:31.660497 [e2ee-web-room/web-e2ee-publisher] requested subscription to track TR_VCBuPg7y6EMT9F
+2025/11/29 20:32:31.660550 [e2ee-web-room/web-e2ee-publisher] requested HIGH quality for track TR_VCBuPg7y6EMT9F
+2025/11/29 20:32:31.660559 [e2ee-web-room/web-e2ee-publisher] requested subscription to track TR_AMXLGdzy3EqZ4H
+2025/11/29 20:32:31.683271 [e2ee] initialized E2EE context (sifTrailer len=43)
+2025/11/29 20:32:31.683296 [e2ee-web-room/web-e2ee-publisher] E2EE decryption enabled
+2025/11/29 20:32:31.683331 [e2ee-web-room/web-e2ee-publisher] requested HIGH quality for existing track TR_VCBuPg7y6EMT9F
+2025/11/29 20:32:31.831277 "level"=0 "msg"="track subscribed" "participant"="web-e2ee-publisher" "trackID"="TR_AMXLGdzy3EqZ4H" "kind"="audio"
+2025/11/29 20:32:31.831311 [e2ee-web-room/web-e2ee-publisher] track subscribed: sid=TR_AMXLGdzy3EqZ4H kind=audio codec=audio/opus payloadType=111
+2025/11/29 20:32:31.831358 [e2ee-web-room/web-e2ee-publisher] audio track subscribed (sid=TR_AMXLGdzy3EqZ4H, codec=audio/opus, payloadType=111)
+2025/11/29 20:32:31.831365 [e2ee-debug] First audio payload (len=103):
+2025/11/29 20:32:31.831368 [e2ee-debug]   First 10 bytes: 683042476d51f27c98e1
+2025/11/29 20:32:31.831371 [e2ee-debug]   Last 10 bytes: c0abe0f8c0ab50000c00
+2025/11/29 20:32:31.831373 [e2ee-debug]   Last 2 bytes (trailer): ivLen=12, keyID=0
+2025/11/29 20:32:31.831375 [e2ee-debug]   sifTrailer len=43
+2025/11/29 20:32:31.831376 [e2ee-debug]   sifTrailer: 51346769725535764876526f7438773249543175324371664b7a4248566576494575415271706b596a7142
+2025/11/29 20:32:31.831380 [e2ee-debug] Successfully decrypted audio payload 1: encrypted=103 bytes -> decrypted=73 bytes
+2025/11/29 20:32:31.838382 "level"=0 "msg"="track subscribed" "participant"="web-e2ee-publisher" "trackID"="TR_VCBuPg7y6EMT9F" "kind"="video"
+2025/11/29 20:32:31.838492 [e2ee-web-room/web-e2ee-publisher] track info: sid:"TR_VCBuPg7y6EMT9F" type:VIDEO width:1280 height:720 simulcast:true source:CAMERA layers:{width:640 height:360 bitrate:500000 ssrc:1603680456} layers:{quality:MEDIUM width:1280 height:720 bitrate:1500000} layers:{quality:HIGH width:1280 height:720 bitrate:1700000} mime_type:"video/H264" mid:"1" codecs:{mime_type:"video/H264" mid:"1" cid:"f0097f84-f414-4d92-a89e-1265752335e7" layers:{width:640 height:360 bitrate:500000 ssrc:1603680456} layers:{quality:MEDIUM width:1280 height:720 bitrate:1500000} layers:{quality:HIGH width:1280 height:720 bitrate:1700000}} disable_red:true encryption:GCM stream:"camera" version:{unix_micro:1764448351417581}
+2025/11/29 20:32:31.838538 [e2ee-web-room/web-e2ee-publisher] receiver codec: mime=video/VP8 fmtp=
+2025/11/29 20:32:31.838543 [e2ee-web-room/web-e2ee-publisher] receiver codec: mime=video/VP9 fmtp=profile-id=0
+2025/11/29 20:32:31.838546 [e2ee-web-room/web-e2ee-publisher] receiver codec: mime=video/H264 fmtp=level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
+2025/11/29 20:32:31.838548 [e2ee-web-room/web-e2ee-publisher] receiver codec: mime=video/H264 fmtp=level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f
+2025/11/29 20:32:31.838550 [e2ee-web-room/web-e2ee-publisher] receiver codec: mime=video/AV1 fmtp=
+2025/11/29 20:32:31.838552 [e2ee-web-room/web-e2ee-publisher] receiver codec: mime=video/rtx fmtp=apt=108
+2025/11/29 20:32:31.838554 [e2ee-web-room/web-e2ee-publisher] receiver codec: mime=video/rtx fmtp=apt=125
+2025/11/29 20:32:31.838557 [e2ee-web-room/web-e2ee-publisher] receiver codec: mime=video/rtx fmtp=apt=98
+2025/11/29 20:32:31.838559 [e2ee-web-room/web-e2ee-publisher] receiver codec: mime=video/rtx fmtp=apt=96
+2025/11/29 20:32:31.838560 [e2ee-web-room/web-e2ee-publisher] receiver codec: mime=video/rtx fmtp=apt=35
+2025/11/29 20:32:31.838562 [e2ee-web-room/web-e2ee-publisher] track subscribed: sid=TR_VCBuPg7y6EMT9F kind=video codec=video/H264 payloadType=125
+2025/11/29 20:32:31.838574 [e2ee-web-room/web-e2ee-publisher] video track subscribed (sid=TR_VCBuPg7y6EMT9F, codec=video/H264, payloadType=125, ssrc=2622306050)
+2025/11/29 20:32:31.838596 [e2ee-web-room/web-e2ee-publisher] track fmtp: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+2025/11/29 20:32:31.838615 [e2ee-web-room/web-e2ee-publisher] requesting initial keyframe via PLI (seq=11124)
+2025/11/29 20:32:31.838661 [e2ee-web-room/web-e2ee-publisher] video E2EE error (seq=11124): incorrect iv length (payload len=24, first byte=0x78)
+2025/11/29 20:32:31.838671 [e2ee-web-room/web-e2ee-publisher] video E2EE error (seq=11125): cipher: message authentication failed (payload len=974, first byte=0x7c)
+2025/11/29 20:32:31.838677 [e2ee-web-room/web-e2ee-publisher] video E2EE error (seq=11126): cipher: message authentication failed (payload len=974, first byte=0x7c)
+2025/11/29 20:32:31.851110 [e2ee-debug] Successfully decrypted audio payload 2: encrypted=94 bytes -> decrypted=64 bytes
+2025/11/29 20:32:31.871152 [e2ee-debug] Successfully decrypted audio payload 3: encrypted=102 bytes -> decrypted=72 bytes
+2025/11/29 20:32:31.871157 [e2ee-web-room/web-e2ee-publisher] video E2EE error (seq=11127): cipher: message authentication failed (payload len=974, first byte=0x7c)
+2025/11/29 20:32:31.901649 [e2ee-web-room/web-e2ee-publisher] video E2EE error (seq=11128): cipher: message authentication failed (payload len=179, first byte=0x61)
+2025/11/29 20:32:40.534037 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 15]
+2025/11/29 20:32:40.534085 [INFO] [DEBUG] Received message from server [messageNumber 11 messageType *livekit.ServerMessage_Pong]
+2025/11/29 20:32:50.848461 [e2ee-web-room/web-e2ee-publisher] participant disconnected, stopping recording
+2025/11/29 20:32:50.848651 [e2ee-web-room/web-e2ee-publisher] stopping recorder
+2025/11/29 20:32:50.848841 "level"=0 "msg"="server initiated leave" "reason"="CLIENT_INITIATED"
+2025/11/29 20:32:50.848852 [e2ee-web-room/web-e2ee-publisher] recorder connection disconnected by server
+2025/11/29 20:32:55.848915 [e2ee-web-room/web-e2ee-publisher] normalized HLS timestamps
+2025/11/29 20:32:55.848964 [e2ee-web-room/web-e2ee-publisher] failed to fix HLS playlist: read playlist: open /Users/alexeysokolov/GolandProjects/livekit-agent-sdk-go/examples/publisher-hls-agent/publisher-hls-output/e2ee-web-room_web-e2ee-publisher_20251129-203231.632/video.m3u8: no such file or directory
+2025/11/29 20:32:55.849226 [e2ee-web-room/web-e2ee-publisher] wrote audio manifest with 0 segments
+2025/11/29 20:32:55.849232 [e2ee-web-room/web-e2ee-publisher] failed to write audio HLS playlist: no segments to write
+2025/11/29 20:32:55.849236 [e2ee-web-room/web-e2ee-publisher] recorder stats: videoPackets=0 emptyVideo=0 videoBytes=0 keyframes=0 sps=0 pps=0 plis=1 audioPackets=0 emptyAudio=0 audioBytes=0 videoPTS=0.000s audioPTS=0.000s videoBase=0 audioBase=0 videoLastTS=0 audioLastTS=0
+2025/11/29 20:32:55.860872 [e2ee-web-room/web-e2ee-publisher] uploaded recording to s3://publisher-hls/web-e2ee-recordings/e2ee-web-room/web-e2ee-publisher
+2025/11/29 20:32:55.861135 [e2ee-web-room/web-e2ee-publisher] cleaned up temporary directory: /Users/alexeysokolov/GolandProjects/livekit-agent-sdk-go/examples/publisher-hls-agent/publisher-hls-output/e2ee-web-room_web-e2ee-publisher_20251129-203231.632
+2025/11/29 20:32:55.861177 [INFO] [DEBUG] Sending worker status update [status available load 0 jobCount 0]
+2025/11/29 20:32:55.861706 "level"=0 "msg"="server initiated leave" "reason"="CLIENT_INITIATED"
+2025/11/29 20:32:55.861716 [INFO] Disconnected from room [jobID AJ_yC6zMqwapmGs]
+2025/11/29 20:32:55.861725 [INFO] Disconnected from room with reason [jobID AJ_yC6zMqwapmGs reason leave requested by user]
+2025/11/29 20:33:10.534124 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 15]
+2025/11/29 20:33:10.534171 [INFO] [DEBUG] Received message from server [messageNumber 12 messageType *livekit.ServerMessage_Pong]
+2025/11/29 20:33:40.533999 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 15]
+2025/11/29 20:33:40.534031 [INFO] [DEBUG] Received message from server [messageNumber 13 messageType *livekit.ServerMessage_Pong]
+2025/11/29 20:34:10.533934 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 15]
+2025/11/29 20:34:10.533982 [INFO] [DEBUG] Received message from server [messageNumber 14 messageType *livekit.ServerMessage_Pong]
+2025/11/29 20:34:40.533954 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 15]
+2025/11/29 20:34:40.533993 [INFO] [DEBUG] Received message from server [messageNumber 15 messageType *livekit.ServerMessage_Pong]
+2025/11/29 20:35:10.533848 [INFO] [DEBUG] Read raw message from WebSocket [messageType 2 dataLength 15]
+2025/11/29 20:35:10.533894 [INFO] [DEBUG] Received message from server [messageNumber 16 messageType *livekit.ServerMessage_Pong]
+2025/11/29 20:35:18.830492 received signal terminated, stopping worker
+2025/11/29 20:35:18.830563 [ERROR] Failed to read message [error read tcp [::1]:56486->[::1]:7880: use of closed network connection]
+2025/11/29 20:35:18.830580 === Publisher HLS Recording Summary ===
+2025/11/29 20:35:18.830591 • web-e2ee-publisher in room e2ee-web-room → error: failed to stat recording: stat /Users/alexeysokolov/GolandProjects/livekit-agent-sdk-go/examples/publisher-hls-agent/publisher-hls-output/e2ee-web-room_web-e2ee-publisher_20251129-203231.632/output.ts: no such file or directory
+2025/11/29 20:35:18.830598 publisher HLS agent stopped

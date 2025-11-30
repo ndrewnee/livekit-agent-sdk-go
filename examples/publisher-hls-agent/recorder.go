@@ -575,7 +575,111 @@ const (
 	nalUnitTypeIDR   = 5  // IDR (Instantaneous Decoder Refresh) keyframe
 	nalUnitTypeSTAPA = 24 // Single-time Aggregation Packet Type A (multiple NAL units)
 	nalUnitTypeFUA   = 28 // Fragmentation Unit Type A (fragmented NAL unit)
+
+	// rtpMTU is the maximum payload size for RTP packets before fragmentation is needed.
+	// This is chosen to fit within typical UDP MTU (~1400 bytes) after IP/UDP/RTP headers.
+	// NAL units larger than this should be fragmented using FU-A.
+	rtpMTU = 1200
 )
+
+// fragmentNALToFUA fragments a large NAL unit into FU-A (Fragmentation Unit Type A) packets.
+// This is required for NAL units that exceed the RTP MTU size.
+//
+// FU-A packet format (RFC 6184):
+//   - Byte 0: FU indicator: F=0, NRI=from original NAL, Type=28 (FU-A)
+//   - Byte 1: FU header: S=start flag, E=end flag, R=0, NAL type
+//   - Bytes 2+: Fragment of NAL unit data (without the NAL header byte)
+//
+// Parameters:
+//   - nalData: Complete NAL unit data including NAL header byte
+//   - timestamp: RTP timestamp for all fragments
+//   - ssrc: SSRC for the RTP packets
+//   - payloadType: RTP payload type
+//   - startSeqNum: Starting sequence number for the fragments
+//   - isLastNAL: Whether this is the last NAL in the access unit (for marker bit)
+//
+// Returns:
+//   - Slice of RTP packets representing the fragmented NAL
+//   - The next sequence number to use
+func fragmentNALToFUA(nalData []byte, timestamp uint32, ssrc uint32, payloadType uint8, startSeqNum uint16, isLastNAL bool) ([]*rtp.Packet, uint16) {
+	if len(nalData) <= rtpMTU {
+		// No fragmentation needed
+		return nil, startSeqNum
+	}
+
+	var packets []*rtp.Packet
+	seqNum := startSeqNum
+
+	// Extract NAL header and data
+	nalHeader := nalData[0]
+	nalType := nalHeader & 0x1F
+	nri := nalHeader & 0x60 // NRI bits (bits 5-6)
+	nalBody := nalData[1:]  // NAL data without header
+
+	// FU indicator: F=0, NRI=from original, Type=28 (FU-A)
+	fuIndicator := nri | nalUnitTypeFUA
+
+	// Fragment the NAL body (without header) into chunks
+	// Each chunk can be at most rtpMTU - 2 bytes (for FU indicator and FU header)
+	maxChunkSize := rtpMTU - 2
+	offset := 0
+	fragmentIndex := 0
+	totalFragments := (len(nalBody) + maxChunkSize - 1) / maxChunkSize
+
+	for offset < len(nalBody) {
+		chunkEnd := offset + maxChunkSize
+		if chunkEnd > len(nalBody) {
+			chunkEnd = len(nalBody)
+		}
+		chunk := nalBody[offset:chunkEnd]
+
+		// FU header: S=start, E=end, R=0, Type=original NAL type
+		var fuHeader byte
+		if fragmentIndex == 0 {
+			fuHeader = 0x80 | nalType // S=1, E=0, R=0, Type
+		} else if chunkEnd >= len(nalBody) {
+			fuHeader = 0x40 | nalType // S=0, E=1, R=0, Type
+		} else {
+			fuHeader = nalType // S=0, E=0, R=0, Type
+		}
+
+		// Build FU-A payload
+		payload := make([]byte, 2+len(chunk))
+		payload[0] = fuIndicator
+		payload[1] = fuHeader
+		copy(payload[2:], chunk)
+
+		// Marker bit only on last fragment of last NAL
+		marker := (chunkEnd >= len(nalBody)) && isLastNAL
+
+		pkt := &rtp.Packet{
+			Header: rtp.Header{
+				Version:        2,
+				Padding:        false,
+				Extension:      false,
+				Marker:         marker,
+				PayloadType:    payloadType,
+				SequenceNumber: seqNum,
+				Timestamp:      timestamp,
+				SSRC:           ssrc,
+			},
+			Payload: payload,
+		}
+		packets = append(packets, pkt)
+
+		seqNum++
+		offset = chunkEnd
+		fragmentIndex++
+	}
+
+	// Log fragmentation for debugging (only first few)
+	if len(packets) > 0 && totalFragments > 1 {
+		log.Printf("[FU-A] fragmented NAL type=%d (%d bytes) into %d fragments, seq=%d-%d",
+			nalType, len(nalData), totalFragments, startSeqNum, seqNum-1)
+	}
+
+	return packets, seqNum
+}
 
 // isH264Keyframe detects whether an RTP payload contains or references an H.264 keyframe.
 //
@@ -770,7 +874,10 @@ func (r *ParticipantRecorder) initVideoCaps(payloadType uint8) {
 	if r.videoInitialized {
 		return
 	}
-	capsStr := fmt.Sprintf("application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,payload=%d", payloadType)
+	// IMPORTANT: packetization-mode=1 is required for rtph264depay to accept STAP-A packets
+	// Without it, rtph264depay assumes mode 0 (single NAL unit) and drops STAP-A/FU-A packets
+	// This is critical for E2EE video where we bundle SPS/PPS in STAP-A format
+	capsStr := fmt.Sprintf("application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,payload=%d,packetization-mode=(string)1", payloadType)
 	caps := gst.NewCapsFromString(capsStr)
 	_ = r.videoAppSrc.SetProperty("caps", caps)
 	r.videoInitialized = true
@@ -1344,7 +1451,20 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 		}
 
 		var handshakeWait, recordingWait int
+		var videoE2EEErrors, videoE2EESuccess int
 		firstPacket := true
+
+		// H264 E2EE frame assembler for handling fragmented encrypted NAL units
+		var h264Assembler *H264E2EEAssembler
+
+		// Queue for decrypted NAL packets (E2EE may return multiple NALs per RTP packet)
+		var decryptedPacketQueue []*rtp.Packet
+
+		// Synthetic sequence number for E2EE decrypted packets
+		// When we split STAP-A into individual NAL units, they would all have the same
+		// sequence number, which causes rtpjitterbuffer to drop duplicates.
+		// We assign unique incrementing sequence numbers to avoid this.
+		var e2eeSeqNum uint16
 
 		fmtp := track.Codec().SDPFmtpLine
 		log.Printf("[%s] track fmtp: %q", r.logPrefix(), fmtp)
@@ -1358,8 +1478,17 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 		for {
 			var rtpPacket *rtp.Packet
 			var fromBuffer bool
+			var fromDecryptedQueue bool
 
-			if r.recordingActive.Load() {
+			// First check if we have decrypted packets in the queue (from E2EE processing)
+			if len(decryptedPacketQueue) > 0 {
+				rtpPacket = decryptedPacketQueue[0]
+				decryptedPacketQueue = decryptedPacketQueue[1:]
+				fromDecryptedQueue = true
+			}
+
+			// If no decrypted packets, check pre-video buffer
+			if rtpPacket == nil && r.recordingActive.Load() {
 				if buffered := r.dequeuePreVideoPacket(); buffered != nil {
 					rtpPacket = buffered
 					fromBuffer = true
@@ -1389,30 +1518,157 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 					r.requestPLI(pliWriter, track.SSRC())
 				}
 
-				// For E2EE video: use frame-level decryption
-				// H264 NAL units are split across multiple RTP packets (FU-A fragmentation),
-				// so we must reassemble complete NAL units before decryption.
+				// For E2EE video: use frame assembler to handle fragmented encrypted NAL units
+				// LiveKit E2EE encrypts complete NAL units BEFORE RTP packetization.
+				// FU-A fragments must be reassembled before decryption.
 				e2eeEnabled := r.E2EEEnabled()
 				if e2eeEnabled && len(rtpPacket.Payload) > 0 {
-					r.mu.Lock()
-					depacketizer := r.h264Depacketizer
-					r.mu.Unlock()
+					// Initialize assembler on first encrypted packet
+					if h264Assembler == nil {
+						r.mu.Lock()
+						e2eeCtx := r.e2eeCtx
+						r.mu.Unlock()
 
-					if depacketizer != nil {
-						decryptedNALU, err := depacketizer.ProcessRTP(rtpPacket)
+						if e2eeCtx != nil && e2eeCtx.Enabled() {
+							e2eeCtx.mu.RLock()
+							cipherBlock := e2eeCtx.cipherBlock
+							sifTrailer := e2eeCtx.sifTrailer
+							e2eeCtx.mu.RUnlock()
+
+							h264Assembler = NewH264E2EEAssembler(cipherBlock, sifTrailer, r.logPrefix())
+							log.Printf("[%s] initialized H264 E2EE frame assembler", r.logPrefix())
+						}
+					}
+
+					if h264Assembler != nil {
+						// Process packet through assembler
+						nals, err := h264Assembler.ProcessPacket(rtpPacket)
 						if err != nil {
-							// Decryption failed - skip
+							videoE2EEErrors++
+							if videoE2EEErrors <= 5 {
+								log.Printf("[%s] video E2EE assembler error (seq=%d): %v",
+									r.logPrefix(), rtpPacket.SequenceNumber, err)
+							}
 							continue
 						}
-						if decryptedNALU == nil {
-							// Still accumulating fragments or SIF frame - continue to next packet
+
+						if nals == nil || len(nals) == 0 {
+							// Fragment accumulated, waiting for more
 							continue
 						}
-						// Replace payload with decrypted NAL unit
-						rtpPacket.Payload = decryptedNALU
+
+						// Convert decrypted NAL units back to RTP packets and add to queue
+						// For packetization-mode=1 compatibility, we need to:
+						// 1. Bundle SPS+PPS into STAP-A packets (rtph264depay expects this format)
+						// 2. Send other NALs (IDR, P-frames) as single NAL unit packets
+
+						// First pass: separate parameter sets (SPS/PPS) from other NALs
+						var parameterSets []*H264NAL
+						var otherNals []*H264NAL
+						for _, nal := range nals {
+							if nal.Data == nil || len(nal.Data) == 0 {
+								continue
+							}
+							nalType := nal.Data[0] & 0x1F
+							if nalType == nalUnitTypeSPS || nalType == nalUnitTypePPS {
+								parameterSets = append(parameterSets, nal)
+							} else {
+								otherNals = append(otherNals, nal)
+							}
+						}
+
+						// If we have SPS and/or PPS, bundle them into a STAP-A packet
+						if len(parameterSets) > 0 {
+							videoE2EESuccess++
+							e2eeSeqNum++
+
+							// Build STAP-A payload: [STAP-A header] + [size1][NAL1] + [size2][NAL2] + ...
+							// STAP-A header: F=0, NRI=3 (highest priority), Type=24
+							stapPayload := []byte{0x78} // 0b01111000 = F:0, NRI:11, Type:24
+							for _, ps := range parameterSets {
+								// 2-byte big-endian size prefix
+								size := len(ps.Data)
+								stapPayload = append(stapPayload, byte(size>>8), byte(size&0xFF))
+								stapPayload = append(stapPayload, ps.Data...)
+							}
+
+							stapPkt := &rtp.Packet{
+								Header: rtp.Header{
+									Version:        rtpPacket.Version,
+									Padding:        false,
+									Extension:      false,
+									Marker:         len(otherNals) == 0, // Marker only if no other NALs follow
+									PayloadType:    rtpPacket.PayloadType,
+									SequenceNumber: e2eeSeqNum,
+									Timestamp:      parameterSets[0].Timestamp,
+									SSRC:           rtpPacket.SSRC,
+								},
+								Payload: stapPayload,
+							}
+							decryptedPacketQueue = append(decryptedPacketQueue, stapPkt)
+
+							if videoE2EESuccess <= 5 {
+								var types []byte
+								for _, ps := range parameterSets {
+									types = append(types, ps.Data[0]&0x1F)
+								}
+								log.Printf("[%s] video E2EE STAP-A created: %d NALs (types=%v), size=%d bytes, synth_seq=%d (queued)",
+									r.logPrefix(), len(parameterSets), types, len(stapPayload), e2eeSeqNum)
+							}
+						}
+
+						// Send remaining NALs (IDR, P-frames) - use FU-A for large NALs
+						for i, nal := range otherNals {
+							isLastNAL := i == len(otherNals)-1
+							nalType := nal.Data[0] & 0x1F
+
+							// Check if NAL needs fragmentation
+							if len(nal.Data) > rtpMTU {
+								// Large NAL - fragment using FU-A
+								videoE2EESuccess++
+								fuPackets, nextSeq := fragmentNALToFUA(nal.Data, nal.Timestamp, rtpPacket.SSRC, rtpPacket.PayloadType, e2eeSeqNum+1, isLastNAL)
+								if len(fuPackets) > 0 {
+									decryptedPacketQueue = append(decryptedPacketQueue, fuPackets...)
+									e2eeSeqNum = nextSeq - 1 // -1 because loop will increment
+
+									if videoE2EESuccess <= 5 {
+										log.Printf("[%s] video E2EE large NAL fragmented: NAL type=%d, size=%d bytes -> %d FU-A packets, seq=%d-%d (queued)",
+											r.logPrefix(), nalType, len(nal.Data), len(fuPackets), fuPackets[0].SequenceNumber, fuPackets[len(fuPackets)-1].SequenceNumber)
+									}
+								}
+							} else {
+								// Small NAL - send as single NAL unit packet
+								videoE2EESuccess++
+								e2eeSeqNum++
+								newPkt := &rtp.Packet{
+									Header: rtp.Header{
+										Version:        rtpPacket.Version,
+										Padding:        false,
+										Extension:      false,
+										Marker:         isLastNAL, // Marker on last NAL of frame
+										PayloadType:    rtpPacket.PayloadType,
+										SequenceNumber: e2eeSeqNum,
+										Timestamp:      nal.Timestamp,
+										SSRC:           rtpPacket.SSRC,
+									},
+									Payload: nal.Data,
+								}
+								decryptedPacketQueue = append(decryptedPacketQueue, newPkt)
+
+								if videoE2EESuccess <= 5 {
+									log.Printf("[%s] video E2EE frame decrypted: NAL type=%d, size=%d bytes, synth_seq=%d (queued)",
+										r.logPrefix(), nalType, len(nal.Data), e2eeSeqNum)
+								}
+							}
+						}
+						// Continue to next iteration to process packets from queue
+						continue
 					}
 				}
 			}
+
+			// Skip E2EE processing if packet came from decrypted queue (already decrypted)
+			_ = fromDecryptedQueue
 
 			if rtpPacket == nil {
 				continue

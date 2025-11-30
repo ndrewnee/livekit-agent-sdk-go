@@ -118,6 +118,11 @@ func (e *E2EEContext) UpdateSifTrailer(sifTrailer []byte) {
 //   - Decrypted payload on success
 //   - nil with no error for Server Injected Frames (should be dropped)
 //   - Error if decryption fails
+//
+// debugPayloadOnce is used to log the first encrypted payload for debugging
+var debugPayloadOnce sync.Once
+var debugPayloadCount int
+
 func (e *E2EEContext) DecryptAudio(payload []byte) ([]byte, error) {
 	if !e.Enabled() {
 		return nil, ErrE2EENotEnabled
@@ -128,43 +133,72 @@ func (e *E2EEContext) DecryptAudio(payload []byte) ([]byte, error) {
 	sifTrailer := e.sifTrailer
 	e.mu.RUnlock()
 
+	// Debug: log the first few payloads to understand the format
+	debugPayloadOnce.Do(func() {
+		log.Printf("[e2ee-debug] First audio payload (len=%d):", len(payload))
+		if len(payload) >= 20 {
+			log.Printf("[e2ee-debug]   First 10 bytes: %x", payload[:10])
+			log.Printf("[e2ee-debug]   Last 10 bytes: %x", payload[len(payload)-10:])
+			log.Printf("[e2ee-debug]   Last 2 bytes (trailer): ivLen=%d, keyID=%d", payload[len(payload)-2], payload[len(payload)-1])
+		}
+		log.Printf("[e2ee-debug]   sifTrailer len=%d", len(sifTrailer))
+		if len(sifTrailer) > 0 {
+			log.Printf("[e2ee-debug]   sifTrailer: %x", sifTrailer)
+		}
+	})
+
 	decrypted, err := lksdk.DecryptGCMAudioSampleCustomCipher(payload, sifTrailer, cipherBlock)
 	if err != nil {
+		debugPayloadCount++
+		if debugPayloadCount <= 3 {
+			log.Printf("[e2ee-debug] Decryption failed for payload %d (len=%d):", debugPayloadCount, len(payload))
+			if len(payload) >= 20 {
+				log.Printf("[e2ee-debug]   First 10 bytes: %x", payload[:10])
+				log.Printf("[e2ee-debug]   Last 10 bytes: %x", payload[len(payload)-10:])
+				log.Printf("[e2ee-debug]   Trailer: ivLen=%d, keyID=%d", payload[len(payload)-2], payload[len(payload)-1])
+			} else {
+				log.Printf("[e2ee-debug]   Full payload: %x", payload)
+			}
+		}
 		return nil, fmt.Errorf("audio decryption failed: %w", err)
 	}
 
 	// nil return means this was a Server Injected Frame
 	if decrypted == nil {
+		debugPayloadCount++
+		if debugPayloadCount <= 3 {
+			log.Printf("[e2ee-debug] SIF frame detected for payload %d (dropped)", debugPayloadCount)
+		}
 		return nil, nil
+	}
+
+	// Log successful decryption for first few packets
+	debugPayloadCount++
+	if debugPayloadCount <= 3 {
+		log.Printf("[e2ee-debug] Successfully decrypted audio payload %d: encrypted=%d bytes -> decrypted=%d bytes",
+			debugPayloadCount, len(payload), len(decrypted))
 	}
 
 	return decrypted, nil
 }
 
-// DecryptVideo decrypts an E2EE-encrypted video RTP payload.
+// DecryptRTPPayload decrypts an E2EE-encrypted RTP payload (works for both audio and video).
 //
-// Video frames use the same AES-GCM encryption format as audio, but with
-// potentially different unencrypted header bytes depending on the codec.
-// For H264, typically 1-2 bytes of NAL unit header remain unencrypted.
+// LiveKit E2EE uses the same encryption format for all media types:
+//   - 1 byte unencrypted header (used as AAD)
+//   - encrypted payload with GCM auth tag
+//   - IV (typically 12 bytes)
+//   - ivLen (1 byte)
+//   - keyID (1 byte)
 //
-// Encrypted payload format (same as LiveKit client SDK):
-//
-//	+---------+-------------------------+---------+----+
-//	|frameHdr |     encrypted payload   |   IV    |len |KID|
-//	+---------+-------------------------+---------+----+
-//
-// Where:
-//   - frameHdr: Unencrypted frame header (used for authentication)
-//   - encrypted payload: AES-GCM encrypted video data
-//   - IV: Initialization vector (12 bytes typical)
-//   - len: IV length (1 byte)
-//   - KID: Key ID (1 byte, ignored - key provided externally)
+// This function uses the SDK's DecryptGCMAudioSampleCustomCipher which works
+// for both audio and video RTP payloads.
 //
 // Returns:
 //   - Decrypted payload on success
 //   - nil with no error for Server Injected Frames (should be dropped)
 //   - Error if decryption fails
-func (e *E2EEContext) DecryptVideo(payload []byte) ([]byte, error) {
+func (e *E2EEContext) DecryptRTPPayload(payload []byte) ([]byte, error) {
 	if !e.Enabled() {
 		return nil, ErrE2EENotEnabled
 	}
@@ -174,59 +208,20 @@ func (e *E2EEContext) DecryptVideo(payload []byte) ([]byte, error) {
 	sifTrailer := e.sifTrailer
 	e.mu.RUnlock()
 
-	// Check for Server Injected Frame
-	if sifTrailer != nil && len(payload) >= len(sifTrailer) {
-		possibleTrailer := payload[len(payload)-len(sifTrailer):]
-		if bytes.Equal(possibleTrailer, sifTrailer) {
-			// This is an unencrypted Server Injected Frame - should be dropped
-			return nil, nil
-		}
-	}
-
-	// Minimum payload size: frameHeader + ciphertext(16 byte auth tag min) + IV + ivLength + KID
-	minSize := unencryptedVideoBytes + 16 + ivLength + 2
-	if len(payload) < minSize {
-		return nil, ErrMalformedPayload
-	}
-
-	// Parse encrypted payload structure
-	// Last 2 bytes: IV_LENGTH (1 byte) + KID (1 byte)
-	frameTrailer := payload[len(payload)-2:]
-	ivLen := int(frameTrailer[0])
-	// KID := frameTrailer[1] // Key ID - ignored, we use externally provided key
-
-	if ivLen > len(payload)-2-unencryptedVideoBytes {
-		return nil, ErrMalformedPayload
-	}
-
-	// Extract components
-	frameHeader := payload[:unencryptedVideoBytes]
-	ivStart := len(payload) - 2 - ivLen
-	iv := payload[ivStart : ivStart+ivLen]
-
-	cipherTextStart := unencryptedVideoBytes
-	cipherTextEnd := ivStart
-	cipherText := payload[cipherTextStart:cipherTextEnd]
-
-	// Create GCM cipher with the IV length from the payload
-	aesGCM, err := cipher.NewGCMWithNonceSize(cipherBlock, ivLen)
+	// Use the SDK's audio decryption function - it works for video too
+	// since the encryption format is identical
+	decrypted, err := lksdk.DecryptGCMAudioSampleCustomCipher(payload, sifTrailer, cipherBlock)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM cipher: %w", err)
+		return nil, err
 	}
 
-	// Decrypt using authenticated decryption
-	// The frame header is used as Additional Authenticated Data (AAD)
-	plainText, err := aesGCM.Open(nil, iv, cipherText, frameHeader)
-	if err != nil {
-		return nil, fmt.Errorf("video decryption failed: %w", err)
-	}
+	return decrypted, nil
+}
 
-	// Reconstruct the decrypted payload: frameHeader + plainText
-	result := make([]byte, len(frameHeader)+len(plainText))
-	copy(result[:len(frameHeader)], frameHeader)
-	copy(result[len(frameHeader):], plainText)
-
-	return result, nil
+// DecryptVideo decrypts an E2EE-encrypted video RTP payload.
+// This is an alias for DecryptRTPPayload for backwards compatibility.
+func (e *E2EEContext) DecryptVideo(payload []byte) ([]byte, error) {
+	return e.DecryptRTPPayload(payload)
 }
 
 // IsSIFFrame checks if the payload is a Server Injected Frame.
