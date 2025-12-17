@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -59,20 +60,44 @@ type E2EEContext struct {
 
 // NewE2EEContext creates a new E2EE decryption context from a passphrase.
 //
-// The passphrase is used to derive a 128-bit AES key using PBKDF2 with
-// the LiveKit standard salt ("LKFrameEncryptionKey"). The sifTrailer is
-// used to identify Server Injected Frames (non-encrypted placeholder frames)
-// which should be dropped during decryption.
+// The passphrase is processed in two ways to support different client configurations:
+//
+//  1. If the passphrase is a base64 URL-encoded 16-byte key, it is decoded and used
+//     with DeriveKeyFromBytes (HKDF derivation). This matches the LiveKit JS SDK
+//     behavior when using ExternalE2EEKeyProvider.setKey(key).
+//
+//  2. Otherwise, DeriveKeyFromString is used (PBKDF2 derivation). This matches the
+//     LiveKit JS SDK behavior when using a passphrase string.
+//
+// The sifTrailer is used to identify Server Injected Frames (non-encrypted
+// placeholder frames) which should be dropped during decryption.
 //
 // Parameters:
-//   - passphrase: The shared secret used by all E2EE participants
+//   - passphrase: The shared secret used by all E2EE participants (base64 key or passphrase)
 //   - sifTrailer: Server Injected Frame trailer from room.SifTrailer()
 //
 // Returns an error if key derivation fails.
 func NewE2EEContext(passphrase string, sifTrailer []byte) (*E2EEContext, error) {
-	key, err := lksdk.DeriveKeyFromString(passphrase)
-	if err != nil {
-		return nil, fmt.Errorf("failed to derive E2EE key: %w", err)
+	var key []byte
+	var err error
+	var derivationMethod string
+
+	// First, try to decode as base64 URL-encoded key (for ExternalE2EEKeyProvider)
+	keyBytes, decodeErr := base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(passphrase)
+	if decodeErr == nil && len(keyBytes) == 16 {
+		// Valid base64-encoded 16-byte key - use HKDF derivation
+		key, err = lksdk.DeriveKeyFromBytes(keyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to derive E2EE key from bytes: %w", err)
+		}
+		derivationMethod = "DeriveKeyFromBytes (base64 key)"
+	} else {
+		// Not a valid base64 key - use passphrase with PBKDF2 derivation
+		key, err = lksdk.DeriveKeyFromString(passphrase)
+		if err != nil {
+			return nil, fmt.Errorf("failed to derive E2EE key from string: %w", err)
+		}
+		derivationMethod = "DeriveKeyFromString (passphrase)"
 	}
 
 	cipherBlock, err := aes.NewCipher(key)
@@ -80,7 +105,7 @@ func NewE2EEContext(passphrase string, sifTrailer []byte) (*E2EEContext, error) 
 		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
 	}
 
-	log.Printf("[e2ee] initialized E2EE context (sifTrailer len=%d)", len(sifTrailer))
+	log.Printf("[e2ee] initialized E2EE context using %s (sifTrailer len=%d)", derivationMethod, len(sifTrailer))
 
 	return &E2EEContext{
 		key:         key,

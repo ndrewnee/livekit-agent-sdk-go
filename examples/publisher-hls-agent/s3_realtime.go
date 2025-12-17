@@ -14,6 +14,16 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
+// TrackedAudioSegment stores timing information for an audio segment
+// extracted during real-time processing (before file deletion).
+// This is used for manifest generation since files are deleted after S3 upload.
+type TrackedAudioSegment struct {
+	Index     int
+	Filename  string
+	Duration  float64
+	StartTime float64
+}
+
 // RealtimeS3Uploader manages real-time S3 upload of HLS segments with automatic cleanup.
 //
 // This uploader monitors the HLS playlist file and uploads segments immediately after
@@ -34,6 +44,11 @@ type RealtimeS3Uploader struct {
 	client        *minio.Client
 	uploadedMu    sync.Mutex
 	uploadedFiles map[string]struct{}
+
+	// Track audio segment info for manifest generation
+	// (since files are deleted after upload, we can't read them later)
+	audioSegmentsMu   sync.Mutex
+	audioSegmentsInfo []TrackedAudioSegment
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -195,6 +210,14 @@ func (u *RealtimeS3Uploader) processAndUploadAudioSegment(segmentName string, se
 
 	log.Printf("[%s/%s] processing audio segment %s (index %d)", u.room, u.participant, segmentName, segmentIndex)
 
+	// Extract timing info BEFORE processing (while file still has original data)
+	// This is critical for manifest generation since we delete the file after upload
+	const opusTimescale = 48000
+	segInfo, timingErr := getAudioSegmentInfo(segmentPath, opusTimescale)
+	if timingErr != nil {
+		log.Printf("[%s/%s] warning: failed to get timing for %s: %v (will use fallback)", u.room, u.participant, segmentName, timingErr)
+	}
+
 	// Process the segment: extract init (first segment only) and strip init data
 	mediaData, err := processAudioSegment(segmentPath, segmentIndex, initPath)
 	if err != nil {
@@ -204,6 +227,18 @@ func (u *RealtimeS3Uploader) processAndUploadAudioSegment(segmentName string, se
 			log.Printf("[%s/%s] failed to upload %s: %v", u.room, u.participant, segmentName, err)
 		}
 		return
+	}
+
+	// Track segment info for manifest generation (even if timing failed, use defaults)
+	if timingErr == nil {
+		u.addAudioSegmentInfo(segmentIndex, segmentName, segInfo.Duration, segInfo.StartTimeSeconds)
+		log.Printf("[%s/%s] tracked segment %s: startTime=%.3fs, duration=%.3fs", u.room, u.participant, segmentName, segInfo.StartTimeSeconds, segInfo.Duration)
+	} else {
+		// Fallback: use segment index * 2 seconds as approximate start time
+		fallbackDuration := 2.0
+		fallbackStart := float64(segmentIndex) * fallbackDuration
+		u.addAudioSegmentInfo(segmentIndex, segmentName, fallbackDuration, fallbackStart)
+		log.Printf("[%s/%s] tracked segment %s with fallback timing: startTime=%.3fs, duration=%.3fs", u.room, u.participant, segmentName, fallbackStart, fallbackDuration)
 	}
 
 	log.Printf("[%s/%s] processed segment %s: media size %d bytes", u.room, u.participant, segmentName, len(mediaData))
@@ -509,6 +544,30 @@ func (u *RealtimeS3Uploader) GetS3URL() string {
 	return fmt.Sprintf("s3://%s/%s", u.cfg.Bucket, path)
 }
 
+// GetAudioSegmentsInfo returns the tracked audio segment information.
+// This is used by the recorder to populate the audio manifest after files
+// have been deleted (during real-time upload, files are removed after upload).
+func (u *RealtimeS3Uploader) GetAudioSegmentsInfo() []TrackedAudioSegment {
+	u.audioSegmentsMu.Lock()
+	defer u.audioSegmentsMu.Unlock()
+	// Return a copy to avoid race conditions
+	result := make([]TrackedAudioSegment, len(u.audioSegmentsInfo))
+	copy(result, u.audioSegmentsInfo)
+	return result
+}
+
+// addAudioSegmentInfo tracks audio segment timing info for manifest generation.
+func (u *RealtimeS3Uploader) addAudioSegmentInfo(index int, filename string, duration, startTime float64) {
+	u.audioSegmentsMu.Lock()
+	defer u.audioSegmentsMu.Unlock()
+	u.audioSegmentsInfo = append(u.audioSegmentsInfo, TrackedAudioSegment{
+		Index:     index,
+		Filename:  filename,
+		Duration:  duration,
+		StartTime: startTime,
+	})
+}
+
 // Close stops monitoring, uploads remaining files, and cleans up.
 //
 // This function performs a graceful shutdown of the uploader:
@@ -611,8 +670,18 @@ func (u *RealtimeS3Uploader) finalUploadSweep() error {
 
 // processAudioSegmentsForUpload processes all audio segments to create proper CMAF format.
 // It extracts the init segment from the first audio segment and strips init data from all segments.
+// It also tracks segment timing info for segments not already tracked during real-time processing.
 func (u *RealtimeS3Uploader) processAudioSegmentsForUpload() error {
 	initPath := filepath.Join(u.watchDir, "audio_init.mp4")
+	const opusTimescale = 48000
+
+	// Get already tracked segments to avoid duplicates
+	trackedIndices := make(map[int]bool)
+	u.audioSegmentsMu.Lock()
+	for _, seg := range u.audioSegmentsInfo {
+		trackedIndices[seg.Index] = true
+	}
+	u.audioSegmentsMu.Unlock()
 
 	// Process all audio segments
 	for i := 0; ; i++ {
@@ -625,6 +694,25 @@ func (u *RealtimeS3Uploader) processAudioSegmentsForUpload() error {
 		}
 
 		log.Printf("[%s/%s] processing audio segment %s for final upload", u.room, u.participant, segmentName)
+
+		// Track timing BEFORE processing (if not already tracked during real-time)
+		if !trackedIndices[i] {
+			segInfo, timingErr := getAudioSegmentInfo(segmentPath, opusTimescale)
+			if timingErr == nil {
+				// Use cumulative timing (index * 2s) since tfdt may have large base offset
+				cumulativeStart := float64(i) * 2.0
+				u.addAudioSegmentInfo(i, segmentName, segInfo.Duration, cumulativeStart)
+				log.Printf("[%s/%s] tracked segment %s in final sweep: startTime=%.3fs, duration=%.3fs",
+					u.room, u.participant, segmentName, cumulativeStart, segInfo.Duration)
+			} else {
+				// Fallback
+				fallbackDuration := 2.0
+				fallbackStart := float64(i) * fallbackDuration
+				u.addAudioSegmentInfo(i, segmentName, fallbackDuration, fallbackStart)
+				log.Printf("[%s/%s] tracked segment %s with fallback: startTime=%.3fs, duration=%.3fs",
+					u.room, u.participant, segmentName, fallbackStart, fallbackDuration)
+			}
+		}
 
 		// Process the segment
 		mediaData, err := processAudioSegment(segmentPath, i, initPath)
