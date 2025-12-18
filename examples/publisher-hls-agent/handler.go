@@ -278,6 +278,18 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 				log.Printf("[%s/%s] requested HIGH quality for track %s", roomName, targetIdentity, publication.SID())
 			}
 		}
+
+		// For AUTO_ACTIVATE_RECORDING=true, pre-activate recording as soon as both
+		// tracks are published so we never miss the very first keyframe.
+		if session, ok := h.getSessionByParticipant(targetIdentity); ok {
+			switch publication.Kind() {
+			case lksdk.TrackKindVideo:
+				session.setTrackReady(webrtc.RTPCodecTypeVideo)
+			case lksdk.TrackKindAudio:
+				session.setTrackReady(webrtc.RTPCodecTypeAudio)
+			}
+			h.tryAutoActivate(session)
+		}
 	}
 	roomCallback.ParticipantCallback.OnTrackSubscribed = func(track *webrtc.TrackRemote, publication *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
 		if rp.Identity() != targetIdentity {
@@ -376,6 +388,17 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 						log.Printf("[%s/%s] requested HIGH quality for existing track %s", roomName, targetIdentity, remotePub.SID())
 					}
 				}
+
+				// Same pre-activation logic as OnTrackPublished: if tracks were already
+				// published before the agent connected, mark them as present and
+				// attempt AUTO_ACTIVATE_RECORDING.
+				switch remotePub.Kind() {
+				case lksdk.TrackKindVideo:
+					session.setTrackReady(webrtc.RTPCodecTypeVideo)
+				case lksdk.TrackKindAudio:
+					session.setTrackReady(webrtc.RTPCodecTypeAudio)
+				}
+				h.tryAutoActivate(session)
 			}
 		}
 	} else {
@@ -543,10 +566,6 @@ func (h *PublisherHLSHandler) tryAutoActivate(session *recordingSession) {
 		return
 	}
 
-	if !session.recorder.HandshakeReady() {
-		return
-	}
-
 	if !session.markActivatedIfReady() {
 		return
 	}
@@ -592,9 +611,6 @@ func (s *recordingSession) markActivatedIfReady() bool {
 		return false
 	}
 	if !s.tracksReady[webrtc.RTPCodecTypeVideo] || !s.tracksReady[webrtc.RTPCodecTypeAudio] {
-		return false
-	}
-	if !s.recorder.HandshakeReady() {
 		return false
 	}
 	s.activated = true

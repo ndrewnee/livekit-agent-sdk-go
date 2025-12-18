@@ -439,6 +439,32 @@ func (f *FrameAssembler) findNALUnits(data []byte) []nalUnit {
 
 // decryptWithAAD decrypts the frame using the specified number of unencrypted bytes as AAD.
 func (f *FrameAssembler) decryptWithAAD(encrypted []byte, unencryptedBytes int) ([]byte, error) {
+	decrypted, err := f.decryptWithAADInternal(encrypted, unencryptedBytes)
+	if err == nil {
+		return decrypted, nil
+	}
+
+	// LiveKit JS SDK applies RBSP escaping (emulation prevention bytes) to the encrypted
+	// portion of H264/H265 frames to avoid accidental start-code patterns. When reading
+	// RTP, we must reverse this before AES-GCM authentication/decryption.
+	if unencryptedBytes < len(encrypted) && hasRBSPEscapeBytes(encrypted[unencryptedBytes:]) {
+		unescapedPayload := removeRBSPEscaping(encrypted[unencryptedBytes:])
+		if len(unescapedPayload) != len(encrypted)-unencryptedBytes {
+			unescaped := make([]byte, 0, unencryptedBytes+len(unescapedPayload))
+			unescaped = append(unescaped, encrypted[:unencryptedBytes]...)
+			unescaped = append(unescaped, unescapedPayload...)
+
+			decrypted2, err2 := f.decryptWithAADInternal(unescaped, unencryptedBytes)
+			if err2 == nil {
+				return decrypted2, nil
+			}
+		}
+	}
+
+	return nil, err
+}
+
+func (f *FrameAssembler) decryptWithAADInternal(encrypted []byte, unencryptedBytes int) ([]byte, error) {
 	if len(encrypted) < unencryptedBytes+30 { // Need header + tag + IV + trailer
 		return nil, fmt.Errorf("encrypted data too short: %d bytes", len(encrypted))
 	}
@@ -487,6 +513,15 @@ func (f *FrameAssembler) decryptWithAAD(encrypted []byte, unencryptedBytes int) 
 	copy(result[unencryptedBytes:], plainText)
 
 	return result, nil
+}
+
+func hasRBSPEscapeBytes(frameData []byte) bool {
+	for i := 0; i < len(frameData)-2; i++ {
+		if frameData[i] == 0x00 && frameData[i+1] == 0x00 && frameData[i+2] == 0x03 {
+			return true
+		}
+	}
+	return false
 }
 
 // Stats returns current statistics.

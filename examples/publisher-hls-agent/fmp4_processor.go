@@ -114,6 +114,53 @@ func extractMediaSegment(data []byte) ([]byte, error) {
 	return data[boundary:], nil
 }
 
+// processFMP4Segment processes a CMAF/fMP4 segment file for HLS compatibility.
+// For the first segment (index 0):
+//   - Extracts and writes the init segment to initPath
+//   - Returns the media-only data
+//
+// For subsequent segments:
+//   - Returns the media-only data (strips init if present)
+//
+// This handles the case where splitmuxsink+cmafmux creates self-contained segments
+// with duplicate moov atoms, converting them to proper CMAF format.
+func processFMP4Segment(segmentPath string, segmentIndex int, initPath string) ([]byte, error) {
+	data, err := os.ReadFile(segmentPath)
+	if err != nil {
+		return nil, fmt.Errorf("read segment: %w", err)
+	}
+
+	if len(data) < 8 {
+		return nil, fmt.Errorf("segment too small: %d bytes", len(data))
+	}
+
+	// Find init/media boundary.
+	boundary, err := findInitSegmentBoundary(data)
+	if err != nil {
+		return nil, fmt.Errorf("find boundary: %w", err)
+	}
+
+	log.Printf("[fmp4] segment %d: total %d bytes, init boundary at %d", segmentIndex, len(data), boundary)
+
+	// For first segment, extract and save init data.
+	if segmentIndex == 0 && boundary > 0 {
+		initData := data[:boundary]
+		log.Printf("[fmp4] writing init segment to %s (%d bytes)", initPath, len(initData))
+		if err := os.WriteFile(initPath, initData, 0644); err != nil {
+			return nil, fmt.Errorf("write init segment: %w", err)
+		}
+		log.Printf("[fmp4] init segment written successfully")
+	}
+
+	// Return media-only data.
+	if boundary >= len(data) {
+		// No media data, just return the whole thing (shouldn't happen for valid segments).
+		return data, nil
+	}
+
+	return data[boundary:], nil
+}
+
 // processAudioSegment processes an audio segment file for HLS/CMAF compatibility.
 // For the first segment (index 0):
 //   - Extracts and writes the init segment to initPath
@@ -125,45 +172,15 @@ func extractMediaSegment(data []byte) ([]byte, error) {
 // This handles the case where splitmuxsink+cmafmux creates self-contained segments
 // with duplicate moov atoms, converting them to proper CMAF format.
 func processAudioSegment(segmentPath string, segmentIndex int, initPath string) ([]byte, error) {
-	data, err := os.ReadFile(segmentPath)
-	if err != nil {
-		return nil, fmt.Errorf("read segment: %w", err)
-	}
-
-	if len(data) < 8 {
-		return nil, fmt.Errorf("segment too small: %d bytes", len(data))
-	}
-
-	// Find init/media boundary
-	boundary, err := findInitSegmentBoundary(data)
-	if err != nil {
-		return nil, fmt.Errorf("find boundary: %w", err)
-	}
-
-	log.Printf("[fmp4] segment %d: total %d bytes, init boundary at %d", segmentIndex, len(data), boundary)
-
-	// For first segment, extract and save init data
-	if segmentIndex == 0 && boundary > 0 {
-		initData := data[:boundary]
-		log.Printf("[fmp4] writing init segment to %s (%d bytes)", initPath, len(initData))
-		if err := os.WriteFile(initPath, initData, 0644); err != nil {
-			return nil, fmt.Errorf("write init segment: %w", err)
-		}
-		log.Printf("[fmp4] init segment written successfully")
-	}
-
-	// Return media-only data
-	if boundary >= len(data) {
-		// No media data, just return the whole thing (shouldn't happen for valid segments)
-		return data, nil
-	}
-
-	return data[boundary:], nil
+	return processFMP4Segment(segmentPath, segmentIndex, initPath)
 }
 
 // createStypBox creates a CMAF segment type box (styp)
 // This is required at the start of CMAF media segments.
-func createStypBox() []byte {
+func createStypBox(brand string) []byte {
+	if len(brand) != 4 {
+		brand = "iso6"
+	}
 	// styp box structure:
 	// - 4 bytes: size (28)
 	// - 4 bytes: 'styp'
@@ -171,7 +188,7 @@ func createStypBox() []byte {
 	// - 4 bytes: minor version (0)
 	// - 4 bytes: compatible brand 'iso6'
 	// - 4 bytes: compatible brand 'cmfc'
-	// - 4 bytes: compatible brand 'opus' (for Opus audio)
+	// - 4 bytes: compatible brand (codec-specific, e.g. 'opus', 'av01')
 	buf := make([]byte, 28)
 	binary.BigEndian.PutUint32(buf[0:4], 28)
 	copy(buf[4:8], "styp")
@@ -179,13 +196,13 @@ func createStypBox() []byte {
 	binary.BigEndian.PutUint32(buf[12:16], 0)
 	copy(buf[16:20], "iso6")
 	copy(buf[20:24], "cmfc")
-	copy(buf[24:28], "opus")
+	copy(buf[24:28], brand)
 	return buf
 }
 
 // ensureStypPrefix ensures the media segment starts with a styp box.
 // If it already has styp, returns as-is. Otherwise, prepends a styp box.
-func ensureStypPrefix(mediaData []byte) []byte {
+func ensureStypPrefix(mediaData []byte, brand string) []byte {
 	if len(mediaData) < 8 {
 		return mediaData
 	}
@@ -196,11 +213,98 @@ func ensureStypPrefix(mediaData []byte) []byte {
 	}
 
 	// Prepend styp box
-	styp := createStypBox()
+	styp := createStypBox(brand)
 	result := make([]byte, len(styp)+len(mediaData))
 	copy(result, styp)
 	copy(result[len(styp):], mediaData)
 	return result
+}
+
+func getMP4TrackTimescale(initSegmentPath string) (uint32, error) {
+	data, err := os.ReadFile(initSegmentPath)
+	if err != nil {
+		return 0, fmt.Errorf("read init segment: %w", err)
+	}
+	if len(data) < 8 {
+		return 0, fmt.Errorf("init segment too small: %d bytes", len(data))
+	}
+
+	moov, err := findFirstBoxContent(data, boxTypeMoov)
+	if err != nil {
+		return 0, err
+	}
+	trak, err := findFirstBoxContent(moov, "trak")
+	if err != nil {
+		return 0, err
+	}
+	mdia, err := findFirstBoxContent(trak, "mdia")
+	if err != nil {
+		return 0, err
+	}
+	mdhd, err := findFirstBoxContent(mdia, "mdhd")
+	if err != nil {
+		return 0, err
+	}
+
+	if len(mdhd) < 16 {
+		return 0, fmt.Errorf("mdhd too small: %d bytes", len(mdhd))
+	}
+
+	version := mdhd[0]
+	switch version {
+	case 1:
+		if len(mdhd) < 24 {
+			return 0, fmt.Errorf("mdhd v1 too small: %d bytes", len(mdhd))
+		}
+		// version(1) + flags(3) + creation_time(8) + modification_time(8) + timescale(4)
+		timescale := binary.BigEndian.Uint32(mdhd[20:24])
+		if timescale == 0 {
+			return 0, fmt.Errorf("invalid timescale 0")
+		}
+		return timescale, nil
+	default:
+		// version(1) + flags(3) + creation_time(4) + modification_time(4) + timescale(4)
+		timescale := binary.BigEndian.Uint32(mdhd[12:16])
+		if timescale == 0 {
+			return 0, fmt.Errorf("invalid timescale 0")
+		}
+		return timescale, nil
+	}
+}
+
+func findFirstBoxContent(data []byte, boxType string) ([]byte, error) {
+	r := bytes.NewReader(data)
+	offset := 0
+
+	for {
+		header, err := readBoxHeader(r)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read box header at offset %d: %w", offset, err)
+		}
+
+		boxEnd := offset + int(header.Size)
+		if boxEnd > len(data) {
+			return nil, fmt.Errorf("box %s at offset %d extends beyond data (size %d, data len %d)",
+				header.Type, offset, header.Size, len(data))
+		}
+
+		if header.Type == boxType {
+			return data[offset+8 : boxEnd], nil
+		}
+
+		skipBytes := int(header.Size) - 8
+		if skipBytes > 0 {
+			if _, err := r.Seek(int64(skipBytes), io.SeekCurrent); err != nil {
+				return nil, fmt.Errorf("skip box %s content: %w", header.Type, err)
+			}
+		}
+		offset = boxEnd
+	}
+
+	return nil, fmt.Errorf("no %s box found", boxType)
 }
 
 // getAudioSegmentDuration parses an fMP4 audio segment and returns its actual duration in seconds.
@@ -572,6 +676,12 @@ func parseTrafForSegmentInfo(trafData []byte, timescale uint32) (*AudioSegmentIn
 				}
 				if flags&0x000008 != 0 && tfhdOffset+4 <= len(boxContent) {
 					defaultSampleDuration = binary.BigEndian.Uint32(boxContent[tfhdOffset : tfhdOffset+4])
+					// Some muxers (or corrupted segments) may emit a zero default duration.
+					// For Opus in CMAF, 20ms (960 samples at 48kHz) is the common fixed frame size.
+					// Treat 0 as invalid and fall back to 960 so duration calculations remain sane.
+					if defaultSampleDuration == 0 {
+						defaultSampleDuration = 960
+					}
 				}
 			}
 		case "tfdt":

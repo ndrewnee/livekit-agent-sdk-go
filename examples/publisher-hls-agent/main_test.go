@@ -44,6 +44,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -71,7 +72,6 @@ import (
 // The development credentials (devkey/secret) are insecure and should only
 // be used in local testing environments, never in production.
 const (
-	testLiveKitURL  = "ws://localhost:7880"
 	testAPIKey      = "devkey"
 	testAPISecret   = "secret"
 	testRoomName    = "publisher-hls-test-room"
@@ -139,7 +139,10 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.Lshortfile)
 
 	repoRoot := findRepoRoot(t)
-	serverBinary := filepath.Join(repoRoot, "livekit", "livekit-server")
+	serverBinary, err := exec.LookPath("livekit-server")
+	if err != nil {
+		t.Fatalf("livekit-server not found in PATH: %v", err)
+	}
 	configPath := filepath.Join(repoRoot, "examples", "livekit-server-dev.yaml")
 
 	tempRoot := t.TempDir()
@@ -150,9 +153,6 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 	}
 	serverLogPath := filepath.Join(tempRoot, "livekit-server.log")
 
-	_ = os.Setenv("LIVEKIT_URL", testLiveKitURL)
-	_ = os.Setenv("LIVEKIT_API_KEY", testAPIKey)
-	_ = os.Setenv("LIVEKIT_API_SECRET", testAPISecret)
 	_ = os.Setenv("OUTPUT_DIR", outputDir)
 	_ = os.Setenv("AGENT_NAME", "test-publisher-hls-agent")
 	_ = os.Setenv("HLS_SEGMENT_DURATION", "2")
@@ -164,17 +164,15 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 	}
 	defer func() { _ = serverLogFile.Close() }()
 
-	serverCmd := exec.Command(serverBinary, "--config", configPath)
-	serverCmd.Stdout = serverLogFile
-	serverCmd.Stderr = serverLogFile
+	lkServer := startLiveKitServer(t, serverBinary, configPath, repoRoot, serverLogFile)
+	serverCmd := lkServer.Cmd
+	t.Cleanup(func() {
+		shutdownProcess(t, serverCmd, "livekit-server", 10*time.Second)
+	})
 
-	if err := serverCmd.Start(); err != nil {
-		t.Fatalf("failed to start livekit server: %v", err)
-	}
-	defer func() {
-		_ = serverCmd.Process.Kill()
-		_ = serverCmd.Wait()
-	}()
+	_ = os.Setenv("LIVEKIT_URL", lkServer.WSURL)
+	_ = os.Setenv("LIVEKIT_API_KEY", testAPIKey)
+	_ = os.Setenv("LIVEKIT_API_SECRET", testAPISecret)
 
 	if debugDir := os.Getenv("PUBLISHER_HLS_DEBUG_OUTPUT"); debugDir != "" {
 		logCopyPath := filepath.Join(debugDir, "server.log")
@@ -189,10 +187,6 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 				t.Logf("server log copied to %s", logCopyPath)
 			}
 		})
-	}
-
-	if err := waitForLiveKitServer("localhost:7880", 15*time.Second); err != nil {
-		t.Fatalf("livekit server not ready: %v", err)
 	}
 
 	cfg := loadConfig()
@@ -234,7 +228,7 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 		}
 	})
 
-	roomClient := lksdk.NewRoomServiceClient("http://localhost:7880", cfg.APIKey, cfg.APISecret)
+	roomClient := lksdk.NewRoomServiceClient(lkServer.HTTPURL, cfg.APIKey, cfg.APISecret)
 	_, _ = roomClient.DeleteRoom(context.Background(), &livekit.DeleteRoomRequest{Room: testRoomName})
 
 	_, err = roomClient.CreateRoom(context.Background(), &livekit.CreateRoomRequest{
@@ -250,7 +244,7 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 		t.Fatalf("failed to create test room: %v", err)
 	}
 
-	testVideo := filepath.Join(repoRoot, "examples", "egress-agent", "test-data", "test.mp4")
+	testVideo := filepath.Join(repoRoot, "examples", "publisher-hls-agent", "test", "test.mp4")
 	if _, err := os.Stat(testVideo); err != nil {
 		t.Fatalf("test video missing: %v", err)
 	}
@@ -320,7 +314,7 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 		t.Fatal("audio track was not bound in time")
 	}
 
-	handshakePublisher, err := NewGStreamerPublisher(testVideo, videoTrack, audioTrack)
+	handshakePublisher, err := NewGStreamerPublisher(testVideo, webrtc.MimeTypeH264, videoTrack, audioTrack)
 	if err != nil {
 		t.Fatalf("failed to create handshake publisher: %v", err)
 	}
@@ -339,7 +333,7 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 		t.Fatalf("failed to activate recording: %v", err)
 	}
 
-	publisher, err := NewGStreamerPublisher(testVideo, videoTrack, audioTrack)
+	publisher, err := NewGStreamerPublisher(testVideo, webrtc.MimeTypeH264, videoTrack, audioTrack)
 	if err != nil {
 		t.Fatalf("failed to create GStreamer publisher: %v", err)
 	}
@@ -384,6 +378,80 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 	if err := validateVideoPlaylistLocal(t, participantOutputDir); err != nil {
 		t.Fatalf("recording validation failed: %v", err)
 	}
+}
+
+type liveKitTestServer struct {
+	Cmd         *exec.Cmd
+	WSURL       string
+	HTTPURL     string
+	HTTPAddr    string
+	HTTPPort    int
+	RTCTCPPort  int
+	RTCUDPStart int
+	RTCUDPEnd   int
+}
+
+func startLiveKitServer(t *testing.T, serverBinary, configPath, repoRoot string, logFile *os.File) liveKitTestServer {
+	t.Helper()
+
+	httpPort := getFreeTCPPort(t)
+	rtcTCPPort := getFreeTCPPort(t)
+	if rtcTCPPort == httpPort {
+		rtcTCPPort = getFreeTCPPort(t)
+	}
+
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	udpStart := 40000 + r.Intn(9000) // 40000-48999
+	udpEnd := udpStart + 999         // 1000 ports
+
+	httpAddr := fmt.Sprintf("127.0.0.1:%d", httpPort)
+	wsURL := fmt.Sprintf("ws://%s", httpAddr)
+	httpURL := fmt.Sprintf("http://%s", httpAddr)
+
+	serverCmd := exec.Command(serverBinary,
+		"--dev",
+		"--config", configPath,
+		"--bind", "127.0.0.1",
+		"--node-ip", "127.0.0.1",
+		"--port", strconv.Itoa(httpPort),
+		"--rtc.tcp_port", strconv.Itoa(rtcTCPPort),
+		"--rtc.port_range_start", strconv.Itoa(udpStart),
+		"--rtc.port_range_end", strconv.Itoa(udpEnd),
+	)
+	serverCmd.Dir = repoRoot
+	serverCmd.Stdout = logFile
+	serverCmd.Stderr = logFile
+
+	if err := serverCmd.Start(); err != nil {
+		t.Fatalf("failed to start livekit server: %v", err)
+	}
+	if err := waitForLiveKitServer(httpAddr, 25*time.Second); err != nil {
+		t.Fatalf("livekit server not ready: %v", err)
+	}
+
+	t.Logf("LiveKit test server: ws=%s http=%s rtc.tcp=%d rtc.udp=%d-%d", wsURL, httpURL, rtcTCPPort, udpStart, udpEnd)
+
+	return liveKitTestServer{
+		Cmd:         serverCmd,
+		WSURL:       wsURL,
+		HTTPURL:     httpURL,
+		HTTPAddr:    httpAddr,
+		HTTPPort:    httpPort,
+		RTCTCPPort:  rtcTCPPort,
+		RTCUDPStart: udpStart,
+		RTCUDPEnd:   udpEnd,
+	}
+}
+
+func getFreeTCPPort(t *testing.T) int {
+	t.Helper()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to allocate free TCP port: %v", err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
 }
 
 // findRepoRoot locates the repository root directory for accessing test resources.
@@ -952,7 +1020,7 @@ func inspectPlaylist(playlistPath string) ([]string, []float64, float64, error) 
 			} else {
 				durations = append(durations, math.NaN())
 			}
-		} else if strings.HasSuffix(trimmed, ".ts") && !strings.HasPrefix(trimmed, "#") {
+		} else if !strings.HasPrefix(trimmed, "#") && (strings.HasSuffix(trimmed, ".ts") || strings.HasSuffix(trimmed, ".m4s")) {
 			segments = append(segments, trimmed)
 			if len(durations) < len(segments) {
 				durations = append(durations, math.NaN())

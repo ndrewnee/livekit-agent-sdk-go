@@ -262,7 +262,7 @@ func (u *RealtimeS3Uploader) processAndUploadAudioSegment(segmentName string, se
 	}
 
 	// Ensure media data has styp prefix for CMAF compliance
-	mediaData = ensureStypPrefix(mediaData)
+	mediaData = ensureStypPrefix(mediaData, "opus")
 
 	// Write processed media data to a temp file for upload
 	processedPath := segmentPath + ".processed"
@@ -722,7 +722,7 @@ func (u *RealtimeS3Uploader) processAudioSegmentsForUpload() error {
 		}
 
 		// Ensure styp prefix for CMAF compliance
-		mediaData = ensureStypPrefix(mediaData)
+		mediaData = ensureStypPrefix(mediaData, "opus")
 
 		// Overwrite the segment file with processed data
 		if err := os.WriteFile(segmentPath, mediaData, 0644); err != nil {

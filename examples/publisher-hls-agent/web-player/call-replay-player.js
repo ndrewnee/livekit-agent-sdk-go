@@ -725,8 +725,11 @@ class ParticipantPlayer extends EventTarget {
         this.lastDecodedSegmentIndex = this.currentSegmentIndex;
         this.currentSegmentIndex++;
       } catch (error) {
-        console.error(`Audio decode error for segment ${this.currentSegmentIndex}:`, error);
-        this.currentSegmentIndex++;
+        // Don't skip segments on transient fetch/decode errors (e.g., eventual consistency
+        // while segments are still being uploaded). Skipping permanently shifts audio and
+        // makes A/V sync unrecoverable until a full replay/seek.
+        console.error(`Audio decode error for segment ${this.currentSegmentIndex} (will retry):`, error);
+        break;
       }
     }
 

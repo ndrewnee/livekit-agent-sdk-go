@@ -46,6 +46,8 @@ type e2eScenario struct {
 	roomName         string
 	participant      string
 	outputDir        string
+	testVideo        string // Path to MP4 test file (empty = default test.mp4)
+	videoCodec       string // Video codec MIME type (empty = webrtc.MimeTypeH264)
 	agentEnv         map[string]string
 	skipS3Validation bool   // Skip built-in S3 validation in runE2EScenario (for custom validation)
 	e2eePassphrase   string // E2EE passphrase for encrypted tracks (empty = no encryption)
@@ -177,6 +179,105 @@ func TestPublisherHLSAgentUploadsToS3(t *testing.T) {
 	}
 }
 
+func TestPublisherHLSAgentUploadsAV1ToS3(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping end-to-end integration test in short mode")
+	}
+
+	ms := startMinIOServer(t)
+	if !ms.KeepAlive {
+		defer ms.Shutdown(t)
+	} else {
+		t.Logf("PUBLISHER_HLS_KEEP_MINIO=1 detected; MinIO will remain running at http://%s", ms.Endpoint)
+	}
+
+	repoRoot := findRepoRoot(t)
+	testVideo := filepath.Join(repoRoot, "examples", "publisher-hls-agent", "test", "test_av1_opus.mp4")
+	requireFileExists(t, testVideo)
+
+	uniqueAgentName := fmt.Sprintf("publisher-hls-av1-s3-agent-%d", time.Now().UnixNano())
+	uniqueRoomName := fmt.Sprintf("publisher-hls-av1-s3-room-%d", time.Now().UnixNano())
+	uniqueParticipant := fmt.Sprintf("publisher-hls-av1-s3-participant-%d", time.Now().UnixNano())
+
+	e2eePassphrase := "test-e2ee-secret-123"
+
+	scenario := e2eScenario{
+		name:             "av1-s3-upload",
+		agentName:        uniqueAgentName,
+		roomName:         uniqueRoomName,
+		participant:      uniqueParticipant,
+		testVideo:        testVideo,
+		videoCodec:       webrtc.MimeTypeAV1,
+		skipS3Validation: true, // Custom validation for AV1/CMAF
+		e2eePassphrase:   e2eePassphrase,
+		agentEnv: map[string]string{
+			"S3_ENDPOINT":             ms.Endpoint,
+			"S3_BUCKET":               ms.Bucket,
+			"S3_REGION":               "us-east-1",
+			"S3_ACCESS_KEY":           ms.AccessKey,
+			"S3_SECRET_KEY":           ms.SecretKey,
+			"S3_FORCE_PATH_STYLE":     "true",
+			"S3_USE_SSL":              "false",
+			"S3_PREFIX":               "publisher-av1-tests",
+			"S3_OBJECT_ACL":           "public-read",
+			"AUTO_ACTIVATE_RECORDING": "true",
+			"E2EE_PASSPHRASE":         e2eePassphrase,
+		},
+	}
+
+	_ = runE2EScenario(t, scenario)
+
+	client := ms.NewClient(t)
+	prefix := path.Join(strings.Trim(scenario.agentEnv["S3_PREFIX"], "/"), scenario.roomName, scenario.participant)
+
+	if err := validateS3AV1RecordingExact(t, client, ms.Bucket, prefix, testVideo); err != nil {
+		t.Fatalf("AV1 S3 validation failed: %v", err)
+	}
+
+	// Make the recording publicly readable over HTTP for manual inspection via the web player.
+	// MinIO's anonymous HTTP access relies on bucket policy (object ACLs may be disabled/ignored).
+	policy := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":["s3:GetObject"],"Resource":["arn:aws:s3:::%s/%s/*"]}]}`, ms.Bucket, prefix)
+	if err := client.SetBucketPolicy(context.Background(), ms.Bucket, policy); err != nil {
+		t.Fatalf("failed to set read policy on MinIO bucket: %v", err)
+	}
+
+	t.Logf("AV1 HLS video playlist: http://%s/%s/%s", ms.Endpoint, ms.Bucket, path.Join(prefix, "video.m3u8"))
+	t.Logf("AV1 HLS audio manifest: http://%s/%s/%s", ms.Endpoint, ms.Bucket, path.Join(prefix, "audio.json"))
+	t.Logf("AV1 S3 validation succeeded for s3://%s/%s", ms.Bucket, prefix)
+}
+
+func TestPublisherHLSAgentRecordsAV1E2EE(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping end-to-end integration test in short mode")
+	}
+
+	repoRoot := findRepoRoot(t)
+	testVideo := filepath.Join(repoRoot, "examples", "publisher-hls-agent", "test", "test_av1_opus.mp4")
+	requireFileExists(t, testVideo)
+
+	uniqueAgentName := fmt.Sprintf("publisher-hls-av1-agent-%d", time.Now().UnixNano())
+	uniqueRoomName := fmt.Sprintf("publisher-hls-av1-room-%d", time.Now().UnixNano())
+	uniqueParticipant := fmt.Sprintf("publisher-hls-av1-participant-%d", time.Now().UnixNano())
+
+	e2eePassphrase := "test-e2ee-secret-123"
+
+	scenario := e2eScenario{
+		name:           "av1-e2ee-local",
+		agentName:      uniqueAgentName,
+		roomName:       uniqueRoomName,
+		participant:    uniqueParticipant,
+		testVideo:      testVideo,
+		videoCodec:     webrtc.MimeTypeAV1,
+		e2eePassphrase: e2eePassphrase,
+		agentEnv: map[string]string{
+			"AUTO_ACTIVATE_RECORDING": "true",
+			"E2EE_PASSPHRASE":         e2eePassphrase,
+		},
+	}
+
+	_ = runE2EScenario(t, scenario)
+}
+
 // TestPublisherHLSAgentMultipleParticipants tests the agent's behavior with multiple simultaneous
 // participants joining the room and publishing tracks. This full-scale test validates:
 //   - Concurrent participant connections
@@ -254,21 +355,11 @@ func TestPublisherHLSAgentMultipleParticipants(t *testing.T) {
 	}
 	defer serverLogFile.Close()
 
-	serverCmd := exec.Command(serverBinary, "--dev", "--config", configPath, "--node-ip", "127.0.0.1")
-	serverCmd.Dir = repoRoot
-	serverCmd.Stdout = serverLogFile
-	serverCmd.Stderr = serverLogFile
-
-	if err := serverCmd.Start(); err != nil {
-		t.Fatalf("failed to start livekit server: %v", err)
-	}
+	lkServer := startLiveKitServer(t, serverBinary, configPath, repoRoot, serverLogFile)
+	serverCmd := lkServer.Cmd
 	t.Cleanup(func() {
 		shutdownProcess(t, serverCmd, "livekit-server", 10*time.Second)
 	})
-
-	if err := waitForLiveKitServer("localhost:7880", 25*time.Second); err != nil {
-		t.Fatalf("livekit server not ready: %v", err)
-	}
 
 	// Start publisher-hls-agent
 	agentLogFile, err := os.Create(agentLogPath)
@@ -283,7 +374,7 @@ func TestPublisherHLSAgentMultipleParticipants(t *testing.T) {
 	agentCmd.Stdout = agentLogFile
 	agentCmd.Stderr = agentLogFile
 	agentCmd.Env = append(os.Environ(),
-		fmt.Sprintf("LIVEKIT_URL=%s", testLiveKitURL),
+		fmt.Sprintf("LIVEKIT_URL=%s", lkServer.WSURL),
 		fmt.Sprintf("LIVEKIT_API_KEY=%s", testAPIKey),
 		fmt.Sprintf("LIVEKIT_API_SECRET=%s", testAPISecret),
 		fmt.Sprintf("OUTPUT_DIR=%s", outputDir),
@@ -315,7 +406,7 @@ func TestPublisherHLSAgentMultipleParticipants(t *testing.T) {
 	}
 
 	// Create room with agent dispatch
-	roomClient := lksdk.NewRoomServiceClient("http://localhost:7880", testAPIKey, testAPISecret)
+	roomClient := lksdk.NewRoomServiceClient(lkServer.HTTPURL, testAPIKey, testAPISecret)
 	_, _ = roomClient.DeleteRoom(context.Background(), &livekit.DeleteRoomRequest{Room: roomName})
 
 	_, err = roomClient.CreateRoom(context.Background(), &livekit.CreateRoomRequest{
@@ -347,7 +438,7 @@ func TestPublisherHLSAgentMultipleParticipants(t *testing.T) {
 		go func(idx int, identity string) {
 			defer wg.Done()
 
-			if err := runParticipant(t, roomName, identity, testVideo, agentLogPath); err != nil {
+			if err := runParticipant(t, lkServer.WSURL, roomName, identity, testVideo, agentLogPath); err != nil {
 				participantErrors <- fmt.Errorf("participant %s failed: %w", identity, err)
 			} else {
 				t.Logf("✓ participant %s completed successfully", identity)
@@ -488,10 +579,10 @@ func TestPublisherHLSAgentMultipleParticipants(t *testing.T) {
 //
 // This function is designed to be called concurrently from multiple goroutines
 // to test the agent's behavior under multiple simultaneous participants.
-func runParticipant(t *testing.T, roomName, participantIdentity, testVideo, agentLogPath string) error {
+func runParticipant(t *testing.T, livekitWSURL, roomName, participantIdentity, testVideo, agentLogPath string) error {
 	t.Helper()
 
-	participantRoom, err := lksdk.ConnectToRoom(testLiveKitURL, lksdk.ConnectInfo{
+	participantRoom, err := lksdk.ConnectToRoom(livekitWSURL, lksdk.ConnectInfo{
 		APIKey:              testAPIKey,
 		APISecret:           testAPISecret,
 		RoomName:            roomName,
@@ -556,7 +647,7 @@ func runParticipant(t *testing.T, roomName, participantIdentity, testVideo, agen
 	}
 
 	// Start publishing media
-	publisher, err := NewGStreamerPublisher(testVideo, videoTrack, audioTrack)
+	publisher, err := NewGStreamerPublisher(testVideo, webrtc.MimeTypeH264, videoTrack, audioTrack)
 	if err != nil {
 		return fmt.Errorf("failed to create GStreamer publisher: %w", err)
 	}
@@ -623,7 +714,14 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 		t.Fatalf("livekit-server not found in PATH: %v", err)
 	}
 	configPath := filepath.Join(repoRoot, "examples", "livekit-server-dev.yaml")
-	testVideo := filepath.Join(repoRoot, "examples", "publisher-hls-agent", "test", "test.mp4")
+	testVideo := scenario.testVideo
+	if testVideo == "" {
+		testVideo = filepath.Join(repoRoot, "examples", "publisher-hls-agent", "test", "test.mp4")
+	}
+	videoCodec := scenario.videoCodec
+	if videoCodec == "" {
+		videoCodec = webrtc.MimeTypeH264
+	}
 
 	requireFileExists(t, testVideo)
 
@@ -695,21 +793,11 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	}
 	defer serverLogFile.Close()
 
-	serverCmd := exec.Command(serverBinary, "--dev", "--config", configPath, "--node-ip", "127.0.0.1")
-	serverCmd.Dir = repoRoot
-	serverCmd.Stdout = serverLogFile
-	serverCmd.Stderr = serverLogFile
-
-	if err := serverCmd.Start(); err != nil {
-		t.Fatalf("failed to start livekit server: %v", err)
-	}
+	lkServer := startLiveKitServer(t, serverBinary, configPath, repoRoot, serverLogFile)
+	serverCmd := lkServer.Cmd
 	t.Cleanup(func() {
 		shutdownProcess(t, serverCmd, "livekit-server", 10*time.Second)
 	})
-
-	if err := waitForLiveKitServer("localhost:7880", 25*time.Second); err != nil {
-		t.Fatalf("livekit server not ready: %v", err)
-	}
 
 	agentLogFile, err := os.Create(agentLogPath)
 	if err != nil {
@@ -723,7 +811,7 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	agentCmd.Stdout = agentLogFile
 	agentCmd.Stderr = agentLogFile
 	agentCmd.Env = append(os.Environ(),
-		fmt.Sprintf("LIVEKIT_URL=%s", testLiveKitURL),
+		fmt.Sprintf("LIVEKIT_URL=%s", lkServer.WSURL),
 		fmt.Sprintf("LIVEKIT_API_KEY=%s", testAPIKey),
 		fmt.Sprintf("LIVEKIT_API_SECRET=%s", testAPISecret),
 		fmt.Sprintf("OUTPUT_DIR=%s", outputDir),
@@ -756,7 +844,7 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 		t.Fatalf("agent failed to register: %v", err)
 	}
 
-	roomClient := lksdk.NewRoomServiceClient("http://localhost:7880", testAPIKey, testAPISecret)
+	roomClient := lksdk.NewRoomServiceClient(lkServer.HTTPURL, testAPIKey, testAPISecret)
 	_, _ = roomClient.DeleteRoom(context.Background(), &livekit.DeleteRoomRequest{Room: roomName})
 
 	_, err = roomClient.CreateRoom(context.Background(), &livekit.CreateRoomRequest{
@@ -775,7 +863,7 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 		_, _ = roomClient.DeleteRoom(context.Background(), &livekit.DeleteRoomRequest{Room: roomName})
 	}()
 
-	participantRoom, err := lksdk.ConnectToRoom(testLiveKitURL, lksdk.ConnectInfo{
+	participantRoom, err := lksdk.ConnectToRoom(lkServer.WSURL, lksdk.ConnectInfo{
 		APIKey:              testAPIKey,
 		APISecret:           testAPISecret,
 		RoomName:            roomName,
@@ -791,16 +879,48 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 		}
 	}()
 
-	videoTrack, err := lksdk.NewLocalTrack(webrtc.RTPCodecCapability{
-		MimeType:    webrtc.MimeTypeH264,
-		ClockRate:   90000,
-		SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
-	})
-	if err != nil {
-		t.Fatalf("failed to create video track: %v", err)
+	var videoTrackCap webrtc.RTPCodecCapability
+	switch strings.ToLower(videoCodec) {
+	case strings.ToLower(webrtc.MimeTypeH264):
+		videoTrackCap = webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeH264,
+			ClockRate:   90000,
+			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+		}
+	case strings.ToLower(webrtc.MimeTypeAV1):
+		videoTrackCap = webrtc.RTPCodecCapability{
+			MimeType:  webrtc.MimeTypeAV1,
+			ClockRate: 90000,
+		}
+	default:
+		t.Fatalf("unsupported test video codec: %s", videoCodec)
 	}
 
-	audioTrack, err := lksdk.NewLocalTrack(webrtc.RTPCodecCapability{
+	type bindableTrack interface {
+		webrtc.TrackLocal
+		sampleTrackWriter
+		OnBind(func())
+	}
+
+	var videoTrack bindableTrack
+	switch strings.ToLower(videoCodec) {
+	case strings.ToLower(webrtc.MimeTypeH264):
+		videoLkTrack, err := lksdk.NewLocalTrack(videoTrackCap)
+		if err != nil {
+			t.Fatalf("failed to create video track: %v", err)
+		}
+		videoTrack = videoLkTrack
+	case strings.ToLower(webrtc.MimeTypeAV1):
+		videoPionTrack, err := newBindablePionSampleTrack(videoTrackCap)
+		if err != nil {
+			t.Fatalf("failed to create AV1 video track: %v", err)
+		}
+		videoTrack = videoPionTrack
+	default:
+		t.Fatalf("unsupported test video codec: %s", videoCodec)
+	}
+
+	audioLkTrack, err := lksdk.NewLocalTrack(webrtc.RTPCodecCapability{
 		MimeType:  webrtc.MimeTypeOpus,
 		ClockRate: 48000,
 		Channels:  2,
@@ -808,6 +928,7 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	if err != nil {
 		t.Fatalf("failed to create audio track: %v", err)
 	}
+	audioTrack := audioLkTrack
 
 	videoReady := make(chan struct{})
 	audioReady := make(chan struct{})
@@ -855,7 +976,41 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 		t.Fatal("audio track not bound within timeout")
 	}
 
-	publisher, err := NewGStreamerPublisher(testVideo, videoTrack, audioTrack)
+	// Start a short "handshake" publish to trigger track publication/subscription setup
+	// on the recorder side. We'll restart playback from the beginning once the recorder
+	// has requested subscriptions (before it sees a later keyframe), so we can capture
+	// frame 0 deterministically for exactness checks.
+	handshakePublisher, err := NewGStreamerPublisher(testVideo, videoCodec, videoTrack, audioTrack)
+	if err != nil {
+		t.Fatalf("failed to create handshake publisher: %v", err)
+	}
+	if e2eeKey != nil {
+		if err := handshakePublisher.SetE2EEKey(e2eeKey); err != nil {
+			t.Fatalf("failed to set E2EE key on handshake publisher: %v", err)
+		}
+	}
+	if err := handshakePublisher.Start(); err != nil {
+		t.Fatalf("failed to start handshake publisher: %v", err)
+	}
+
+	// Ensure the recorder has actually subscribed to the RTP tracks before we restart
+	// playback from the beginning. If we start the "real" publish before subscription,
+	// the recorder can miss the initial keyframe (t=0) and be forced to wait until the
+	// next keyframe, which breaks exactness checks.
+	if err := waitForLogContains(agentLogPath, "video track subscribed", 30*time.Second); err != nil {
+		t.Fatalf("timed out waiting for recorder video subscription: %v", err)
+	}
+	if err := waitForLogContains(agentLogPath, "audio track subscribed", 30*time.Second); err != nil {
+		t.Fatalf("timed out waiting for recorder audio subscription: %v", err)
+	}
+
+	if err := waitForLogContains(agentLogPath, "auto-activating recording", 30*time.Second); err != nil {
+		t.Fatalf("timed out waiting for recording auto-activation: %v", err)
+	}
+
+	handshakePublisher.Stop()
+
+	publisher, err := NewGStreamerPublisher(testVideo, videoCodec, videoTrack, audioTrack)
 	if err != nil {
 		t.Fatalf("failed to create GStreamer publisher: %v", err)
 	}
@@ -869,15 +1024,6 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 
 	if err := publisher.Start(); err != nil {
 		t.Fatalf("failed to start GStreamer publisher: %v", err)
-	}
-
-	if err := waitForLogContains(agentLogPath, "auto-activating recording", 30*time.Second); err != nil {
-		t.Logf("warning: recording auto-activation log not observed: %v (continuing)", err)
-		time.Sleep(2 * time.Second)
-	}
-
-	if err := publisher.Restart(); err != nil {
-		t.Fatalf("failed to restart GStreamer publisher: %v", err)
 	}
 
 	if err := publisher.Wait(); err != nil {
@@ -944,23 +1090,27 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 		if err := validateVideoPlaylist(t, participantOutputDir); err != nil {
 			t.Fatalf("recording validation failed: %v", err)
 		}
-	} else if !scenario.skipS3Validation {
-		// Built-in S3 validation (for post-processing upload tests)
+	} else {
+		// Always wait for upload completion when S3 is enabled to avoid shutting down
+		// the agent before its post-processing upload finishes.
 		remotePrefix := path.Join(strings.Trim(s3Prefix, "/"), roomName, participantIdentity)
 		if err := waitForLogContains(agentLogPath, "uploaded recording to", 2*time.Minute); err != nil {
 			t.Fatalf("timed out waiting for S3 upload completion log: %v", err)
 		}
 		t.Log("observed S3 upload completion log")
-		t.Logf("validating S3 recording at s3://%s/%s", s3Bucket, remotePrefix)
-		if err := validateS3Recording(t, s3Client, s3Bucket, remotePrefix, testVideo, outputDir); err != nil {
-			t.Fatalf("S3 validation failed: %v", err)
+
+		if !scenario.skipS3Validation {
+			// Built-in S3 validation (for post-processing upload tests)
+			t.Logf("validating S3 recording at s3://%s/%s", s3Bucket, remotePrefix)
+			if err := validateS3Recording(t, s3Client, s3Bucket, remotePrefix, testVideo, outputDir); err != nil {
+				t.Fatalf("S3 validation failed: %v", err)
+			}
+			t.Logf("S3 validation succeeded for %s", remotePrefix)
+			playlistURL := fmt.Sprintf("http://%s/%s/%s/video.m3u8", scenario.agentEnv["S3_ENDPOINT"], s3Bucket, remotePrefix)
+			t.Logf("S3 playlist URL: %s", playlistURL)
+		} else {
+			t.Log("S3 validation skipped (custom validation enabled)")
 		}
-		t.Logf("S3 validation succeeded for %s", remotePrefix)
-		playlistURL := fmt.Sprintf("http://%s/%s/%s/video.m3u8", scenario.agentEnv["S3_ENDPOINT"], s3Bucket, remotePrefix)
-		t.Logf("S3 playlist URL: %s", playlistURL)
-	} else {
-		// S3 validation skipped - test will perform custom validation
-		t.Log("S3 validation skipped (custom validation enabled)")
 	}
 
 	if participantRoom != nil {
@@ -1457,7 +1607,7 @@ func validateS3Recording(t *testing.T, client *minio.Client, bucket, prefix, ref
 	// Validate audio waveform correlation with source
 	if referenceVideo != "" {
 		t.Logf("validating audio waveform correlation with source: %s", referenceVideo)
-		if err := validateAudioWaveform(t, client, bucket, prefix, referenceVideo, 0.7); err != nil {
+		if err := validateAudioWaveform(t, client, bucket, prefix, referenceVideo, 0.995); err != nil {
 			return fmt.Errorf("audio waveform validation failed: %w", err)
 		}
 
@@ -1477,6 +1627,248 @@ func validateS3Recording(t *testing.T, client *minio.Client, bucket, prefix, ref
 	}
 
 	return nil
+}
+
+func validateS3AV1RecordingExact(t *testing.T, client *minio.Client, bucket, prefix, sourceMP4 string) error {
+	t.Helper()
+
+	ctx := context.Background()
+	tempDir := t.TempDir()
+
+	required := []string{
+		path.Join(prefix, "video.m3u8"),
+		path.Join(prefix, "video_init.mp4"),
+		path.Join(prefix, "audio.m3u8"),
+		path.Join(prefix, "audio_init.mp4"),
+	}
+	for _, obj := range required {
+		if _, err := client.StatObject(ctx, bucket, obj, minio.StatObjectOptions{}); err != nil {
+			return fmt.Errorf("missing S3 object %s: %w", obj, err)
+		}
+	}
+	// audio.json is optional for strict playback, but required by our web player.
+	if _, err := client.StatObject(ctx, bucket, path.Join(prefix, "audio.json"), minio.StatObjectOptions{}); err != nil {
+		t.Logf("warning: audio.json not found in S3: %v", err)
+	}
+
+	videoPlaylistPath := filepath.Join(tempDir, "video.m3u8")
+	if err := client.FGetObject(ctx, bucket, path.Join(prefix, "video.m3u8"), videoPlaylistPath, minio.GetObjectOptions{}); err != nil {
+		return fmt.Errorf("download video.m3u8: %w", err)
+	}
+	audioPlaylistPath := filepath.Join(tempDir, "audio.m3u8")
+	if err := client.FGetObject(ctx, bucket, path.Join(prefix, "audio.m3u8"), audioPlaylistPath, minio.GetObjectOptions{}); err != nil {
+		return fmt.Errorf("download audio.m3u8: %w", err)
+	}
+	if err := client.FGetObject(ctx, bucket, path.Join(prefix, "video_init.mp4"), filepath.Join(tempDir, "video_init.mp4"), minio.GetObjectOptions{}); err != nil {
+		return fmt.Errorf("download video_init.mp4: %w", err)
+	}
+	if err := client.FGetObject(ctx, bucket, path.Join(prefix, "audio_init.mp4"), filepath.Join(tempDir, "audio_init.mp4"), minio.GetObjectOptions{}); err != nil {
+		return fmt.Errorf("download audio_init.mp4: %w", err)
+	}
+
+	// Download and validate video segments referenced by the playlist.
+	videoSegments, _, _, err := inspectPlaylist(videoPlaylistPath)
+	if err != nil {
+		return fmt.Errorf("inspect video playlist: %w", err)
+	}
+	if len(videoSegments) == 0 {
+		return fmt.Errorf("video playlist has no segments")
+	}
+	for _, seg := range videoSegments {
+		if !strings.HasSuffix(seg, ".m4s") {
+			return fmt.Errorf("unexpected video segment extension for AV1: %s", seg)
+		}
+		obj := path.Join(prefix, seg)
+		localPath := filepath.Join(tempDir, seg)
+		if err := client.FGetObject(ctx, bucket, obj, localPath, minio.GetObjectOptions{}); err != nil {
+			return fmt.Errorf("download video segment %s: %w", seg, err)
+		}
+		if info, err := os.Stat(localPath); err != nil || info.Size() == 0 {
+			return fmt.Errorf("video segment %s is empty or missing (err=%v)", seg, err)
+		}
+	}
+
+	// Download and validate audio segments referenced by the playlist.
+	audioSegments, _, _, err := inspectPlaylist(audioPlaylistPath)
+	if err != nil {
+		return fmt.Errorf("inspect audio playlist: %w", err)
+	}
+	if len(audioSegments) == 0 {
+		return fmt.Errorf("audio playlist has no segments")
+	}
+	for _, seg := range audioSegments {
+		if !strings.HasSuffix(seg, ".m4s") {
+			return fmt.Errorf("unexpected audio segment extension: %s", seg)
+		}
+		obj := path.Join(prefix, seg)
+		localPath := filepath.Join(tempDir, seg)
+		if err := client.FGetObject(ctx, bucket, obj, localPath, minio.GetObjectOptions{}); err != nil {
+			return fmt.Errorf("download audio segment %s: %w", seg, err)
+		}
+		if info, err := os.Stat(localPath); err != nil || info.Size() == 0 {
+			return fmt.Errorf("audio segment %s is empty or missing (err=%v)", seg, err)
+		}
+	}
+
+	// 1) Each segment is valid: decode full playlists.
+	if err := ffmpegDecodeToNull(videoPlaylistPath); err != nil {
+		return fmt.Errorf("video playlist decode failed: %w", err)
+	}
+	if err := ffmpegDecodeToNull(audioPlaylistPath); err != nil {
+		return fmt.Errorf("audio playlist decode failed: %w", err)
+	}
+
+	// 3) Output matches source: strict audio correlation + sampled-frame video md5.
+	if err := validateAudioWaveform(t, client, bucket, prefix, sourceMP4, 0.995); err != nil {
+		return fmt.Errorf("audio waveform mismatch: %w", err)
+	}
+	if err := validateVideoAV1Exact(t, client, bucket, prefix, sourceMP4); err != nil {
+		return fmt.Errorf("video AV1 mismatch: %w", err)
+	}
+
+	return nil
+}
+
+func ffmpegDecodeToNull(inputPath string) error {
+	cmd := exec.Command("ffmpeg",
+		"-v", "error",
+		"-i", inputPath,
+		"-f", "null", "-",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg decode %s: %w (output: %s)", inputPath, err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func validateVideoAV1Exact(t *testing.T, client *minio.Client, bucket, prefix, sourceMP4 string) error {
+	t.Helper()
+	ctx := context.Background()
+	tempDir := t.TempDir()
+
+	t.Logf("validating video AV1 exactness from S3 (bucket=%s, prefix=%s)", bucket, prefix)
+
+	sourceInfo, err := ffprobeVideoInfo(sourceMP4)
+	if err != nil {
+		return fmt.Errorf("probe source video: %w", err)
+	}
+	if sourceInfo.codec != "av1" {
+		t.Logf("warning: expected av1 source, got codec=%s", sourceInfo.codec)
+	}
+
+	videoPlaylistPath := filepath.Join(tempDir, "video.m3u8")
+	if err := client.FGetObject(ctx, bucket, path.Join(prefix, "video.m3u8"), videoPlaylistPath, minio.GetObjectOptions{}); err != nil {
+		return fmt.Errorf("download video.m3u8: %w", err)
+	}
+
+	initPath := filepath.Join(tempDir, "video_init.mp4")
+	if err := client.FGetObject(ctx, bucket, path.Join(prefix, "video_init.mp4"), initPath, minio.GetObjectOptions{}); err != nil {
+		return fmt.Errorf("download video_init.mp4: %w", err)
+	}
+
+	segments, _, _, err := inspectPlaylist(videoPlaylistPath)
+	if err != nil {
+		return fmt.Errorf("inspect video playlist: %w", err)
+	}
+	if len(segments) == 0 {
+		return fmt.Errorf("video playlist has no segments")
+	}
+
+	for _, segmentName := range segments {
+		if !strings.HasSuffix(segmentName, ".m4s") {
+			return fmt.Errorf("unexpected video segment extension: %s", segmentName)
+		}
+		segmentKey := path.Join(prefix, segmentName)
+		segmentPath := filepath.Join(tempDir, segmentName)
+		if err := client.FGetObject(ctx, bucket, segmentKey, segmentPath, minio.GetObjectOptions{}); err != nil {
+			return fmt.Errorf("download video segment %s: %w", segmentName, err)
+		}
+	}
+
+	recordedInfo, err := ffprobeVideoInfo(videoPlaylistPath)
+	if err != nil {
+		return fmt.Errorf("probe recorded video playlist: %w", err)
+	}
+	if recordedInfo.codec != "av1" {
+		return fmt.Errorf("recorded video codec is %q, expected av1", recordedInfo.codec)
+	}
+
+	durationRatio := recordedInfo.duration / sourceInfo.duration
+	t.Logf("source video duration=%.3fs recorded duration=%.3fs ratio=%.3f", sourceInfo.duration, recordedInfo.duration, durationRatio)
+	if durationRatio < 0.98 || durationRatio > 1.02 {
+		return fmt.Errorf("video duration ratio %.3f out of range", durationRatio)
+	}
+
+	// Compare a few decoded frames by checksum to assert exact reconstruction.
+	frames := []int{0, 30, 60, 300, 600, 1800, 3000}
+	sourceMD5, err := ffmpegSelectedFrameMD5(sourceMP4, frames)
+	if err != nil {
+		return fmt.Errorf("compute source frame md5: %w", err)
+	}
+	recordedMD5, err := ffmpegSelectedFrameMD5(videoPlaylistPath, frames)
+	if err != nil {
+		return fmt.Errorf("compute recorded frame md5: %w", err)
+	}
+	if len(sourceMD5) != len(recordedMD5) {
+		return fmt.Errorf("frame md5 count mismatch: source=%d recorded=%d", len(sourceMD5), len(recordedMD5))
+	}
+	for i := range sourceMD5 {
+		if sourceMD5[i] != recordedMD5[i] {
+			return fmt.Errorf("frame md5 mismatch at sample %d: source=%s recorded=%s", i, sourceMD5[i], recordedMD5[i])
+		}
+	}
+	t.Logf("✓ sampled AV1 frames match source (framemd5)")
+
+	return nil
+}
+
+func ffmpegSelectedFrameMD5(inputPath string, frames []int) ([]string, error) {
+	if len(frames) == 0 {
+		return nil, nil
+	}
+
+	var parts []string
+	for _, n := range frames {
+		parts = append(parts, fmt.Sprintf("eq(n\\,%d)", n))
+	}
+	selectExpr := strings.Join(parts, "+")
+	filter := fmt.Sprintf("select='%s',format=yuv420p", selectExpr)
+
+	cmd := exec.Command("ffmpeg",
+		"-v", "error",
+		"-i", inputPath,
+		"-an", "-sn",
+		"-vf", filter,
+		"-vsync", "0",
+		"-f", "framemd5",
+		"-",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg framemd5 for %s: %w (output: %s)", inputPath, err, strings.TrimSpace(string(output)))
+	}
+
+	var hashes []string
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, ",")
+		if len(parts) < 2 {
+			continue
+		}
+		hash := strings.TrimSpace(parts[len(parts)-1])
+		if hash != "" {
+			hashes = append(hashes, hash)
+		}
+	}
+	if len(hashes) == 0 {
+		return nil, fmt.Errorf("no framemd5 hashes produced for %s", inputPath)
+	}
+	return hashes, nil
 }
 
 // normalizePlaylistDurations corrects segment durations in an HLS playlist using ffprobe.
@@ -1912,8 +2304,9 @@ func validateAudioWaveform(t *testing.T, client *minio.Client, bucket, prefix, s
 		srcOnset, float64(srcOnset)/48000, recOnset, float64(recOnset)/48000)
 
 	// Step 8: Verify timing difference is within reasonable tolerance for real-time streaming
-	// Allow up to +/- 100ms offset which accounts for network jitter and buffering
-	maxAllowedOffsetMs := 100.0
+	// Allow up to +/- 500ms offset which accounts for network jitter, buffering,
+	// and startup gating on the first decodable video keyframe.
+	maxAllowedOffsetMs := 500.0
 	onsetDiff := recOnset - srcOnset
 	onsetDiffMs := float64(onsetDiff) / 48.0
 
@@ -2682,6 +3075,27 @@ func validateVideoH264Playback(t *testing.T, client *minio.Client, bucket, prefi
 		return fmt.Errorf("recorded video has invalid frame rate: %.2f fps", recordedInfo.frameRate)
 	}
 	t.Logf("✓ video frame rate is valid: %.2f fps", recordedInfo.frameRate)
+
+	// Step 12: Validate exactness by comparing a few decoded frames by checksum.
+	// This asserts we reconstructed the same decoded video from HLS segments (no dropped/duplicated frames).
+	sampleFrames := []int{0, 30, 60, 300, 600, 1800, 3000}
+	sourceMD5, err := ffmpegSelectedFrameMD5(sourceMP4, sampleFrames)
+	if err != nil {
+		return fmt.Errorf("compute source frame md5: %w", err)
+	}
+	recordedMD5, err := ffmpegSelectedFrameMD5(combinedTSPath, sampleFrames)
+	if err != nil {
+		return fmt.Errorf("compute recorded frame md5: %w", err)
+	}
+	if len(sourceMD5) != len(recordedMD5) {
+		return fmt.Errorf("frame md5 count mismatch: source=%d recorded=%d", len(sourceMD5), len(recordedMD5))
+	}
+	for i := range sourceMD5 {
+		if sourceMD5[i] != recordedMD5[i] {
+			return fmt.Errorf("frame md5 mismatch at sample %d: source=%s recorded=%s", i, sourceMD5[i], recordedMD5[i])
+		}
+	}
+	t.Logf("✓ sampled H264 frames match source (framemd5)")
 
 	t.Logf("VIDEO H264 PLAYBACK VALIDATION PASSED")
 	return nil
