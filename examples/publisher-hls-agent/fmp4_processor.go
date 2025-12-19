@@ -220,6 +220,64 @@ func ensureStypPrefix(mediaData []byte, brand string) []byte {
 	return result
 }
 
+// setOpusPreSkipInInitSegment sets the Opus pre-skip in an MP4 init segment.
+//
+// LiveKit's RTP Opus stream does not carry container-level pre-skip metadata, but
+// MP4 decoders (including FFmpeg) rely on the `dOps` box to know how many initial
+// decoded samples to discard (typically 312 at 48kHz). Without this, decoded PCM
+// will have extra samples at the start, causing A/V sync drift and strict
+// waveform validation failures.
+func setOpusPreSkipInInitSegment(initPath string, preSkip uint16) error {
+	data, err := os.ReadFile(initPath)
+	if err != nil {
+		return fmt.Errorf("read init segment: %w", err)
+	}
+
+	needle := []byte("dOps")
+	idx := bytes.Index(data, needle)
+	if idx == -1 {
+		return fmt.Errorf("dOps box not found in init segment")
+	}
+	if idx < 4 {
+		return fmt.Errorf("invalid dOps box position: %d", idx)
+	}
+
+	boxStart := idx - 4 // size field starts 4 bytes before type
+	if boxStart+12 > len(data) {
+		return fmt.Errorf("dOps box truncated: need at least 12 bytes from %d (len=%d)", boxStart, len(data))
+	}
+
+	boxSize := int(binary.BigEndian.Uint32(data[boxStart : boxStart+4]))
+	if boxSize < 12 {
+		return fmt.Errorf("invalid dOps box size: %d", boxSize)
+	}
+	if boxStart+boxSize > len(data) {
+		return fmt.Errorf("dOps box extends beyond file: start=%d size=%d len=%d", boxStart, boxSize, len(data))
+	}
+
+	if string(data[idx:idx+4]) != "dOps" {
+		return fmt.Errorf("dOps type mismatch at %d", idx)
+	}
+
+	// dOps fields (after 8-byte box header):
+	//   version (1 byte)
+	//   outputChannelCount (1 byte)
+	//   preSkip (2 bytes, big-endian)
+	preSkipOffset := boxStart + 10
+	current := binary.BigEndian.Uint16(data[preSkipOffset : preSkipOffset+2])
+	if current == preSkip {
+		return nil
+	}
+
+	binary.BigEndian.PutUint16(data[preSkipOffset:preSkipOffset+2], preSkip)
+	if err := os.WriteFile(initPath, data, 0644); err != nil {
+		return fmt.Errorf("write init segment: %w", err)
+	}
+
+	log.Printf("[fmp4] updated Opus pre-skip in %s: %d -> %d", initPath, current, preSkip)
+	return nil
+}
+
 func getMP4TrackTimescale(initSegmentPath string) (uint32, error) {
 	data, err := os.ReadFile(initSegmentPath)
 	if err != nil {

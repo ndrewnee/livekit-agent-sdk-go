@@ -490,7 +490,7 @@ func (u *RealtimeS3Uploader) uploadFile(localPath, fileName string) error {
 		contentType = "image/png"
 	} else if strings.HasSuffix(fileName, ".webp") {
 		contentType = "image/webp"
-	} else if fileName == "audio.json" {
+	} else if strings.HasSuffix(fileName, ".json") {
 		contentType = "application/json"
 	}
 

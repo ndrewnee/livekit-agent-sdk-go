@@ -7,6 +7,8 @@ A production-ready LiveKit agent that records participant tracks to **HLS (HTTP 
 - **🎥 HLS Recording**: Records H.264 video + Opus/AAC audio to HLS playlists (M3U8) and MPEG-TS segments
 - **☁️ S3 Integration**: Real-time or batch upload to S3-compatible storage (AWS S3, MinIO, DigitalOcean Spaces)
 - **🔐 E2EE Support**: Decrypt end-to-end encrypted audio and video tracks using shared passphrase
+- **🖼️ Thumbnails**: Optional periodic video thumbnails (`thumbnails.m3u8` + `thumb*.{jpg,png,webp}`)
+- **🧑 Face Extraction**: Optional OpenCV-based face detection + unique face crops (build with `-tags gocv`)
 - **🔄 Delayed Pipeline Start**: Ensures all HLS segments begin with valid keyframes for immediate playback
 - **⚡ Pre-buffering**: Synchronizes audio/video streams for gapless segment 0 playback
 - **🛠️ Timestamp Normalization**: Fixes GStreamer timestamp issues for player compatibility
@@ -146,11 +148,14 @@ sequenceDiagram
   - `gst-plugins-bad`: MPEG-TS muxer, HLS elements
   - `gst-plugins-ugly`: H.264 parsing (some systems)
   - `gst-libav`: AAC encoding
+- **FFmpeg** (optional): Required for thumbnail extraction
+- **OpenCV 4 + gocv** (optional): Required for face extraction (build tag `gocv`)
 
 #### macOS Installation
 
 ```bash
 brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav
+brew install ffmpeg opencv
 ```
 
 #### Ubuntu/Debian Installation
@@ -172,6 +177,12 @@ sudo apt-get install -y \
 ```bash
 cd examples/publisher-hls-agent
 go build -o publisher-hls-agent .
+```
+
+To enable face extraction, build with:
+
+```bash
+go build -tags gocv -o publisher-hls-agent .
 ```
 
 ## Configuration
@@ -231,6 +242,36 @@ When `E2EE_PASSPHRASE` is set, the agent will:
 4. Process decrypted media through the normal HLS pipeline
 
 **Important:** The passphrase must match the one used by the publishing client. LiveKit does not store or transport encryption keys.
+
+### Optional - Thumbnails
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `THUMBNAILS_ENABLED` | `false` | Enable thumbnail extraction |
+| `THUMBNAIL_INTERVAL_SECS` | `5` | Thumbnail interval (seconds) |
+| `THUMBNAIL_WIDTH` | `640` | Thumbnail width (pixels) |
+| `THUMBNAIL_HEIGHT` | `320` | Thumbnail height (pixels) |
+| `THUMBNAIL_FORMAT` | `jpg` | Thumbnail format (`jpg`, `png`, `webp`) |
+
+### Optional - Faces (OpenCV / gocv)
+
+Requires building the agent with OpenCV enabled: `go build -tags gocv`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FACES_ENABLED` | `false` | Enable face extraction from thumbnail source frames |
+| `FACE_DETECTOR` | `yunet` | `yunet` (DNN) or `haar` (CascadeClassifier) |
+| `FACE_YUNET_MODEL` | - | YuNet ONNX path (empty = download/cache default) |
+| `FACE_SFACE_MODEL` | - | SFace ONNX path (empty = download/cache default) |
+| `FACE_YUNET_SCORE_THRESHOLD` | `0.9` | Minimum YuNet detection score |
+| `FACE_RECOGNITION_THRESHOLD` | `0.363` | SFace cosine similarity threshold for grouping |
+| `FACE_NORMALIZED_WIDTH` | `160` | Output face crop width (pixels) |
+| `FACE_NORMALIZED_HEIGHT` | `160` | Output face crop height (pixels) |
+| `FACE_MAX_UNIQUE` | `50` | Maximum saved face crops per recording (0=unlimited) |
+
+When enabled, the agent writes:
+- `faces/groups.json` (identity groups + referenced face files)
+- `faces/personXYZ/faceNNNNN.jpg` (normalized face crops)
 
 ## Usage
 

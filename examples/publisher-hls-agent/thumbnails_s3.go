@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -35,7 +36,7 @@ func parseHLSPlaylistAssets(playlist string) (mapURI string, segments []string) 
 	return mapURI, segments
 }
 
-func generateAndUploadThumbnailsFromS3(u *RealtimeS3Uploader, cfg thumbnailConfig) error {
+func generateAndUploadThumbnailsFromS3(u *RealtimeS3Uploader, cfg thumbnailConfig, faceCfg *faceExtractionConfig) error {
 	if u == nil || u.client == nil {
 		return fmt.Errorf("S3 uploader not initialized")
 	}
@@ -83,9 +84,16 @@ func generateAndUploadThumbnailsFromS3(u *RealtimeS3Uploader, cfg thumbnailConfi
 		}
 	}
 
-	thumbnails, err := generateThumbnailsFFmpeg(ctx, localPlaylist, tempDir, cfg)
+	thumbnails, faces, warnings, err := generateThumbnailsWithOptionalFaceExtraction(ctx, localPlaylist, tempDir, cfg, faceCfg)
 	if err != nil {
 		return fmt.Errorf("generate thumbnails from S3-downloaded HLS: %w", err)
+	}
+	for _, warn := range warnings {
+		log.Printf("[%s/%s] thumbnail post-processing warning: %v", u.room, u.participant, warn)
+	}
+	if faces != nil && faces.Saved > 0 {
+		log.Printf("[%s/%s] extracted %d unique faces (detected=%d, nonface=%d, dup=%d, limit=%d, groups=%d)",
+			u.room, u.participant, faces.Saved, faces.Detected, faces.FilteredNonFace, faces.SkippedDuplicate, faces.SkippedLimit, faces.Groups)
 	}
 
 	thumbPlaylistPath := filepath.Join(tempDir, "thumbnails.m3u8")
@@ -99,6 +107,15 @@ func generateAndUploadThumbnailsFromS3(u *RealtimeS3Uploader, cfg thumbnailConfi
 	for _, name := range thumbnails {
 		if err := u.uploadFile(filepath.Join(tempDir, name), name); err != nil {
 			return fmt.Errorf("upload thumbnail %s: %w", name, err)
+		}
+	}
+
+	if faces != nil {
+		for _, rel := range faces.Files {
+			local := filepath.Join(tempDir, filepath.FromSlash(rel))
+			if err := u.uploadFile(local, rel); err != nil {
+				return fmt.Errorf("upload extracted face %s: %w", rel, err)
+			}
 		}
 	}
 

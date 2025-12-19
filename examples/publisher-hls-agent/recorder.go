@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -101,7 +102,7 @@ type ParticipantRecorder struct {
 	preVideoMu      sync.Mutex
 	preVideoPackets []*rtp.Packet
 	preAudioMu      sync.Mutex
-	preAudioPackets []*rtp.Packet
+	preAudioPackets []bufferedRTPPacket
 
 	s3Uploader *RealtimeS3Uploader // Real-time S3 uploader (nil if disabled)
 
@@ -132,6 +133,16 @@ type ParticipantRecorder struct {
 const (
 	preVideoBufferMax = 300
 	preAudioBufferMax = 500
+	// audioKeyframePreroll defines how much recently-received audio we keep when
+	// starting recording on a video keyframe. Audio often arrives slightly ahead
+	// of video; keeping a small preroll prevents losing the first Opus frames while
+	// still dropping stale audio from warm-up / restarts.
+	audioKeyframePreroll = 300 * time.Millisecond
+	// audioRestartGapCut is a wall-clock gap threshold used to detect a publisher
+	// restart (e.g., test handshake publisher stopping and restarting playback).
+	// When such a gap is detected in the pre-audio buffer, we drop everything before
+	// the gap to avoid mixing two publishes in one recording.
+	audioRestartGapCut = 50 * time.Millisecond
 )
 
 // RecordingSummary contains statistics and metadata about a completed recording.
@@ -145,6 +156,11 @@ type RecordingSummary struct {
 	VideoPackets int           // Number of video RTP packets processed
 	AudioPackets int           // Number of audio RTP packets processed
 	Remote       string        // S3 URL if uploaded, empty otherwise
+}
+
+type bufferedRTPPacket struct {
+	pkt        *rtp.Packet
+	receivedAt time.Time
 }
 
 // NewParticipantRecorder creates a new recorder for a participant.
@@ -223,7 +239,7 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	_ = audioSrc.SetProperty("stream-type", 0)
 	_ = audioSrc.SetProperty("max-bytes", uint64(2*1024*1024))
 	// Set caps for raw Opus audio (not RTP)
-	audioCaps := gst.NewCapsFromString("audio/x-opus,rate=48000,channels=2")
+	audioCaps := gst.NewCapsFromString("audio/x-opus,rate=48000,channels=2,channel-mapping-family=0")
 	_ = audioSrc.SetProperty("caps", audioCaps)
 
 	opusParse, err := gst.NewElement("opusparse")
@@ -1252,12 +1268,16 @@ func (r *ParticipantRecorder) enqueuePreAudioPacket(pkt *rtp.Packet) {
 	if clone == nil {
 		return
 	}
+	now := time.Now()
 	r.preAudioMu.Lock()
 	if len(r.preAudioPackets) >= preAudioBufferMax {
-		r.preAudioPackets[0] = nil
+		r.preAudioPackets[0].pkt = nil
 		r.preAudioPackets = r.preAudioPackets[1:]
 	}
-	r.preAudioPackets = append(r.preAudioPackets, clone)
+	r.preAudioPackets = append(r.preAudioPackets, bufferedRTPPacket{
+		pkt:        clone,
+		receivedAt: now,
+	})
 	r.preAudioMu.Unlock()
 }
 
@@ -1284,8 +1304,8 @@ func (r *ParticipantRecorder) dequeuePreAudioPacket() *rtp.Packet {
 	if len(r.preAudioPackets) == 0 {
 		return nil
 	}
-	pkt := r.preAudioPackets[0]
-	r.preAudioPackets[0] = nil
+	pkt := r.preAudioPackets[0].pkt
+	r.preAudioPackets[0].pkt = nil
 	r.preAudioPackets = r.preAudioPackets[1:]
 	return pkt
 }
@@ -1303,10 +1323,96 @@ func (r *ParticipantRecorder) dequeuePreAudioPacket() *rtp.Packet {
 func (r *ParticipantRecorder) clearPreAudioBuffer() {
 	r.preAudioMu.Lock()
 	for i := range r.preAudioPackets {
-		r.preAudioPackets[i] = nil
+		r.preAudioPackets[i].pkt = nil
 	}
 	r.preAudioPackets = nil
 	r.preAudioMu.Unlock()
+}
+
+// trimPreAudioBuffer drops any buffered audio packets older than (now - maxAge).
+// This is used when recording starts on a keyframe: it preserves a short amount
+// of recently-received audio (which may have arrived slightly before the video
+// keyframe) while discarding stale buffered audio from warm-up / restarts.
+func (r *ParticipantRecorder) trimPreAudioBuffer(maxAge time.Duration) {
+	debug := os.Getenv("PUBLISHER_HLS_DEBUG_AUDIO_TRIM") == "1"
+	cutoff := time.Now().Add(-maxAge)
+	r.preAudioMu.Lock()
+	defer r.preAudioMu.Unlock()
+	if len(r.preAudioPackets) == 0 {
+		return
+	}
+
+	if debug {
+		log.Printf("[%s] trimPreAudioBuffer: begin packets=%d maxAge=%s", r.logPrefix(), len(r.preAudioPackets), maxAge)
+	}
+
+	keepFrom := 0
+	for keepFrom < len(r.preAudioPackets) && r.preAudioPackets[keepFrom].receivedAt.Before(cutoff) {
+		r.preAudioPackets[keepFrom].pkt = nil
+		keepFrom++
+	}
+	if keepFrom > 0 {
+		r.preAudioPackets = r.preAudioPackets[keepFrom:]
+	}
+
+	// If the publisher stopped and restarted while we were waiting for the first
+	// recording keyframe, the pre-buffer can contain audio from both publishes.
+	// Detect the largest wall-clock gap and keep only the packets after it.
+	//
+	// Note: we intentionally use receivedAt (arrival time), not RTP timestamps,
+	// because the test publisher reuses the same RTP track and sequence space.
+	if len(r.preAudioPackets) > 1 {
+		maxGap := time.Duration(0)
+		cut := -1
+		for i := 1; i < len(r.preAudioPackets); i++ {
+			gap := r.preAudioPackets[i].receivedAt.Sub(r.preAudioPackets[i-1].receivedAt)
+			if gap > maxGap {
+				maxGap = gap
+				cut = i
+			}
+		}
+
+		if cut > 0 && maxGap >= audioRestartGapCut {
+			if debug {
+				log.Printf("[%s] trimPreAudioBuffer: dropping %d/%d packets before restart gap (maxGap=%s)",
+					r.logPrefix(), cut, len(r.preAudioPackets), maxGap)
+			}
+			for i := 0; i < cut; i++ {
+				r.preAudioPackets[i].pkt = nil
+			}
+			r.preAudioPackets = r.preAudioPackets[cut:]
+		}
+	}
+
+	// Ensure monotonic ordering by RTP timestamp/sequence before we start draining
+	// the buffer into GStreamer. Late/out-of-order packets can otherwise trigger
+	// uint32 underflow in audioClockTime() and corrupt tfdt/segment timing.
+	if len(r.preAudioPackets) > 1 {
+		sort.Slice(r.preAudioPackets, func(i, j int) bool {
+			pi := r.preAudioPackets[i].pkt
+			pj := r.preAudioPackets[j].pkt
+			if pi == nil || pj == nil {
+				return pi != nil
+			}
+			if pi.Timestamp == pj.Timestamp {
+				return int16(pi.SequenceNumber-pj.SequenceNumber) < 0
+			}
+			return int32(pi.Timestamp-pj.Timestamp) < 0
+		})
+	}
+
+	if debug {
+		show := min(6, len(r.preAudioPackets))
+		for i := 0; i < show; i++ {
+			p := r.preAudioPackets[i].pkt
+			if p == nil {
+				continue
+			}
+			log.Printf("[%s] trimPreAudioBuffer: kept[%d]=seq=%d ts=%d payload=%d",
+				r.logPrefix(), i, p.SequenceNumber, p.Timestamp, len(p.Payload))
+		}
+		log.Printf("[%s] trimPreAudioBuffer: end packets=%d", r.logPrefix(), len(r.preAudioPackets))
+	}
 }
 
 // pushVideoPacket converts an RTP packet to a GStreamer buffer and pushes it to the video appsrc.
@@ -1950,11 +2056,10 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 										return
 									}
 
-									// Drop any buffered audio packets from before the recording keyframe.
-									// When we wait for a keyframe, we must start both audio and video at
-									// that keyframe boundary to avoid A/V desync and timestamp underflow
-									// when publishers restart (handshake → main publish).
-									r.clearPreAudioBuffer()
+									// Keep a small amount of recently-received audio when starting on
+									// a video keyframe. Audio often arrives ahead of video; retaining
+									// a short preroll prevents dropping the first Opus frames.
+									r.trimPreAudioBuffer(audioKeyframePreroll)
 
 									// Allow audio to start now.
 									r.recordingKeyframePending.Store(false)
@@ -1999,8 +2104,7 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 									return
 								}
 
-								// Drop any buffered audio packets from before the recording keyframe.
-								r.clearPreAudioBuffer()
+								r.trimPreAudioBuffer(audioKeyframePreroll)
 
 								// Allow audio to start now
 								r.recordingKeyframePending.Store(false)
@@ -2164,8 +2268,10 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 					}
 					log.Printf("[%s] primed pipeline with keyframe + %d video packets", r.logPrefix(), primeCount)
 
-					// Drop any buffered audio packets from before the recording keyframe.
-					r.clearPreAudioBuffer()
+					// Keep a small amount of recently-received audio when starting on
+					// a video keyframe. Audio often arrives ahead of video; retaining
+					// a short preroll prevents dropping the first Opus frames.
+					r.trimPreAudioBuffer(audioKeyframePreroll)
 
 					// NOW allow audio to start (video pipeline is primed)
 					r.recordingKeyframePending.Store(false)
@@ -2299,8 +2405,10 @@ func (r *ParticipantRecorder) attachAV1VideoTrack(ctx context.Context, track *we
 						return
 					}
 
-					// Drop any buffered audio packets from before the recording keyframe.
-					r.clearPreAudioBuffer()
+					// Keep a small amount of recently-received audio when starting on
+					// a video keyframe. Audio often arrives ahead of video; retaining
+					// a short preroll prevents dropping the first Opus frames.
+					r.trimPreAudioBuffer(audioKeyframePreroll)
 
 					r.recordingKeyframePending.Store(false)
 				}
@@ -2366,8 +2474,7 @@ func (r *ParticipantRecorder) attachAV1VideoTrack(ctx context.Context, track *we
 					return
 				}
 
-				// Drop any buffered audio packets from before the recording keyframe.
-				r.clearPreAudioBuffer()
+				r.trimPreAudioBuffer(audioKeyframePreroll)
 
 				r.recordingKeyframePending.Store(false)
 				continue
@@ -2425,26 +2532,129 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 		defer r.wg.Done()
 		log.Printf("[%s] audio track subscribed (sid=%s, codec=%s, payloadType=%d)",
 			r.logPrefix(), track.ID(), track.Codec().MimeType, track.PayloadType())
-		for {
-			var rtpPacket *rtp.Packet
-			var fromBuffer bool
 
-			if r.recordingActive.Load() && !r.recordingKeyframePending.Load() {
-				if buffered := r.dequeuePreAudioPacket(); buffered != nil {
-					rtpPacket = buffered
-					fromBuffer = true
+		// We feed raw Opus payloads to GStreamer (bypassing rtpjitterbuffer/rtpopusdepay),
+		// so we must reorder RTP packets ourselves to keep timestamps monotonic.
+		//
+		// We also need to tolerate out-of-order delivery *around the recording start*
+		// boundary: some early packets can arrive after the video keyframe toggles
+		// recordingKeyframePending=false. To avoid dropping these, we hold a short
+		// startup window and pick the earliest sequence number observed.
+		const (
+			maxReorderBuffer        = 512
+			startupCollectWindow    = 250 * time.Millisecond
+			missingSequenceMaxWait  = 200 * time.Millisecond
+			startupMinBufferedPkts  = 20
+			startupMaxCollectWindow = 750 * time.Millisecond
+		)
+
+		reorderBuf := make(map[uint16]*rtp.Packet)
+		var expectedSeq uint16
+		expectedSeqSet := false
+		var missingSince time.Time
+		var recordingStarted bool
+		var collecting bool
+		var collectUntil time.Time
+		var collectDeadline time.Time
+
+		seqLess := func(a, b uint16) bool {
+			return int16(a-b) < 0
+		}
+
+		minSeqInBuffer := func() (uint16, bool) {
+			var min uint16
+			ok := false
+			for seq := range reorderBuf {
+				if !ok || seqLess(seq, min) {
+					min = seq
+					ok = true
 				}
 			}
+			return min, ok
+		}
 
-			if rtpPacket == nil {
-				select {
-				case <-ctx.Done():
-					return
-				default:
+		pushPacket := func(pkt *rtp.Packet) bool {
+			if pkt == nil {
+				return true
+			}
+			if len(pkt.Payload) == 0 {
+				r.mu.Lock()
+				r.audioEmptyPacketCount++
+				r.mu.Unlock()
+				return true
+			}
+
+			audioPTS, relative := r.audioClockTime(pkt.Timestamp)
+			r.mu.Lock()
+			r.audioPacketCount++
+			r.audioBytesReceived += int64(len(pkt.Payload))
+			if !r.audioInitialized {
+				r.audioInitialized = true
+				log.Printf("[%s] audio initialized (raw Opus mode, caps set in constructor)", r.logPrefix())
+			}
+			r.audioLastPTS = audioPTS
+			r.audioLastTimestamp = relative
+			r.mu.Unlock()
+
+			buffer := gst.NewBufferFromBytes(pkt.Payload)
+			buffer.SetPresentationTimestamp(audioPTS)
+
+			if flow := r.audioAppSrc.PushBuffer(buffer); flow != gst.FlowOK {
+				if flow != gst.FlowFlushing {
+					log.Printf("[%s] audio appsrc push returned %s", r.logPrefix(), flow.String())
+				}
+				return false
+			}
+			return true
+		}
+
+		tryFlush := func(now time.Time) bool {
+			if !expectedSeqSet {
+				return true
+			}
+			for {
+				pkt, ok := reorderBuf[expectedSeq]
+				if ok {
+					delete(reorderBuf, expectedSeq)
+					expectedSeq++
+					missingSince = time.Time{}
+					if !pushPacket(pkt) {
+						return false
+					}
+					continue
 				}
 
-				var err error
-				rtpPacket, _, err = track.ReadRTP()
+				if missingSince.IsZero() {
+					missingSince = now
+					break
+				}
+				if now.Sub(missingSince) >= missingSequenceMaxWait {
+					// Consider this packet lost and move forward so we don't stall forever.
+					expectedSeq++
+					missingSince = now
+					continue
+				}
+				break
+			}
+			return true
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			recordingAllowed := r.recordingActive.Load() && !r.recordingKeyframePending.Load()
+			if !recordingAllowed {
+				recordingStarted = false
+				collecting = false
+				expectedSeqSet = false
+				missingSince = time.Time{}
+				clear(reorderBuf)
+
+				rtpPacket, _, err := track.ReadRTP()
 				if err != nil {
 					if ctx.Err() == nil {
 						log.Printf("[%s] audio track read error: %v", r.logPrefix(), err)
@@ -2452,65 +2662,109 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 					return
 				}
 
-				// Decrypt E2EE-encrypted payload if E2EE is enabled
 				if r.E2EEEnabled() && len(rtpPacket.Payload) > 0 {
 					r.mu.Lock()
 					e2eeCtx := r.e2eeCtx
 					r.mu.Unlock()
-
 					decrypted, err := e2eeCtx.DecryptAudio(rtpPacket.Payload)
 					if err != nil {
-						// Decryption failed - log and skip packet
 						log.Printf("[%s] audio E2EE decryption error (seq=%d): %v", r.logPrefix(), rtpPacket.SequenceNumber, err)
 						continue
 					}
 					if decrypted == nil {
-						// Server Injected Frame - drop it
 						continue
 					}
 					rtpPacket.Payload = decrypted
 				}
-			}
 
-			if rtpPacket == nil {
+				r.enqueuePreAudioPacket(rtpPacket)
 				continue
 			}
 
-			if !r.recordingActive.Load() || r.recordingKeyframePending.Load() {
-				if !fromBuffer {
-					r.enqueuePreAudioPacket(rtpPacket)
+			now := time.Now()
+			if !recordingStarted {
+				recordingStarted = true
+				collecting = true
+				collectUntil = now.Add(startupCollectWindow)
+				collectDeadline = now.Add(startupMaxCollectWindow)
+
+				for {
+					buffered := r.dequeuePreAudioPacket()
+					if buffered == nil {
+						break
+					}
+					if _, exists := reorderBuf[buffered.SequenceNumber]; !exists {
+						reorderBuf[buffered.SequenceNumber] = buffered
+					}
 				}
-				continue
 			}
-			r.mu.Lock()
-			r.audioPacketCount++
-			if len(rtpPacket.Payload) == 0 {
-				r.audioEmptyPacketCount++
+
+			rtpPacket, _, err := track.ReadRTP()
+			if err != nil {
+				if ctx.Err() == nil {
+					log.Printf("[%s] audio track read error: %v", r.logPrefix(), err)
+				}
+				return
+			}
+			now = time.Now()
+
+			if r.E2EEEnabled() && len(rtpPacket.Payload) > 0 {
+				r.mu.Lock()
+				e2eeCtx := r.e2eeCtx
 				r.mu.Unlock()
-				continue
-			}
-			r.audioBytesReceived += int64(len(rtpPacket.Payload))
-			if !r.audioInitialized {
-				r.audioInitialized = true
-				log.Printf("[%s] audio initialized (raw Opus mode, caps set in constructor)", r.logPrefix())
-			}
-			r.mu.Unlock()
-
-			// Use RTP timestamps (48kHz) to keep audio timing aligned with video.
-			audioPTS, relative := r.audioClockTime(rtpPacket.Timestamp)
-			r.mu.Lock()
-			r.audioLastPTS = audioPTS
-			r.audioLastTimestamp = relative
-			r.mu.Unlock()
-
-			// Push raw Opus payload with explicit RTP-derived PTS.
-			buffer := gst.NewBufferFromBytes(rtpPacket.Payload)
-			buffer.SetPresentationTimestamp(audioPTS)
-
-			if flow := r.audioAppSrc.PushBuffer(buffer); flow != gst.FlowOK {
-				if flow != gst.FlowFlushing {
-					log.Printf("[%s] audio appsrc push returned %s", r.logPrefix(), flow.String())
+				decrypted, err := e2eeCtx.DecryptAudio(rtpPacket.Payload)
+				if err != nil {
+					log.Printf("[%s] audio E2EE decryption error (seq=%d): %v", r.logPrefix(), rtpPacket.SequenceNumber, err)
+					continue
 				}
+				if decrypted == nil {
+					continue
+				}
+				rtpPacket.Payload = decrypted
+			}
+
+			if _, exists := reorderBuf[rtpPacket.SequenceNumber]; !exists {
+				reorderBuf[rtpPacket.SequenceNumber] = rtpPacket
+			}
+
+			if collecting {
+				if len(reorderBuf) >= startupMinBufferedPkts || now.After(collectUntil) || now.After(collectDeadline) {
+					minSeq, ok := minSeqInBuffer()
+					if ok {
+						expectedSeq = minSeq
+						expectedSeqSet = true
+						collecting = false
+						missingSince = time.Time{}
+					}
+				}
+			}
+
+			if len(reorderBuf) > maxReorderBuffer {
+				// Too much buffered: assume some packets were lost and jump forward to the
+				// closest available sequence number so we don't stall indefinitely.
+				if expectedSeqSet {
+					bestSeq := expectedSeq
+					bestDist := uint16(0xFFFF)
+					for seq := range reorderBuf {
+						dist := seq - expectedSeq
+						if dist < bestDist {
+							bestDist = dist
+							bestSeq = seq
+						}
+					}
+					expectedSeq = bestSeq
+					missingSince = time.Time{}
+				} else {
+					minSeq, ok := minSeqInBuffer()
+					if ok {
+						expectedSeq = minSeq
+						expectedSeqSet = true
+						collecting = false
+					}
+				}
+			}
+
+			if !tryFlush(time.Now()) {
 				return
 			}
 		}
@@ -2706,6 +2960,7 @@ func (r *ParticipantRecorder) Stop() {
 		// the real-time uploader finishes.
 		var (
 			thumbCfg             thumbnailConfig
+			faceCfg              *faceExtractionConfig
 			generateThumbsFromS3 bool
 			generatedThumbCount  int
 			wroteLocalThumbsM3U8 bool
@@ -2718,6 +2973,11 @@ func (r *ParticipantRecorder) Stop() {
 			} else {
 				thumbCfg = tc
 				generateThumbsFromS3 = r.s3Uploader != nil && r.cfg.S3RealTimeUpload
+				if fc, err := faceExtractionConfigFromConfig(r.cfg); err != nil {
+					log.Printf("[%s] invalid face extraction config: %v", r.logPrefix(), err)
+				} else if fc.Enabled {
+					faceCfg = &fc
+				}
 
 				if !generateThumbsFromS3 {
 					videoPlaylist := filepath.Join(r.outputDir, "video.m3u8")
@@ -2725,8 +2985,15 @@ func (r *ParticipantRecorder) Stop() {
 						log.Printf("[%s] skipping thumbnails: video.m3u8 not found: %v", r.logPrefix(), err)
 					} else {
 						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-						thumbnails, genErr := generateThumbnailsFFmpeg(ctx, videoPlaylist, r.outputDir, thumbCfg)
+						thumbnails, faces, warnings, genErr := generateThumbnailsWithOptionalFaceExtraction(ctx, videoPlaylist, r.outputDir, thumbCfg, faceCfg)
 						cancel()
+						for _, warn := range warnings {
+							log.Printf("[%s] thumbnail post-processing warning: %v", r.logPrefix(), warn)
+						}
+						if faces != nil && faces.Saved > 0 {
+							log.Printf("[%s] extracted %d unique faces (detected=%d, nonface=%d, dup=%d, limit=%d, groups=%d)",
+								r.logPrefix(), faces.Saved, faces.Detected, faces.FilteredNonFace, faces.SkippedDuplicate, faces.SkippedLimit, faces.Groups)
+						}
 						if genErr != nil {
 							log.Printf("[%s] failed to generate thumbnails: %v", r.logPrefix(), genErr)
 						} else if err := writeThumbnailPlaylist(filepath.Join(r.outputDir, "thumbnails.m3u8"), thumbnails, thumbCfg.Interval); err != nil {
@@ -2749,7 +3016,7 @@ func (r *ParticipantRecorder) Stop() {
 		}
 
 		if generateThumbsFromS3 && r.s3Uploader != nil && r.cfg != nil && r.cfg.ThumbnailsEnabled {
-			if err := generateAndUploadThumbnailsFromS3(r.s3Uploader, thumbCfg); err != nil {
+			if err := generateAndUploadThumbnailsFromS3(r.s3Uploader, thumbCfg, faceCfg); err != nil {
 				log.Printf("[%s] failed to generate/upload thumbnails from S3: %v", r.logPrefix(), err)
 			} else {
 				uploadedThumbsFromS3 = true
@@ -2877,6 +3144,13 @@ func (r *ParticipantRecorder) processAudioSegments() error {
 
 	// Check if init was created
 	if info, err := os.Stat(initPath); err == nil {
+		// Ensure Opus init segment carries correct pre-skip (decoder priming) metadata.
+		// Without it, decoded PCM has extra samples at the start and strict waveform
+		// comparisons (and some players) will drift out of sync.
+		if err := setOpusPreSkipInInitSegment(initPath, 312); err != nil {
+			log.Printf("[%s] warning: failed to set Opus pre-skip in audio_init.mp4: %v", r.logPrefix(), err)
+		}
+
 		log.Printf("[%s] audio segment processing complete: %d segments, init=%d bytes",
 			r.logPrefix(), segmentsProcessed, info.Size())
 	} else if segmentsProcessed > 0 {

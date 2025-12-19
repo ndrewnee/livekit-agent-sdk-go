@@ -447,7 +447,12 @@ func TestPublisherHLSAgentMultipleParticipants(t *testing.T) {
 	defer agentLogFile.Close()
 
 	agentDir := filepath.Join(repoRoot, "examples", "publisher-hls-agent")
-	agentCmd := exec.Command("go", "run", ".")
+	agentArgs := []string{"run"}
+	if tags := e2eAgentBuildTags(); tags != "" {
+		agentArgs = append(agentArgs, "-tags", tags)
+	}
+	agentArgs = append(agentArgs, ".")
+	agentCmd := exec.Command("go", agentArgs...)
 	agentCmd.Dir = agentDir
 	agentCmd.Stdout = agentLogFile
 	agentCmd.Stderr = agentLogFile
@@ -884,7 +889,12 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	defer agentLogFile.Close()
 
 	agentDir := filepath.Join(repoRoot, "examples", "publisher-hls-agent")
-	agentCmd := exec.Command("go", "run", ".")
+	agentArgs := []string{"run"}
+	if tags := e2eAgentBuildTags(); tags != "" {
+		agentArgs = append(agentArgs, "-tags", tags)
+	}
+	agentArgs = append(agentArgs, ".")
+	agentCmd := exec.Command("go", agentArgs...)
 	agentCmd.Dir = agentDir
 	agentCmd.Stdout = agentLogFile
 	agentCmd.Stderr = agentLogFile
@@ -1087,6 +1097,10 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	}
 
 	handshakePublisher.Stop()
+	// Ensure a clear boundary between the handshake publish and the "real" publish.
+	// Without a small pause, in-flight audio packets from the handshake can bleed into
+	// the beginning of the recording and break strict exactness checks.
+	time.Sleep(500 * time.Millisecond)
 
 	publisher, err := NewGStreamerPublisher(testVideo, videoCodec, videoTrack, audioTrack)
 	if err != nil {
@@ -1447,6 +1461,7 @@ func startMinIOServer(t *testing.T) *minioServer {
 
 	accessKey := "minioadmin"
 	secretKey := "minioadmin"
+	rootDiskThreshold := os.Getenv("PUBLISHER_HLS_MINIO_ROOTDISK_THRESHOLD_SIZE")
 
 	server := &minioServer{
 		Endpoint:  fmt.Sprintf("127.0.0.1:%d", apiPort),
@@ -1468,6 +1483,9 @@ func startMinIOServer(t *testing.T) *minioServer {
 			"-e", fmt.Sprintf("MINIO_ROOT_PASSWORD=%s", secretKey),
 			"quay.io/minio/minio", "server", "/data", "--console-address", ":9001",
 		}
+		if rootDiskThreshold != "" {
+			args = append(args, "-e", fmt.Sprintf("MINIO_ROOTDISK_THRESHOLD_SIZE=%s", rootDiskThreshold))
+		}
 		cmd := exec.Command("docker", args...)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
@@ -1485,6 +1503,9 @@ func startMinIOServer(t *testing.T) *minioServer {
 			fmt.Sprintf("MINIO_ROOT_USER=%s", accessKey),
 			fmt.Sprintf("MINIO_ROOT_PASSWORD=%s", secretKey),
 		)
+		if rootDiskThreshold != "" {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("MINIO_ROOTDISK_THRESHOLD_SIZE=%s", rootDiskThreshold))
+		}
 
 		stdout, err := os.CreateTemp("", "minio-stdout-*.log")
 		if err == nil {
