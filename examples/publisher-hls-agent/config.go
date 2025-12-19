@@ -63,6 +63,26 @@ type Config struct {
 	// The passphrase must match the one used by the publishing client.
 	// Environment variable: E2EE_PASSPHRASE (default: empty, E2EE disabled)
 	E2EEPassphrase string
+
+	// ThumbnailsEnabled enables periodic thumbnail extraction from the recorded video.
+	// Environment variable: THUMBNAILS_ENABLED (default: false)
+	ThumbnailsEnabled bool
+
+	// ThumbnailIntervalSecs is the interval in seconds between thumbnails.
+	// Environment variable: THUMBNAIL_INTERVAL_SECS (default: 5)
+	ThumbnailIntervalSecs int
+
+	// ThumbnailWidth is the target thumbnail width in pixels.
+	// Environment variable: THUMBNAIL_WIDTH (default: 640)
+	ThumbnailWidth int
+
+	// ThumbnailHeight is the target thumbnail height in pixels.
+	// Environment variable: THUMBNAIL_HEIGHT (default: 320)
+	ThumbnailHeight int
+
+	// ThumbnailFormat is the output image format for thumbnails (jpg, jpeg, png, webp).
+	// Environment variable: THUMBNAIL_FORMAT (default: jpg)
+	ThumbnailFormat string
 }
 
 // loadConfig reads all configuration from environment variables.
@@ -70,17 +90,22 @@ type Config struct {
 // Panics via log.Fatalf if required variables (API key/secret) are missing.
 func loadConfig() *Config {
 	return &Config{
-		LiveKitURL:           getEnv("LIVEKIT_URL", "ws://localhost:7880"),
-		APIKey:               mustGetEnv("LIVEKIT_API_KEY"),
-		APISecret:            mustGetEnv("LIVEKIT_API_SECRET"),
-		OutputDir:            getEnv("OUTPUT_DIR", "publisher-hls-output"),
-		AutoActivate:         getEnvBool("AUTO_ACTIVATE_RECORDING", false),
-		SegmentDurationSecs:  getEnvInt("HLS_SEGMENT_DURATION", 2),
-		MaxPlaylistEntries:   getEnvInt("HLS_MAX_SEGMENTS", 0),
-		MaxMixerParticipants: getEnvInt("MAX_MIXER_PARTICIPANTS", 10),
-		AgentName:            getEnv("AGENT_NAME", "publisher-hls-recorder"),
-		S3RealTimeUpload:     getEnvBool("S3_REALTIME_UPLOAD", false),
-		E2EEPassphrase:       getEnv("E2EE_PASSPHRASE", ""),
+		LiveKitURL:            getEnv("LIVEKIT_URL", "ws://localhost:7880"),
+		APIKey:                mustGetEnv("LIVEKIT_API_KEY"),
+		APISecret:             mustGetEnv("LIVEKIT_API_SECRET"),
+		OutputDir:             getEnv("OUTPUT_DIR", "publisher-hls-output"),
+		AutoActivate:          getEnvBool("AUTO_ACTIVATE_RECORDING", false),
+		SegmentDurationSecs:   getEnvInt("HLS_SEGMENT_DURATION", 2),
+		MaxPlaylistEntries:    getEnvInt("HLS_MAX_SEGMENTS", 0),
+		MaxMixerParticipants:  getEnvInt("MAX_MIXER_PARTICIPANTS", 10),
+		AgentName:             getEnv("AGENT_NAME", "publisher-hls-recorder"),
+		S3RealTimeUpload:      getEnvBool("S3_REALTIME_UPLOAD", false),
+		E2EEPassphrase:        getEnv("E2EE_PASSPHRASE", ""),
+		ThumbnailsEnabled:     getEnvBool("THUMBNAILS_ENABLED", false),
+		ThumbnailIntervalSecs: getEnvInt("THUMBNAIL_INTERVAL_SECS", 5),
+		ThumbnailWidth:        getEnvInt("THUMBNAIL_WIDTH", 640),
+		ThumbnailHeight:       getEnvInt("THUMBNAIL_HEIGHT", 320),
+		ThumbnailFormat:       getEnv("THUMBNAIL_FORMAT", "jpg"),
 		S3: S3Config{
 			Endpoint:       getEnv("S3_ENDPOINT", ""),
 			Bucket:         getEnv("S3_BUCKET", ""),

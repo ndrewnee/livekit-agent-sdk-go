@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
 	"math"
 	"net"
 	"net/http"
@@ -127,6 +129,11 @@ func TestPublisherHLSAgentUploadsToS3(t *testing.T) {
 			"S3_OBJECT_ACL":           "public-read",
 			"AUTO_ACTIVATE_RECORDING": "true",
 			"E2EE_PASSPHRASE":         e2eePassphrase, // Agent decryption passphrase
+			"THUMBNAILS_ENABLED":      "true",
+			"THUMBNAIL_INTERVAL_SECS": "5",
+			"THUMBNAIL_WIDTH":         "640",
+			"THUMBNAIL_HEIGHT":        "320",
+			"THUMBNAIL_FORMAT":        "jpg",
 		},
 	}
 
@@ -165,6 +172,10 @@ func TestPublisherHLSAgentUploadsToS3(t *testing.T) {
 	}
 	if !foundFirstSegment {
 		t.Fatalf("playlist at %s missing EXTINF entries", playlistObj)
+	}
+
+	if err := validateS3Thumbnails(t, client, ms.Bucket, prefix, 640, 320); err != nil {
+		t.Fatalf("thumbnail validation failed: %v", err)
 	}
 
 	policy := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":["s3:GetObject"],"Resource":["arn:aws:s3:::%s/%s/*"]}]}`, ms.Bucket, prefix)
@@ -222,6 +233,11 @@ func TestPublisherHLSAgentUploadsAV1ToS3(t *testing.T) {
 			"S3_OBJECT_ACL":           "public-read",
 			"AUTO_ACTIVATE_RECORDING": "true",
 			"E2EE_PASSPHRASE":         e2eePassphrase,
+			"THUMBNAILS_ENABLED":      "true",
+			"THUMBNAIL_INTERVAL_SECS": "5",
+			"THUMBNAIL_WIDTH":         "640",
+			"THUMBNAIL_HEIGHT":        "320",
+			"THUMBNAIL_FORMAT":        "jpg",
 		},
 	}
 
@@ -234,6 +250,10 @@ func TestPublisherHLSAgentUploadsAV1ToS3(t *testing.T) {
 		t.Fatalf("AV1 S3 validation failed: %v", err)
 	}
 
+	if err := validateS3Thumbnails(t, client, ms.Bucket, prefix, 640, 320); err != nil {
+		t.Fatalf("thumbnail validation failed: %v", err)
+	}
+
 	// Make the recording publicly readable over HTTP for manual inspection via the web player.
 	// MinIO's anonymous HTTP access relies on bucket policy (object ACLs may be disabled/ignored).
 	policy := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":["s3:GetObject"],"Resource":["arn:aws:s3:::%s/%s/*"]}]}`, ms.Bucket, prefix)
@@ -244,6 +264,64 @@ func TestPublisherHLSAgentUploadsAV1ToS3(t *testing.T) {
 	t.Logf("AV1 HLS video playlist: http://%s/%s/%s", ms.Endpoint, ms.Bucket, path.Join(prefix, "video.m3u8"))
 	t.Logf("AV1 HLS audio manifest: http://%s/%s/%s", ms.Endpoint, ms.Bucket, path.Join(prefix, "audio.json"))
 	t.Logf("AV1 S3 validation succeeded for s3://%s/%s", ms.Bucket, prefix)
+}
+
+func validateS3Thumbnails(t *testing.T, client *minio.Client, bucket, prefix string, expectedWidth, expectedHeight int) error {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	playlistObj := path.Join(prefix, "thumbnails.m3u8")
+	if _, err := client.StatObject(ctx, bucket, playlistObj, minio.StatObjectOptions{}); err != nil {
+		return fmt.Errorf("missing thumbnails.m3u8 in S3: %w", err)
+	}
+
+	tempDir := t.TempDir()
+	playlistPath := filepath.Join(tempDir, "thumbnails.m3u8")
+	if err := client.FGetObject(ctx, bucket, playlistObj, playlistPath, minio.GetObjectOptions{}); err != nil {
+		return fmt.Errorf("download thumbnails.m3u8: %w", err)
+	}
+
+	thumbnails, _, _, err := inspectPlaylist(playlistPath)
+	if err != nil {
+		return fmt.Errorf("inspect thumbnails.m3u8: %w", err)
+	}
+	if len(thumbnails) == 0 {
+		return fmt.Errorf("thumbnails.m3u8 has no entries")
+	}
+
+	for _, thumb := range thumbnails {
+		obj := path.Join(prefix, thumb)
+		if _, err := client.StatObject(ctx, bucket, obj, minio.StatObjectOptions{}); err != nil {
+			return fmt.Errorf("missing thumbnail %s in S3: %w", obj, err)
+		}
+	}
+
+	first := thumbnails[0]
+	firstPath := filepath.Join(tempDir, first)
+	if err := client.FGetObject(ctx, bucket, path.Join(prefix, first), firstPath, minio.GetObjectOptions{}); err != nil {
+		return fmt.Errorf("download thumbnail %s: %w", first, err)
+	}
+
+	f, err := os.Open(firstPath)
+	if err != nil {
+		return fmt.Errorf("open thumbnail %s: %w", first, err)
+	}
+	defer f.Close()
+
+	img, _, err := image.Decode(f)
+	if err != nil {
+		return fmt.Errorf("decode thumbnail %s: %w", first, err)
+	}
+
+	gotW := img.Bounds().Dx()
+	gotH := img.Bounds().Dy()
+	if gotW != expectedWidth || gotH != expectedHeight {
+		return fmt.Errorf("unexpected thumbnail resolution %dx%d, expected %dx%d", gotW, gotH, expectedWidth, expectedHeight)
+	}
+
+	return nil
 }
 
 func TestPublisherHLSAgentRecordsAV1E2EE(t *testing.T) {

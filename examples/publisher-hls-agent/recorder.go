@@ -34,6 +34,8 @@ import (
 // The recorder implements delayed pipeline start to ensure all HLS segments
 // begin with valid keyframes.
 type ParticipantRecorder struct {
+	cfg *Config
+
 	participant string
 	room        string
 	outputDir   string
@@ -301,6 +303,7 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	audioManifest := NewAudioManifestWriter(absDir, cfg, startTime)
 
 	recorder := &ParticipantRecorder{
+		cfg:             cfg,
 		participant:     participant,
 		room:            roomName,
 		outputDir:       absDir,
@@ -2697,11 +2700,66 @@ func (r *ParticipantRecorder) Stop() {
 			}
 		}
 
+		// Generate video thumbnails (optional). For post-processing uploads, thumbnails are
+		// created locally before the directory upload. For real-time S3 uploads, video segments
+		// may be deleted locally, so we generate thumbnails from the uploaded HLS objects after
+		// the real-time uploader finishes.
+		var (
+			thumbCfg             thumbnailConfig
+			generateThumbsFromS3 bool
+			generatedThumbCount  int
+			wroteLocalThumbsM3U8 bool
+			uploadedThumbsFromS3 bool
+		)
+		if r.cfg != nil && r.cfg.ThumbnailsEnabled {
+			tc, err := thumbnailConfigFromConfig(r.cfg)
+			if err != nil {
+				log.Printf("[%s] invalid thumbnail config: %v", r.logPrefix(), err)
+			} else {
+				thumbCfg = tc
+				generateThumbsFromS3 = r.s3Uploader != nil && r.cfg.S3RealTimeUpload
+
+				if !generateThumbsFromS3 {
+					videoPlaylist := filepath.Join(r.outputDir, "video.m3u8")
+					if _, err := os.Stat(videoPlaylist); err != nil {
+						log.Printf("[%s] skipping thumbnails: video.m3u8 not found: %v", r.logPrefix(), err)
+					} else {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+						thumbnails, genErr := generateThumbnailsFFmpeg(ctx, videoPlaylist, r.outputDir, thumbCfg)
+						cancel()
+						if genErr != nil {
+							log.Printf("[%s] failed to generate thumbnails: %v", r.logPrefix(), genErr)
+						} else if err := writeThumbnailPlaylist(filepath.Join(r.outputDir, "thumbnails.m3u8"), thumbnails, thumbCfg.Interval); err != nil {
+							log.Printf("[%s] failed to write thumbnails.m3u8: %v", r.logPrefix(), err)
+						} else {
+							generatedThumbCount = len(thumbnails)
+							wroteLocalThumbsM3U8 = true
+							log.Printf("[%s] generated %d thumbnails and wrote thumbnails.m3u8", r.logPrefix(), len(thumbnails))
+						}
+					}
+				}
+			}
+		}
+
 		// Close real-time S3 uploader if enabled
 		if r.s3Uploader != nil {
 			if err := r.s3Uploader.Close(); err != nil {
 				log.Printf("[%s] failed to close S3 uploader: %v", r.logPrefix(), err)
 			}
+		}
+
+		if generateThumbsFromS3 && r.s3Uploader != nil && r.cfg != nil && r.cfg.ThumbnailsEnabled {
+			if err := generateAndUploadThumbnailsFromS3(r.s3Uploader, thumbCfg); err != nil {
+				log.Printf("[%s] failed to generate/upload thumbnails from S3: %v", r.logPrefix(), err)
+			} else {
+				uploadedThumbsFromS3 = true
+				log.Printf("[%s] generated and uploaded thumbnails (from S3 HLS) and thumbnails.m3u8", r.logPrefix())
+			}
+		}
+
+		if wroteLocalThumbsM3U8 && r.s3Uploader != nil && r.cfg != nil && r.cfg.S3RealTimeUpload && r.cfg.ThumbnailsEnabled {
+			log.Printf("[%s] wrote thumbnails.m3u8 locally for real-time upload (thumbnails=%d, uploadedFromS3=%v)",
+				r.logPrefix(), generatedThumbCount, uploadedThumbsFromS3)
 		}
 
 		videoSeconds := float64(r.videoLastPTS) / 1_000_000_000

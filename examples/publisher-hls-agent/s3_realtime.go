@@ -484,6 +484,12 @@ func (u *RealtimeS3Uploader) uploadFile(localPath, fileName string) error {
 		contentType = "video/MP2T"
 	} else if strings.HasSuffix(fileName, ".m4s") || strings.HasSuffix(fileName, ".mp4") {
 		contentType = "video/mp4" // fMP4/CMAF segments
+	} else if strings.HasSuffix(fileName, ".jpg") || strings.HasSuffix(fileName, ".jpeg") {
+		contentType = "image/jpeg"
+	} else if strings.HasSuffix(fileName, ".png") {
+		contentType = "image/png"
+	} else if strings.HasSuffix(fileName, ".webp") {
+		contentType = "image/webp"
 	} else if fileName == "audio.json" {
 		contentType = "application/json"
 	}
@@ -646,7 +652,8 @@ func (u *RealtimeS3Uploader) finalUploadSweep() error {
 		// Upload HLS files (playlist and video segments) and audio files
 		isVideoFile := strings.HasSuffix(fileName, ".ts") || strings.HasSuffix(fileName, ".m3u8")
 		isAudioFile := strings.HasSuffix(fileName, ".m4s") || strings.HasSuffix(fileName, ".mp4") || fileName == "audio.json"
-		if !isVideoFile && !isAudioFile {
+		isImageFile := strings.HasSuffix(fileName, ".jpg") || strings.HasSuffix(fileName, ".jpeg") || strings.HasSuffix(fileName, ".png") || strings.HasSuffix(fileName, ".webp")
+		if !isVideoFile && !isAudioFile && !isImageFile {
 			continue
 		}
 

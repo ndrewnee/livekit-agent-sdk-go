@@ -1020,7 +1020,7 @@ func inspectPlaylist(playlistPath string) ([]string, []float64, float64, error) 
 			} else {
 				durations = append(durations, math.NaN())
 			}
-		} else if !strings.HasPrefix(trimmed, "#") && (strings.HasSuffix(trimmed, ".ts") || strings.HasSuffix(trimmed, ".m4s")) {
+		} else if !strings.HasPrefix(trimmed, "#") && (strings.HasSuffix(trimmed, ".ts") || strings.HasSuffix(trimmed, ".m4s") || strings.HasSuffix(trimmed, ".jpg") || strings.HasSuffix(trimmed, ".jpeg") || strings.HasSuffix(trimmed, ".png") || strings.HasSuffix(trimmed, ".webp")) {
 			segments = append(segments, trimmed)
 			if len(durations) < len(segments) {
 				durations = append(durations, math.NaN())
