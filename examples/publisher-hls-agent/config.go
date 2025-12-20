@@ -169,6 +169,13 @@ type Config struct {
 	// two faces are considered the same identity.
 	// Environment variable: FACE_RECOGNITION_THRESHOLD (default: 0.363)
 	FaceRecognitionThreshold float64
+
+	// FaceGroupDedupThreshold is the cosine similarity threshold (SFace) above which
+	// a face crop is considered too similar to an already-saved face within the same
+	// identity group and will be skipped.
+	// Set to 0 to disable within-group deduplication.
+	// Environment variable: FACE_GROUP_DEDUP_THRESHOLD (default: 0.9)
+	FaceGroupDedupThreshold float64
 }
 
 // loadConfig reads all configuration from environment variables.
@@ -212,6 +219,7 @@ func loadConfig() *Config {
 		FaceSFaceModelPath:      getEnv("FACE_SFACE_MODEL", ""),
 		FaceRecognitionThreshold: getEnvFloat64("FACE_RECOGNITION_THRESHOLD",
 			0.363),
+		FaceGroupDedupThreshold: getEnvFloat64("FACE_GROUP_DEDUP_THRESHOLD", 0.8),
 		S3: S3Config{
 			Endpoint:       getEnv("S3_ENDPOINT", ""),
 			Bucket:         getEnv("S3_BUCKET", ""),

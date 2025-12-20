@@ -85,6 +85,53 @@ type facesGroupManifest struct {
 	Faces          []string `json:"faces"`
 }
 
+func findOrCreateFaceGroup(fr *gocv.FaceRecognizerSF, groups *[]*faceIdentityGroup, feature gocv.Mat, threshold float32) *faceIdentityGroup {
+	if fr == nil {
+		return nil
+	}
+	if groups == nil {
+		return nil
+	}
+
+	bestGroup := -1
+	bestScore := float32(-1)
+
+	for i, g := range *groups {
+		for _, exemplar := range g.Exemplars {
+			score := fr.MatchWithParams(feature, exemplar, gocv.FaceRecognizerSFDisTypeCosine)
+			if score > bestScore {
+				bestScore = score
+				bestGroup = i
+			}
+		}
+	}
+
+	if bestGroup >= 0 && bestScore >= threshold {
+		return (*groups)[bestGroup]
+	}
+
+	id := len(*groups)
+	g := &faceIdentityGroup{ID: id}
+	*groups = append(*groups, g)
+	return g
+}
+
+func isTooSimilarToGroup(fr *gocv.FaceRecognizerSF, group *faceIdentityGroup, feature gocv.Mat, dedupThreshold float32) bool {
+	if fr == nil || group == nil {
+		return false
+	}
+	if dedupThreshold <= 0 {
+		return false
+	}
+	for _, exemplar := range group.Exemplars {
+		score := fr.MatchWithParams(feature, exemplar, gocv.FaceRecognizerSFDisTypeCosine)
+		if score >= dedupThreshold {
+			return true
+		}
+	}
+	return false
+}
+
 func extractAndSaveUniqueFacesFromImages(ctx context.Context, imagePaths []string, outputDir string, cfg faceExtractionConfig) (faceExtractionSummary, error) {
 	if !cfg.Enabled || len(imagePaths) == 0 {
 		return faceExtractionSummary{}, nil
@@ -262,13 +309,28 @@ func extractAndSaveUniqueFacesFromImages(ctx context.Context, imagePaths []strin
 					feature.Close()
 					continue
 				}
-				filter.Add(hash)
 
-				groupID := 0
+				var group *faceIdentityGroup
 				groupDir := ""
 				if cfg.WriteGroupsJSON {
-					groupID = assignFaceToGroup(&fr, &groups, feature, cfg.RecognitionThreshold)
-					groupDir = filepath.Join(facesDir, fmt.Sprintf("person%03d", groupID))
+					group = findOrCreateFaceGroup(&fr, &groups, feature, cfg.RecognitionThreshold)
+					if group == nil {
+						normalized.Close()
+						feature.Close()
+						faces.Close()
+						img.Close()
+						return summary, fmt.Errorf("failed to assign face to identity group")
+					}
+					if isTooSimilarToGroup(&fr, group, feature, cfg.GroupDedupThreshold) {
+						summary.SkippedSimilar++
+						normalized.Close()
+						feature.Close()
+						continue
+					}
+
+					group.Exemplars = append(group.Exemplars, feature.Clone())
+
+					groupDir = filepath.Join(facesDir, fmt.Sprintf("person%03d", group.ID))
 					if err := os.MkdirAll(groupDir, 0o755); err != nil {
 						normalized.Close()
 						feature.Close()
@@ -279,6 +341,8 @@ func extractAndSaveUniqueFacesFromImages(ctx context.Context, imagePaths []strin
 				} else {
 					groupDir = facesDir
 				}
+
+				filter.Add(hash)
 
 				outName := fmt.Sprintf("face%05d.%s", nextIndex, cfg.Ext)
 				outPath := filepath.Join(groupDir, outName)
@@ -296,9 +360,9 @@ func extractAndSaveUniqueFacesFromImages(ctx context.Context, imagePaths []strin
 					rel = filepath.ToSlash(filepath.Join(facesDirName, outName))
 				}
 				if cfg.WriteGroupsJSON {
-					groups[groupID].FaceFiles = append(groups[groupID].FaceFiles, rel)
-					if groups[groupID].PrimaryRef == "" {
-						groups[groupID].PrimaryRef = rel
+					group.FaceFiles = append(group.FaceFiles, rel)
+					if group.PrimaryRef == "" {
+						group.PrimaryRef = rel
 					}
 				}
 				summary.Files = append(summary.Files, rel)

@@ -261,13 +261,14 @@ Requires building the agent with OpenCV enabled: `go build -tags gocv`.
 |----------|---------|-------------|
 | `FACES_ENABLED` | `false` | Enable face extraction from thumbnail source frames |
 | `FACE_DETECTOR` | `yunet` | `yunet` (DNN) or `haar` (CascadeClassifier) |
-| `FACE_YUNET_MODEL` | - | YuNet ONNX path (empty = download/cache default) |
-| `FACE_SFACE_MODEL` | - | SFace ONNX path (empty = download/cache default) |
-| `FACE_YUNET_SCORE_THRESHOLD` | `0.9` | Minimum YuNet detection score |
+| `FACE_YUNET_MODEL` | -       | YuNet ONNX path (empty = download/cache default) |
+| `FACE_SFACE_MODEL` | -       | SFace ONNX path (empty = download/cache default) |
+| `FACE_YUNET_SCORE_THRESHOLD` | `0.9`   | Minimum YuNet detection score |
 | `FACE_RECOGNITION_THRESHOLD` | `0.363` | SFace cosine similarity threshold for grouping |
-| `FACE_NORMALIZED_WIDTH` | `160` | Output face crop width (pixels) |
-| `FACE_NORMALIZED_HEIGHT` | `160` | Output face crop height (pixels) |
-| `FACE_MAX_UNIQUE` | `50` | Maximum saved face crops per recording (0=unlimited) |
+| `FACE_GROUP_DEDUP_THRESHOLD` | `0.8`   | Skip face crops too similar within a group (0=disable) |
+| `FACE_NORMALIZED_WIDTH` | `160`   | Output face crop width (pixels) |
+| `FACE_NORMALIZED_HEIGHT` | `160`   | Output face crop height (pixels) |
+| `FACE_MAX_UNIQUE` | `50`    | Maximum saved face crops per recording (0=unlimited) |
 
 When enabled, the agent writes:
 - `faces/groups.json` (identity groups + referenced face files)

@@ -92,8 +92,8 @@ func generateAndUploadThumbnailsFromS3(u *RealtimeS3Uploader, cfg thumbnailConfi
 		log.Printf("[%s/%s] thumbnail post-processing warning: %v", u.room, u.participant, warn)
 	}
 	if faces != nil && faces.Saved > 0 {
-		log.Printf("[%s/%s] extracted %d unique faces (detected=%d, nonface=%d, dup=%d, limit=%d, groups=%d)",
-			u.room, u.participant, faces.Saved, faces.Detected, faces.FilteredNonFace, faces.SkippedDuplicate, faces.SkippedLimit, faces.Groups)
+		log.Printf("[%s/%s] extracted %d unique faces (detected=%d, nonface=%d, dup=%d, similar=%d, limit=%d, groups=%d)",
+			u.room, u.participant, faces.Saved, faces.Detected, faces.FilteredNonFace, faces.SkippedDuplicate, faces.SkippedSimilar, faces.SkippedLimit, faces.Groups)
 	}
 
 	thumbPlaylistPath := filepath.Join(tempDir, "thumbnails.m3u8")

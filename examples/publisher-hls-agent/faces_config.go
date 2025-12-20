@@ -26,6 +26,7 @@ type faceExtractionConfig struct {
 	YunetTopK            int
 	SFaceModelPath       string
 	RecognitionThreshold float32
+	GroupDedupThreshold  float32
 	WriteGroupsJSON      bool
 }
 
@@ -88,6 +89,9 @@ func faceExtractionConfigFromConfig(cfg *Config) (faceExtractionConfig, error) {
 	if cfg.FaceRecognitionThreshold < 0 || cfg.FaceRecognitionThreshold > 1 {
 		return faceExtractionConfig{}, fmt.Errorf("FACE_RECOGNITION_THRESHOLD must be between 0 and 1")
 	}
+	if cfg.FaceGroupDedupThreshold < 0 || cfg.FaceGroupDedupThreshold > 1 {
+		return faceExtractionConfig{}, fmt.Errorf("FACE_GROUP_DEDUP_THRESHOLD must be between 0 and 1")
+	}
 
 	ext := strings.ToLower(strings.TrimSpace(cfg.FaceFormat))
 	switch ext {
@@ -118,6 +122,7 @@ func faceExtractionConfigFromConfig(cfg *Config) (faceExtractionConfig, error) {
 		YunetTopK:            cfg.FaceYunetTopK,
 		SFaceModelPath:       strings.TrimSpace(cfg.FaceSFaceModelPath),
 		RecognitionThreshold: float32(cfg.FaceRecognitionThreshold),
+		GroupDedupThreshold:  float32(cfg.FaceGroupDedupThreshold),
 		WriteGroupsJSON:      true,
 	}, nil
 }

@@ -2991,8 +2991,8 @@ func (r *ParticipantRecorder) Stop() {
 							log.Printf("[%s] thumbnail post-processing warning: %v", r.logPrefix(), warn)
 						}
 						if faces != nil && faces.Saved > 0 {
-							log.Printf("[%s] extracted %d unique faces (detected=%d, nonface=%d, dup=%d, limit=%d, groups=%d)",
-								r.logPrefix(), faces.Saved, faces.Detected, faces.FilteredNonFace, faces.SkippedDuplicate, faces.SkippedLimit, faces.Groups)
+							log.Printf("[%s] extracted %d unique faces (detected=%d, nonface=%d, dup=%d, similar=%d, limit=%d, groups=%d)",
+								r.logPrefix(), faces.Saved, faces.Detected, faces.FilteredNonFace, faces.SkippedDuplicate, faces.SkippedSimilar, faces.SkippedLimit, faces.Groups)
 						}
 						if genErr != nil {
 							log.Printf("[%s] failed to generate thumbnails: %v", r.logPrefix(), genErr)

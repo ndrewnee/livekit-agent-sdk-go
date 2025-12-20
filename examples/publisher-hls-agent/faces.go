@@ -9,6 +9,7 @@ type faceExtractionSummary struct {
 	Detected         int
 	Saved            int
 	SkippedDuplicate int
+	SkippedSimilar   int
 	SkippedLimit     int
 	FilteredNonFace  int
 	Groups           int
