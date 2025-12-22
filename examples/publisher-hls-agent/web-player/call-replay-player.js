@@ -360,9 +360,21 @@ export class CallReplayPlayer extends EventTarget {
     // Seek video
     this.videoElement.currentTime = this.currentTime;
 
+    // Wait for the video element to settle on the actual seek position before syncing audio.
+    await new Promise((resolve) => {
+      const onSeeked = () => {
+        this.videoElement.removeEventListener('seeked', onSeeked);
+        resolve();
+      };
+      this.videoElement.addEventListener('seeked', onSeeked);
+    });
+
+    const actualTime = this.videoElement.currentTime;
+    this.currentTime = actualTime;
+
     // Seek audio for all participants
     for (const [id, participant] of this.participants) {
-      await participant.seekAudio(this.currentTime);
+      await participant.seekAudio(actualTime);
     }
 
     // If was playing, resume
@@ -371,7 +383,7 @@ export class CallReplayPlayer extends EventTarget {
     }
 
     this.dispatchEvent(new CustomEvent('seeked', {
-      detail: { time: this.currentTime }
+      detail: { time: actualTime }
     }));
   }
 
@@ -541,6 +553,9 @@ class ParticipantPlayer extends EventTarget {
     /** @type {number} */
     this.lastDecodedSegmentIndex = -1;
 
+    /** @type {number} */
+    this.pendingSkipSamples = 0;
+
     /** @type {boolean} */
     this.audioPlaying = false;
 
@@ -603,11 +618,13 @@ class ParticipantPlayer extends EventTarget {
 
     this.audioPlaying = true;
     this.lastDecodedSegmentIndex = -1;
+    this.pendingSkipSamples = 0;
 
     // Find starting segment
     const segInfo = this.audioFetcher.getSegmentByTime(startTime);
     if (segInfo) {
       this.currentSegmentIndex = segInfo.index;
+      this.pendingSkipSamples = Math.floor(segInfo.offsetInSegment * this.audioFetcher.manifest.sampleRate);
     } else {
       this.currentSegmentIndex = 0;
     }
@@ -644,8 +661,10 @@ class ParticipantPlayer extends EventTarget {
     const segInfo = this.audioFetcher.getSegmentByTime(timeSeconds);
     if (segInfo) {
       this.currentSegmentIndex = segInfo.index;
+      this.pendingSkipSamples = Math.floor(segInfo.offsetInSegment * this.audioFetcher.manifest.sampleRate);
     } else {
       this.currentSegmentIndex = 0;
+      this.pendingSkipSamples = 0;
     }
     this.lastDecodedSegmentIndex = -1;
 
@@ -696,6 +715,11 @@ class ParticipantPlayer extends EventTarget {
       }
       this.currentSegmentIndex = expectedSegment;
       this.lastDecodedSegmentIndex = expectedSegment - 1;
+      if (segInfo) {
+        this.pendingSkipSamples = Math.floor(segInfo.offsetInSegment * manifest.sampleRate);
+      } else {
+        this.pendingSkipSamples = 0;
+      }
     }
 
     // Decode segments up to current video position + prefetch (2 segments ahead)
@@ -752,7 +776,19 @@ class ParticipantPlayer extends EventTarget {
    * @private
    */
   _sendSamplesToMixer(detail) {
-    const { samples, channels, frames } = detail;
+    let { samples, channels, frames } = detail;
+
+    if (this.pendingSkipSamples > 0 && frames > 0) {
+      const skip = Math.min(this.pendingSkipSamples, frames);
+      if (skip >= frames) {
+        this.pendingSkipSamples -= skip;
+        return;
+      }
+
+      this.pendingSkipSamples = 0;
+      frames = frames - skip;
+      samples = samples.map((ch) => ch.subarray(skip));
+    }
 
     // Send each channel's samples to the mixer
     for (let ch = 0; ch < Math.min(channels, 2); ch++) {

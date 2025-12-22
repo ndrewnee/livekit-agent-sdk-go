@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"math"
 	"math/bits"
 	"net/http"
 	"os"
@@ -130,6 +131,146 @@ func isTooSimilarToGroup(fr *gocv.FaceRecognizerSF, group *faceIdentityGroup, fe
 		}
 	}
 	return false
+}
+
+type groupDSU struct {
+	parent []int
+	rank   []int
+}
+
+func newGroupDSU(n int) *groupDSU {
+	parent := make([]int, n)
+	rank := make([]int, n)
+	for i := range parent {
+		parent[i] = i
+	}
+	return &groupDSU{parent: parent, rank: rank}
+}
+
+func (d *groupDSU) find(x int) int {
+	if d.parent[x] != x {
+		d.parent[x] = d.find(d.parent[x])
+	}
+	return d.parent[x]
+}
+
+func (d *groupDSU) union(a, b int) {
+	ra := d.find(a)
+	rb := d.find(b)
+	if ra == rb {
+		return
+	}
+	if d.rank[ra] < d.rank[rb] {
+		d.parent[ra] = rb
+		return
+	}
+	if d.rank[ra] > d.rank[rb] {
+		d.parent[rb] = ra
+		return
+	}
+	d.parent[rb] = ra
+	d.rank[ra]++
+}
+
+func groupMaxSimilarity(fr *gocv.FaceRecognizerSF, a, b *faceIdentityGroup) float32 {
+	if fr == nil || a == nil || b == nil {
+		return float32(-1)
+	}
+	best := float32(-1)
+	for _, ea := range a.Exemplars {
+		for _, eb := range b.Exemplars {
+			score := fr.MatchWithParams(ea, eb, gocv.FaceRecognizerSFDisTypeCosine)
+			if score > best {
+				best = score
+			}
+		}
+	}
+	return best
+}
+
+func mergeFaceGroups(fr *gocv.FaceRecognizerSF, groups []*faceIdentityGroup, threshold float32) []*faceIdentityGroup {
+	if fr == nil || len(groups) < 2 {
+		return groups
+	}
+	if threshold <= 0 {
+		return groups
+	}
+
+	d := newGroupDSU(len(groups))
+	for i := 0; i < len(groups); i++ {
+		for j := i + 1; j < len(groups); j++ {
+			if groupMaxSimilarity(fr, groups[i], groups[j]) >= threshold {
+				d.union(i, j)
+			}
+		}
+	}
+
+	rootToGroup := make(map[int]*faceIdentityGroup)
+	var merged []*faceIdentityGroup
+	for i, g := range groups {
+		root := d.find(i)
+		dst, ok := rootToGroup[root]
+		if !ok {
+			dst = &faceIdentityGroup{ID: len(merged)}
+			rootToGroup[root] = dst
+			merged = append(merged, dst)
+		}
+		dst.Exemplars = append(dst.Exemplars, g.Exemplars...)
+		dst.FaceFiles = append(dst.FaceFiles, g.FaceFiles...)
+		if dst.PrimaryRef == "" {
+			dst.PrimaryRef = g.PrimaryRef
+		}
+		g.Exemplars = nil
+		g.FaceFiles = nil
+		g.PrimaryRef = ""
+	}
+	return merged
+}
+
+func dedupGroupFaces(fr *gocv.FaceRecognizerSF, groups []*faceIdentityGroup, threshold float32, outputDir string) int {
+	if fr == nil || threshold <= 0 {
+		return 0
+	}
+
+	removed := 0
+	for _, g := range groups {
+		if g == nil || len(g.FaceFiles) == 0 || len(g.FaceFiles) != len(g.Exemplars) {
+			continue
+		}
+
+		var keptFiles []string
+		var keptExemplars []gocv.Mat
+		for i := range g.FaceFiles {
+			feature := g.Exemplars[i]
+			tooSimilar := false
+			for _, kept := range keptExemplars {
+				if fr.MatchWithParams(feature, kept, gocv.FaceRecognizerSFDisTypeCosine) >= threshold {
+					tooSimilar = true
+					break
+				}
+			}
+			if tooSimilar {
+				removed++
+				feature.Close()
+				if outputDir != "" {
+					absPath := filepath.Join(outputDir, filepath.FromSlash(g.FaceFiles[i]))
+					_ = os.Remove(absPath)
+				}
+				continue
+			}
+			keptFiles = append(keptFiles, g.FaceFiles[i])
+			keptExemplars = append(keptExemplars, feature)
+		}
+
+		g.FaceFiles = keptFiles
+		g.Exemplars = keptExemplars
+		g.PrimaryRef = ""
+		if len(keptFiles) > 0 {
+			g.PrimaryRef = keptFiles[0]
+		}
+	}
+
+	return removed
 }
 
 func extractAndSaveUniqueFacesFromImages(ctx context.Context, imagePaths []string, outputDir string, cfg faceExtractionConfig) (faceExtractionSummary, error) {
@@ -269,7 +410,7 @@ func extractAndSaveUniqueFacesFromImages(ctx context.Context, imagePaths []strin
 					summary.FilteredNonFace++
 					continue
 				}
-				if !isPlausibleYuNetDetection(faces, det.row, img.Cols(), img.Rows()) {
+				if !isPlausibleYuNetDetection(faces, det.row, img.Cols(), img.Rows(), cfg.MinSize) {
 					summary.FilteredNonFace++
 					continue
 				}
@@ -279,6 +420,12 @@ func extractAndSaveUniqueFacesFromImages(ctx context.Context, imagePaths []strin
 				fr.AlignCrop(img, faceBox, &aligned)
 				faceBox.Close()
 				if aligned.Empty() {
+					aligned.Close()
+					summary.FilteredNonFace++
+					continue
+				}
+
+				if !verifyAlignedFace(&fd, aligned, cfg) {
 					aligned.Close()
 					summary.FilteredNonFace++
 					continue
@@ -438,7 +585,26 @@ func extractAndSaveUniqueFacesFromImages(ctx context.Context, imagePaths []strin
 	}
 
 	if cfg.WriteGroupsJSON && useYuNet {
-		summary.Groups = len(groups)
+		if len(groups) > 1 {
+			groups = mergeFaceGroups(&fr, groups, cfg.RecognitionThreshold)
+		}
+		removed := dedupGroupFaces(&fr, groups, cfg.GroupDedupThreshold, outputDir)
+		if removed > 0 {
+			summary.SkippedSimilar += removed
+		}
+
+		summary.Groups = 0
+		summary.Saved = 0
+		summary.Files = nil
+		for _, g := range groups {
+			if g == nil || len(g.FaceFiles) == 0 {
+				continue
+			}
+			summary.Groups++
+			summary.Saved += len(g.FaceFiles)
+			summary.Files = append(summary.Files, g.FaceFiles...)
+		}
+
 		manifestPath := filepath.Join(facesDir, facesGroupsManifestName)
 		if err := writeFacesGroupsManifest(manifestPath, yunetModel, sfaceModel, cfg.RecognitionThreshold, cfg.YunetScoreThreshold, groups); err != nil {
 			return summary, err
@@ -651,7 +817,7 @@ func downloadFile(ctx context.Context, url, dst string) error {
 	return nil
 }
 
-func isPlausibleYuNetDetection(faces gocv.Mat, row, imgW, imgH int) bool {
+func isPlausibleYuNetDetection(faces gocv.Mat, row, imgW, imgH, minSize int) bool {
 	cols := faces.Cols()
 	if row < 0 || row >= faces.Rows() || cols < 15 {
 		return false
@@ -664,6 +830,9 @@ func isPlausibleYuNetDetection(faces gocv.Mat, row, imgW, imgH int) bool {
 	if w <= 0 || h <= 0 {
 		return false
 	}
+	if minSize > 0 && (w < float32(minSize) || h < float32(minSize)) {
+		return false
+	}
 
 	x1 := x + w
 	y1 := y + h
@@ -672,7 +841,7 @@ func isPlausibleYuNetDetection(faces gocv.Mat, row, imgW, imgH int) bool {
 	}
 
 	aspect := w / h
-	if aspect < 0.5 || aspect > 2.0 {
+	if aspect < 0.6 || aspect > 1.8 {
 		return false
 	}
 
@@ -699,8 +868,72 @@ func isPlausibleYuNetDetection(faces gocv.Mat, row, imgW, imgH int) bool {
 	if !(nY > maxFloat32(leY, reY) && nY < minFloat32(lmY, rmY)) {
 		return false
 	}
+	if !(nX > leX && nX < reX) {
+		return false
+	}
+
+	// Reject extreme landmark geometry (common in false positives).
+	eyeDx := reX - leX
+	if eyeDx <= 0 {
+		return false
+	}
+	eyeDxRatio := eyeDx / w
+	if eyeDxRatio < 0.15 || eyeDxRatio > 0.8 {
+		return false
+	}
+	if math.Abs(float64(leY-reY))/float64(h) > 0.25 {
+		return false
+	}
+	if math.Abs(float64(lmY-rmY))/float64(h) > 0.35 {
+		return false
+	}
 
 	return true
+}
+
+func verifyAlignedFace(fd *gocv.FaceDetectorYN, aligned gocv.Mat, cfg faceExtractionConfig) bool {
+	if fd == nil {
+		return true
+	}
+	if aligned.Empty() {
+		return false
+	}
+	if aligned.Cols() < cfg.MinSize || aligned.Rows() < cfg.MinSize {
+		return false
+	}
+
+	fd.SetInputSize(image.Pt(aligned.Cols(), aligned.Rows()))
+	faces := gocv.NewMat()
+	defer faces.Close()
+	fd.Detect(aligned, &faces)
+	if faces.Empty() || faces.Rows() == 0 || faces.Cols() < 15 {
+		return false
+	}
+
+	bestRow := -1
+	bestScore := float32(-1)
+	for i := 0; i < faces.Rows(); i++ {
+		score := faces.GetFloatAt(i, faces.Cols()-1)
+		if score > bestScore {
+			bestScore = score
+			bestRow = i
+		}
+	}
+	if bestRow < 0 || bestScore < cfg.YunetScoreThreshold {
+		return false
+	}
+	if !isPlausibleYuNetDetection(faces, bestRow, aligned.Cols(), aligned.Rows(), cfg.MinSize) {
+		return false
+	}
+
+	w := faces.GetFloatAt(bestRow, 2)
+	h := faces.GetFloatAt(bestRow, 3)
+	area := float64(w * h)
+	if area <= 0 {
+		return false
+	}
+	coverage := area / float64(aligned.Cols()*aligned.Rows())
+	return coverage >= 0.2
 }
 
 func assignFaceToGroup(fr *gocv.FaceRecognizerSF, groups *[]*faceIdentityGroup, feature gocv.Mat, threshold float32) int {

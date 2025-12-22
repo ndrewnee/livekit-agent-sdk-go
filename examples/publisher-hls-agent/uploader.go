@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"log"
 	"mime"
 	"path"
 	"path/filepath"
@@ -133,6 +134,12 @@ func uploadRecordingToS3(ctx context.Context, cfg S3Config, room, participant, d
 	})
 	if err != nil {
 		return "", err
+	}
+
+	if cfg.PublicReadPolicy {
+		if err := ensurePublicReadBucketPolicy(ctx, client, cfg.Bucket, basePrefix); err != nil {
+			log.Printf("warning: failed to apply public-read bucket policy for s3://%s/%s: %v", cfg.Bucket, basePrefix, err)
+		}
 	}
 
 	return fmt.Sprintf("s3://%s/%s", cfg.Bucket, basePrefix), nil

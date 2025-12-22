@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -613,6 +614,14 @@ func (u *RealtimeS3Uploader) Close() error {
 	log.Printf("[%s/%s] S3 upload complete: uploaded %d files to %s",
 		u.room, u.participant, len(u.uploadedFiles), u.GetS3URL())
 
+	if u.cfg.PublicReadPolicy {
+		basePrefix := strings.TrimSuffix(u.getS3Key(""), "/")
+		if err := ensurePublicReadBucketPolicy(context.Background(), u.client, u.cfg.Bucket, basePrefix); err != nil {
+			log.Printf("[%s/%s] warning: failed to apply public-read bucket policy for s3://%s/%s: %v",
+				u.room, u.participant, u.cfg.Bucket, basePrefix, err)
+		}
+	}
+
 	return nil
 }
 
@@ -630,49 +639,57 @@ func (u *RealtimeS3Uploader) finalUploadSweep() error {
 		// Continue with upload even if processing fails
 	}
 
-	entries, err := filepath.Glob(filepath.Join(u.watchDir, "*"))
-	if err != nil {
-		return fmt.Errorf("glob directory: %w", err)
-	}
+	return filepath.WalkDir(u.watchDir, func(entryPath string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
 
-	for _, entry := range entries {
-		fileName := filepath.Base(entry)
+		rel, err := filepath.Rel(u.watchDir, entryPath)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		fileName := filepath.Base(entryPath)
 
 		// Skip output.ts - it's redundant when we have HLS segments
 		if fileName == "output.ts" {
 			log.Printf("[%s/%s] skipping output.ts (redundant)", u.room, u.participant)
-			continue
+			return nil
 		}
 
 		// Skip .processed temp files
-		if strings.HasSuffix(fileName, ".processed") {
-			continue
+		if strings.HasSuffix(entryPath, ".processed") {
+			return nil
 		}
 
 		// Upload HLS files (playlist and video segments) and audio files
-		isVideoFile := strings.HasSuffix(fileName, ".ts") || strings.HasSuffix(fileName, ".m3u8")
-		isAudioFile := strings.HasSuffix(fileName, ".m4s") || strings.HasSuffix(fileName, ".mp4") || fileName == "audio.json"
-		isImageFile := strings.HasSuffix(fileName, ".jpg") || strings.HasSuffix(fileName, ".jpeg") || strings.HasSuffix(fileName, ".png") || strings.HasSuffix(fileName, ".webp")
-		if !isVideoFile && !isAudioFile && !isImageFile {
-			continue
+		isVideoFile := strings.HasSuffix(entryPath, ".ts") || strings.HasSuffix(entryPath, ".m3u8")
+		isAudioFile := strings.HasSuffix(entryPath, ".m4s") || strings.HasSuffix(entryPath, ".mp4") || fileName == "audio.json"
+		isImageFile := strings.HasSuffix(entryPath, ".jpg") || strings.HasSuffix(entryPath, ".jpeg") || strings.HasSuffix(entryPath, ".png") || strings.HasSuffix(entryPath, ".webp")
+		isManifest := strings.HasSuffix(entryPath, ".json")
+		if !isVideoFile && !isAudioFile && !isImageFile && !isManifest {
+			return nil
 		}
 
-		// Upload file to S3
-		if err := u.uploadFile(entry, fileName); err != nil {
-			log.Printf("[%s/%s] failed to upload %s: %v", u.room, u.participant, fileName, err)
-		} else {
-			u.uploadedMu.Lock()
-			u.uploadedFiles[fileName] = struct{}{}
-			u.uploadedMu.Unlock()
-
-			// Delete local file after successful upload to minimize disk usage
-			if err := os.Remove(entry); err != nil {
-				log.Printf("[%s/%s] warning: failed to delete %s: %v", u.room, u.participant, fileName, err)
-			}
+		// Upload file to S3 preserving directory structure under the participant prefix.
+		if err := u.uploadFile(entryPath, rel); err != nil {
+			log.Printf("[%s/%s] failed to upload %s: %v", u.room, u.participant, rel, err)
+			return nil
 		}
-	}
 
-	return nil
+		u.uploadedMu.Lock()
+		u.uploadedFiles[rel] = struct{}{}
+		u.uploadedMu.Unlock()
+
+		// Delete local file after successful upload to minimize disk usage
+		if err := os.Remove(entryPath); err != nil {
+			log.Printf("[%s/%s] warning: failed to delete %s: %v", u.room, u.participant, rel, err)
+		}
+		return nil
+	})
 }
 
 // processAudioSegmentsForUpload processes all audio segments to create proper CMAF format.

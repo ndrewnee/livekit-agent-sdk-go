@@ -93,6 +93,18 @@ func TestPublisherHLSAgentUploadsAV1ToS3_WithFaces(t *testing.T) {
 	if err := validateS3Faces(t, client, ms.Bucket, prefix, 160, 160); err != nil {
 		t.Fatalf("face validation failed: %v", err)
 	}
+
+	// Make the recording publicly readable over HTTP for manual inspection via the web player.
+	// MinIO's anonymous HTTP access relies on bucket policy (object ACLs may be disabled/ignored).
+	policy := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":["s3:GetObject"],"Resource":["arn:aws:s3:::%s/%s/*"]}]}`, ms.Bucket, prefix)
+	if err := client.SetBucketPolicy(context.Background(), ms.Bucket, policy); err != nil {
+		t.Fatalf("failed to set read policy on MinIO bucket: %v", err)
+	}
+
+	t.Logf("AV1 HLS video playlist: http://%s/%s/%s", ms.Endpoint, ms.Bucket, path.Join(prefix, "video.m3u8"))
+	t.Logf("AV1 HLS audio manifest: http://%s/%s/%s", ms.Endpoint, ms.Bucket, path.Join(prefix, "audio.json"))
+	t.Logf("Thumbnails playlist: http://%s/%s/%s", ms.Endpoint, ms.Bucket, path.Join(prefix, "thumbnails.m3u8"))
+	t.Logf("Face groups manifest: http://%s/%s/%s", ms.Endpoint, ms.Bucket, path.Join(prefix, facesDirName, facesGroupsManifestName))
 }
 
 func validateS3Faces(t *testing.T, client *minio.Client, bucket, prefix string, expectedWidth, expectedHeight int) error {

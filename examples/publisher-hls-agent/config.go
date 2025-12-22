@@ -231,6 +231,8 @@ func loadConfig() *Config {
 			UseSSL:         getEnvBool("S3_USE_SSL", false),
 			ForcePathStyle: getEnvBool("S3_FORCE_PATH_STYLE", true),
 			ACL:            getEnv("S3_OBJECT_ACL", ""),
+			PublicReadPolicy: getEnvBool("S3_PUBLIC_READ_POLICY",
+				false),
 		},
 	}
 }
@@ -331,6 +333,11 @@ type S3Config struct {
 	// ACL is the canned ACL applied to uploaded objects (e.g., "public-read").
 	// Environment variable: S3_OBJECT_ACL
 	ACL string
+
+	// PublicReadPolicy enables applying a bucket policy that allows anonymous
+	// GET access to objects under the uploaded recording prefix (useful for MinIO).
+	// Environment variable: S3_PUBLIC_READ_POLICY (default: false)
+	PublicReadPolicy bool
 }
 
 // Enabled returns true if S3 upload is configured with minimum required fields.

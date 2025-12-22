@@ -1097,6 +1097,7 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	}
 
 	handshakePublisher.Stop()
+
 	// Ensure a clear boundary between the handshake publish and the "real" publish.
 	// Without a small pause, in-flight audio packets from the handshake can bleed into
 	// the beginning of the recording and break strict exactness checks.
@@ -1133,6 +1134,39 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	participantOutputDir := sessionDirs[0] // Use the first (and only) session directory
 	// New pipeline produces video.m3u8 instead of output.ts
 	videoPlaylistFile := filepath.Join(participantOutputDir, "video.m3u8")
+
+	// The recorder must reuse the agent-provided participant connection.
+	// A separate ConnectToRoom() would show up as an extra standard participant.
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		resp, err := roomClient.ListParticipants(ctx, &livekit.ListParticipantsRequest{Room: roomName})
+		if err != nil {
+			t.Fatalf("failed to list participants: %v", err)
+		}
+		var nonPublisher []*livekit.ParticipantInfo
+		for _, p := range resp.Participants {
+			if p == nil {
+				continue
+			}
+			if p.Identity == participantIdentity {
+				continue
+			}
+			nonPublisher = append(nonPublisher, p)
+		}
+		if len(nonPublisher) != 1 {
+			var identities []string
+			for _, p := range resp.Participants {
+				if p != nil {
+					identities = append(identities, p.Identity)
+				}
+			}
+			t.Fatalf("unexpected participant count: got %d participants (%v), expected publisher + agent", len(resp.Participants), identities)
+		}
+		if nonPublisher[0].Kind != livekit.ParticipantInfo_EGRESS {
+			t.Fatalf("unexpected recorder participant kind: got %s, expected EGRESS", nonPublisher[0].Kind.String())
+		}
+	}
 
 	if participantRoom != nil {
 		participantRoom.Disconnect()
