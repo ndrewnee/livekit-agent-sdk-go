@@ -453,6 +453,7 @@ func TestPublisherHLSAgentMultipleParticipants(t *testing.T) {
 	}
 	agentArgs = append(agentArgs, ".")
 	agentCmd := exec.Command("go", agentArgs...)
+	agentCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	agentCmd.Dir = agentDir
 	agentCmd.Stdout = agentLogFile
 	agentCmd.Stderr = agentLogFile
@@ -895,6 +896,7 @@ func runE2EScenario(t *testing.T, scenario e2eScenario) e2eResult {
 	}
 	agentArgs = append(agentArgs, ".")
 	agentCmd := exec.Command("go", agentArgs...)
+	agentCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	agentCmd.Dir = agentDir
 	agentCmd.Stdout = agentLogFile
 	agentCmd.Stderr = agentLogFile
@@ -1293,7 +1295,11 @@ func shutdownProcess(t *testing.T, cmd *exec.Cmd, name string, timeout time.Dura
 		return
 	}
 
-	_ = cmd.Process.Signal(syscall.SIGINT)
+	if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil && pgid != 0 && pgid != syscall.Getpgrp() {
+		_ = syscall.Kill(-pgid, syscall.SIGINT)
+	} else {
+		_ = cmd.Process.Signal(syscall.SIGINT)
+	}
 
 	done := make(chan error, 1)
 	go func() {
@@ -1309,7 +1315,11 @@ func shutdownProcess(t *testing.T, cmd *exec.Cmd, name string, timeout time.Dura
 		}
 	case <-time.After(timeout):
 		t.Logf("%s did not exit after %v, killing", name, timeout)
-		_ = cmd.Process.Kill()
+		if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil && pgid != 0 && pgid != syscall.Getpgrp() {
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		} else {
+			_ = cmd.Process.Kill()
+		}
 		if err := <-done; err != nil {
 			t.Logf("%s kill wait error: %v", name, err)
 		}
@@ -1401,14 +1411,22 @@ func (m *minioServer) Shutdown(t *testing.T) {
 		_ = exec.Command("docker", "rm", "-f", m.Container).Run()
 	}
 	if m.Cmd != nil && m.Cmd.Process != nil {
-		_ = m.Cmd.Process.Signal(syscall.SIGINT)
+		if pgid, err := syscall.Getpgid(m.Cmd.Process.Pid); err == nil && pgid != 0 && pgid != syscall.Getpgrp() {
+			_ = syscall.Kill(-pgid, syscall.SIGINT)
+		} else {
+			_ = m.Cmd.Process.Signal(syscall.SIGINT)
+		}
 		done := make(chan error, 1)
 		go func() {
 			done <- m.Cmd.Wait()
 		}()
 		select {
 		case <-time.After(5 * time.Second):
-			_ = m.Cmd.Process.Kill()
+			if pgid, err := syscall.Getpgid(m.Cmd.Process.Pid); err == nil && pgid != 0 && pgid != syscall.Getpgrp() {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			} else {
+				_ = m.Cmd.Process.Kill()
+			}
 		case <-done:
 		}
 	}
@@ -1541,19 +1559,29 @@ func startMinIOServer(t *testing.T) *minioServer {
 			cmd.Env = append(cmd.Env, fmt.Sprintf("MINIO_ROOTDISK_THRESHOLD_SIZE=%s", rootDiskThreshold))
 		}
 
-		stdout, err := os.CreateTemp("", "minio-stdout-*.log")
-		if err == nil {
+		var stdout *os.File
+		var stdoutErr error
+		if keepAlive {
+			stdout, stdoutErr = os.OpenFile(filepath.Join(dataDir, "minio.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		} else {
+			stdout, stdoutErr = os.CreateTemp("", "minio-stdout-*.log")
+		}
+		if stdoutErr == nil {
 			cmd.Stdout = stdout
 			cmd.Stderr = stdout
-			defer func() {
-				if t.Failed() {
-					if data, err := os.ReadFile(stdout.Name()); err == nil {
-						t.Logf("minio stdout:\n%s", string(data))
+			t.Cleanup(func() {
+				if !keepAlive {
+					if t.Failed() {
+						if data, err := os.ReadFile(stdout.Name()); err == nil {
+							t.Logf("minio stdout:\n%s", string(data))
+						}
 					}
+					_ = os.Remove(stdout.Name())
+				} else {
+					t.Logf("MinIO logs: %s", stdout.Name())
 				}
-				stdout.Close()
-				_ = os.Remove(stdout.Name())
-			}()
+				_ = stdout.Close()
+			})
 		}
 
 		if err := cmd.Start(); err != nil {

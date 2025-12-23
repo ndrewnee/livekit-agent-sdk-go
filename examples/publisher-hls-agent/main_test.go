@@ -51,6 +51,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -418,6 +419,7 @@ func startLiveKitServer(t *testing.T, serverBinary, configPath, repoRoot string,
 		"--rtc.port_range_start", strconv.Itoa(udpStart),
 		"--rtc.port_range_end", strconv.Itoa(udpEnd),
 	)
+	serverCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	serverCmd.Dir = repoRoot
 	serverCmd.Stdout = logFile
 	serverCmd.Stderr = logFile
