@@ -588,6 +588,13 @@ func TestUniversalWorker_Integration_DataMessaging(t *testing.T) {
 		t.Fatal("Timeout waiting for room connection")
 	}
 
+	// Wait for agent to connect to the room
+	select {
+	case <-roomConnected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for room connection")
+	}
+
 	// Connect participant that will send data
 	identity := "data-sender"
 	token := generateTestToken(apiKey, apiSecret, roomName, identity)

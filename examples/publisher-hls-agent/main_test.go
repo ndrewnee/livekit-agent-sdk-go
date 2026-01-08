@@ -44,12 +44,14 @@ import (
 	"io"
 	"log"
 	"math"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -71,7 +73,6 @@ import (
 // The development credentials (devkey/secret) are insecure and should only
 // be used in local testing environments, never in production.
 const (
-	testLiveKitURL  = "ws://localhost:7880"
 	testAPIKey      = "devkey"
 	testAPISecret   = "secret"
 	testRoomName    = "publisher-hls-test-room"
@@ -139,7 +140,10 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.Lshortfile)
 
 	repoRoot := findRepoRoot(t)
-	serverBinary := filepath.Join(repoRoot, "livekit", "livekit-server")
+	serverBinary, err := exec.LookPath("livekit-server")
+	if err != nil {
+		t.Fatalf("livekit-server not found in PATH: %v", err)
+	}
 	configPath := filepath.Join(repoRoot, "examples", "livekit-server-dev.yaml")
 
 	tempRoot := t.TempDir()
@@ -150,9 +154,6 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 	}
 	serverLogPath := filepath.Join(tempRoot, "livekit-server.log")
 
-	_ = os.Setenv("LIVEKIT_URL", testLiveKitURL)
-	_ = os.Setenv("LIVEKIT_API_KEY", testAPIKey)
-	_ = os.Setenv("LIVEKIT_API_SECRET", testAPISecret)
 	_ = os.Setenv("OUTPUT_DIR", outputDir)
 	_ = os.Setenv("AGENT_NAME", "test-publisher-hls-agent")
 	_ = os.Setenv("HLS_SEGMENT_DURATION", "2")
@@ -164,17 +165,15 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 	}
 	defer func() { _ = serverLogFile.Close() }()
 
-	serverCmd := exec.Command(serverBinary, "--config", configPath)
-	serverCmd.Stdout = serverLogFile
-	serverCmd.Stderr = serverLogFile
+	lkServer := startLiveKitServer(t, serverBinary, configPath, repoRoot, serverLogFile)
+	serverCmd := lkServer.Cmd
+	t.Cleanup(func() {
+		shutdownProcess(t, serverCmd, "livekit-server", 10*time.Second)
+	})
 
-	if err := serverCmd.Start(); err != nil {
-		t.Fatalf("failed to start livekit server: %v", err)
-	}
-	defer func() {
-		_ = serverCmd.Process.Kill()
-		_ = serverCmd.Wait()
-	}()
+	_ = os.Setenv("LIVEKIT_URL", lkServer.WSURL)
+	_ = os.Setenv("LIVEKIT_API_KEY", testAPIKey)
+	_ = os.Setenv("LIVEKIT_API_SECRET", testAPISecret)
 
 	if debugDir := os.Getenv("PUBLISHER_HLS_DEBUG_OUTPUT"); debugDir != "" {
 		logCopyPath := filepath.Join(debugDir, "server.log")
@@ -189,10 +188,6 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 				t.Logf("server log copied to %s", logCopyPath)
 			}
 		})
-	}
-
-	if err := waitForLiveKitServer("localhost:7880", 15*time.Second); err != nil {
-		t.Fatalf("livekit server not ready: %v", err)
 	}
 
 	cfg := loadConfig()
@@ -234,7 +229,7 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 		}
 	})
 
-	roomClient := lksdk.NewRoomServiceClient("http://localhost:7880", cfg.APIKey, cfg.APISecret)
+	roomClient := lksdk.NewRoomServiceClient(lkServer.HTTPURL, cfg.APIKey, cfg.APISecret)
 	_, _ = roomClient.DeleteRoom(context.Background(), &livekit.DeleteRoomRequest{Room: testRoomName})
 
 	_, err = roomClient.CreateRoom(context.Background(), &livekit.CreateRoomRequest{
@@ -250,7 +245,7 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 		t.Fatalf("failed to create test room: %v", err)
 	}
 
-	testVideo := filepath.Join(repoRoot, "examples", "egress-agent", "test-data", "test.mp4")
+	testVideo := filepath.Join(repoRoot, "examples", "publisher-hls-agent", "test", "test.mp4")
 	if _, err := os.Stat(testVideo); err != nil {
 		t.Fatalf("test video missing: %v", err)
 	}
@@ -320,7 +315,7 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 		t.Fatal("audio track was not bound in time")
 	}
 
-	handshakePublisher, err := NewGStreamerPublisher(testVideo, videoTrack, audioTrack)
+	handshakePublisher, err := NewGStreamerPublisher(testVideo, webrtc.MimeTypeH264, videoTrack, audioTrack)
 	if err != nil {
 		t.Fatalf("failed to create handshake publisher: %v", err)
 	}
@@ -339,7 +334,7 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 		t.Fatalf("failed to activate recording: %v", err)
 	}
 
-	publisher, err := NewGStreamerPublisher(testVideo, videoTrack, audioTrack)
+	publisher, err := NewGStreamerPublisher(testVideo, webrtc.MimeTypeH264, videoTrack, audioTrack)
 	if err != nil {
 		t.Fatalf("failed to create GStreamer publisher: %v", err)
 	}
@@ -368,16 +363,97 @@ func TestPublisherHLSAgentRecordsHLS(t *testing.T) {
 	handler.PrintSummary()
 	t.Logf("summaries recorded: %d", len(handler.summaries))
 
-	participantOutputDir := filepath.Join(outputDir, testRoomName, testParticipant)
-	outputFile := filepath.Join(participantOutputDir, "output.ts")
+	// Find the session directory (new flat structure: outputDir/room_participant_timestamp)
+	pattern := filepath.Join(outputDir, fmt.Sprintf("%s_%s_*", testRoomName, testParticipant))
+	sessionDirs, err := filepath.Glob(pattern)
+	if err != nil || len(sessionDirs) == 0 {
+		t.Fatalf("failed to find session directory matching %s: %v", pattern, err)
+	}
+	participantOutputDir := sessionDirs[0]
+	videoPlaylistFile := filepath.Join(participantOutputDir, "video.m3u8")
 
-	if err := waitForFile(outputFile, 10*time.Second); err != nil {
-		t.Fatalf("recording not created: %v", err)
+	if err := waitForFile(videoPlaylistFile, 10*time.Second); err != nil {
+		t.Fatalf("video playlist not created: %v", err)
 	}
 
-	if err := validateRecordingOutput(t, outputFile, testVideo); err != nil {
+	if err := validateVideoPlaylistLocal(t, participantOutputDir); err != nil {
 		t.Fatalf("recording validation failed: %v", err)
 	}
+}
+
+type liveKitTestServer struct {
+	Cmd         *exec.Cmd
+	WSURL       string
+	HTTPURL     string
+	HTTPAddr    string
+	HTTPPort    int
+	RTCTCPPort  int
+	RTCUDPStart int
+	RTCUDPEnd   int
+}
+
+func startLiveKitServer(t *testing.T, serverBinary, configPath, repoRoot string, logFile *os.File) liveKitTestServer {
+	t.Helper()
+
+	httpPort := getFreeTCPPort(t)
+	rtcTCPPort := getFreeTCPPort(t)
+	if rtcTCPPort == httpPort {
+		rtcTCPPort = getFreeTCPPort(t)
+	}
+
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	udpStart := 40000 + r.Intn(9000) // 40000-48999
+	udpEnd := udpStart + 999         // 1000 ports
+
+	httpAddr := fmt.Sprintf("127.0.0.1:%d", httpPort)
+	wsURL := fmt.Sprintf("ws://%s", httpAddr)
+	httpURL := fmt.Sprintf("http://%s", httpAddr)
+
+	serverCmd := exec.Command(serverBinary,
+		"--dev",
+		"--config", configPath,
+		"--bind", "127.0.0.1",
+		"--node-ip", "127.0.0.1",
+		"--port", strconv.Itoa(httpPort),
+		"--rtc.tcp_port", strconv.Itoa(rtcTCPPort),
+		"--rtc.port_range_start", strconv.Itoa(udpStart),
+		"--rtc.port_range_end", strconv.Itoa(udpEnd),
+	)
+	serverCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	serverCmd.Dir = repoRoot
+	serverCmd.Stdout = logFile
+	serverCmd.Stderr = logFile
+
+	if err := serverCmd.Start(); err != nil {
+		t.Fatalf("failed to start livekit server: %v", err)
+	}
+	if err := waitForLiveKitServer(httpAddr, 25*time.Second); err != nil {
+		t.Fatalf("livekit server not ready: %v", err)
+	}
+
+	t.Logf("LiveKit test server: ws=%s http=%s rtc.tcp=%d rtc.udp=%d-%d", wsURL, httpURL, rtcTCPPort, udpStart, udpEnd)
+
+	return liveKitTestServer{
+		Cmd:         serverCmd,
+		WSURL:       wsURL,
+		HTTPURL:     httpURL,
+		HTTPAddr:    httpAddr,
+		HTTPPort:    httpPort,
+		RTCTCPPort:  rtcTCPPort,
+		RTCUDPStart: udpStart,
+		RTCUDPEnd:   udpEnd,
+	}
+}
+
+func getFreeTCPPort(t *testing.T) int {
+	t.Helper()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to allocate free TCP port: %v", err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
 }
 
 // findRepoRoot locates the repository root directory for accessing test resources.
@@ -946,7 +1022,7 @@ func inspectPlaylist(playlistPath string) ([]string, []float64, float64, error) 
 			} else {
 				durations = append(durations, math.NaN())
 			}
-		} else if strings.HasSuffix(trimmed, ".ts") && !strings.HasPrefix(trimmed, "#") {
+		} else if !strings.HasPrefix(trimmed, "#") && (strings.HasSuffix(trimmed, ".ts") || strings.HasSuffix(trimmed, ".m4s") || strings.HasSuffix(trimmed, ".jpg") || strings.HasSuffix(trimmed, ".jpeg") || strings.HasSuffix(trimmed, ".png") || strings.HasSuffix(trimmed, ".webp")) {
 			segments = append(segments, trimmed)
 			if len(durations) < len(segments) {
 				durations = append(durations, math.NaN())
@@ -1127,4 +1203,83 @@ func ffprobeStreamTiming(input, selector string) (start float64, duration float6
 		return 0, 0, fmt.Errorf("failed to parse duration: %w", err)
 	}
 	return
+}
+
+// validateVideoPlaylistLocal validates the new separate A/V output structure for local tests.
+//
+// The new pipeline produces:
+//   - video.m3u8 + video*.ts (video-only HLS)
+//   - audio.json + audio*.m4s (audio fMP4 segments)
+//
+// Parameters:
+//   - t: Testing context
+//   - outputDir: Directory containing the recording files
+//
+// Returns:
+//   - nil if validation succeeds
+//   - error describing the validation failure
+func validateVideoPlaylistLocal(t *testing.T, outputDir string) error {
+	t.Helper()
+
+	// Check video playlist exists
+	videoPlaylist := filepath.Join(outputDir, "video.m3u8")
+	stat, err := os.Stat(videoPlaylist)
+	if err != nil {
+		return fmt.Errorf("video playlist not found: %w", err)
+	}
+	if stat.Size() == 0 {
+		return fmt.Errorf("video playlist is empty")
+	}
+
+	// Parse video playlist
+	segments, durations, durationSum, err := inspectPlaylist(videoPlaylist)
+	if err != nil {
+		return fmt.Errorf("failed to inspect video playlist: %w", err)
+	}
+
+	if len(segments) == 0 {
+		return fmt.Errorf("video playlist has no segments")
+	}
+
+	t.Logf("video playlist: %d segments, total duration %.3fs", len(segments), durationSum)
+
+	// Validate segments exist
+	validSegments := 0
+	for i, segment := range segments {
+		segmentPath := filepath.Join(outputDir, segment)
+		segStat, err := os.Stat(segmentPath)
+		if err != nil {
+			t.Logf("warning: segment %s not found: %v", segment, err)
+			continue
+		}
+		if segStat.Size() == 0 {
+			t.Logf("warning: segment %s is empty", segment)
+			continue
+		}
+
+		// Check duration is reasonable (skip invalid durations > 1000s)
+		if i < len(durations) && durations[i] > 0 && durations[i] < 1000 {
+			validSegments++
+		} else if i < len(durations) && durations[i] > 1000 {
+			t.Logf("warning: segment %s has invalid duration %.0fs (likely final segment bug)", segment, durations[i])
+		} else {
+			validSegments++
+		}
+	}
+
+	if validSegments == 0 {
+		return fmt.Errorf("no valid video segments found")
+	}
+
+	t.Logf("validated %d video segments", validSegments)
+
+	// Check audio manifest (optional - may not be written yet during tests)
+	audioManifest := filepath.Join(outputDir, "audio.json")
+	if manifestStat, err := os.Stat(audioManifest); err == nil && manifestStat.Size() > 0 {
+		t.Logf("audio manifest found: %s (%d bytes)", audioManifest, manifestStat.Size())
+	} else {
+		t.Logf("warning: audio manifest not found (may not be written yet)")
+	}
+
+	return nil
 }

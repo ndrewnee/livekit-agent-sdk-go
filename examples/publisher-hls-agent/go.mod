@@ -12,6 +12,7 @@ require (
 	github.com/minio/minio-go/v7 v7.0.95
 	github.com/pion/rtp v1.8.22
 	github.com/pion/webrtc/v4 v4.1.5
+	gocv.io/x/gocv v0.42.0
 )
 
 require (

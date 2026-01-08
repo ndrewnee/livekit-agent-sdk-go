@@ -44,7 +44,7 @@ import (
 // is playback-compatible. Without this fix, video players may fail to play
 // the final segment or calculate incorrect total duration.
 func fixHLSPlaylist(outputDir string) error {
-	playlistPath := filepath.Join(outputDir, "playlist.m3u8")
+	playlistPath := filepath.Join(outputDir, "video.m3u8")
 	data, err := os.ReadFile(playlistPath)
 	if err != nil {
 		return fmt.Errorf("read playlist: %w", err)

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,27 +19,47 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// ParticipantRecorder records a participant's audio and video streams to HLS format.
+// ParticipantRecorder records a participant's audio and video streams to separate HLS outputs.
 //
 // It creates a GStreamer pipeline that:
-//   - Receives RTP packets (H.264 video, Opus audio)
-//   - Optionally transcodes audio to AAC (or keeps Opus)
-//   - Muxes to MPEG-TS format
-//   - Generates HLS playlists and segments via hlssink
+//   - Receives RTP packets (H.264 or AV1 video, Opus audio)
+//   - Outputs video-only HLS (H.264 in MPEG-TS segments, or AV1 in CMAF/fMP4 segments)
+//   - Outputs audio-only fMP4 segments (Opus in CMAF format)
+//   - Creates audio.json manifest for web player consumption
+//
+// The separate A/V output enables:
+//   - iOS-compatible playback with single video tag
+//   - WebAudio-based mixing of multiple participants' audio
+//   - Efficient participant switching without re-buffering audio
 //
 // The recorder implements delayed pipeline start to ensure all HLS segments
-// begin with valid H.264 keyframes containing SPS/PPS headers.
+// begin with valid keyframes.
 type ParticipantRecorder struct {
+	cfg *Config
+
 	participant string
 	room        string
 	outputDir   string
-	keepOpus    bool
 
-	pipeline    *gst.Pipeline
+	pipeline *gst.Pipeline
+
+	segmentDuration int
+
+	videoCodec string
+
+	// H.264 RTP path (appsrc receives RTP packets).
 	videoAppSrc *app.Source
-	audioAppSrc *app.Source
 	videoDepay  *gst.Element
-	audioDepay  *gst.Element
+
+	// AV1 path (appsrc receives AV1 OBU stream frames, not RTP).
+	av1VideoAppSrc *app.Source
+
+	audioAppSrc *app.Source
+
+	// Audio manifest writer for fMP4 segments
+	audioManifest     *AudioManifestWriter
+	audioSegmentIndex int
+	audioSegmentStart float64
 
 	videoInitialized bool
 	audioInitialized bool
@@ -81,9 +102,14 @@ type ParticipantRecorder struct {
 	preVideoMu      sync.Mutex
 	preVideoPackets []*rtp.Packet
 	preAudioMu      sync.Mutex
-	preAudioPackets []*rtp.Packet
+	preAudioPackets []bufferedRTPPacket
 
 	s3Uploader *RealtimeS3Uploader // Real-time S3 uploader (nil if disabled)
+
+	e2eeCtx          *E2EEContext    // E2EE decryption context (nil if disabled)
+	frameAssembler   *FrameAssembler // Frame-level assembler/decryptor for E2EE video
+	e2eeVideoAppSrc  *app.Source     // Separate appsrc for E2EE video (receives Annex B, not RTP)
+	e2eeVideoEnabled bool            // True when using E2EE video pipeline
 }
 
 // Pre-buffer configuration for video and audio packets.
@@ -107,6 +133,16 @@ type ParticipantRecorder struct {
 const (
 	preVideoBufferMax = 300
 	preAudioBufferMax = 500
+	// audioKeyframePreroll defines how much recently-received audio we keep when
+	// starting recording on a video keyframe. Audio often arrives slightly ahead
+	// of video; keeping a small preroll prevents losing the first Opus frames while
+	// still dropping stale audio from warm-up / restarts.
+	audioKeyframePreroll = 300 * time.Millisecond
+	// audioRestartGapCut is a wall-clock gap threshold used to detect a publisher
+	// restart (e.g., test handshake publisher stopping and restarting playback).
+	// When such a gap is detected in the pre-audio buffer, we drop everything before
+	// the gap to avoid mixing two publishes in one recording.
+	audioRestartGapCut = 50 * time.Millisecond
 )
 
 // RecordingSummary contains statistics and metadata about a completed recording.
@@ -120,6 +156,11 @@ type RecordingSummary struct {
 	VideoPackets int           // Number of video RTP packets processed
 	AudioPackets int           // Number of audio RTP packets processed
 	Remote       string        // S3 URL if uploaded, empty otherwise
+}
+
+type bufferedRTPPacket struct {
+	pkt        *rtp.Packet
+	receivedAt time.Time
 }
 
 // NewParticipantRecorder creates a new recorder for a participant.
@@ -162,57 +203,28 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 
 	gst.Init(nil)
 
+	startTime := time.Now()
+
 	pipeline, err := gst.NewPipeline("participant-recorder")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GStreamer pipeline: %w", err)
 	}
 
-	videoSrc, err := gst.NewElement("appsrc")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create video appsrc: %w", err)
-	}
-	_ = videoSrc.SetProperty("is-live", true)
-	_ = videoSrc.SetProperty("format", gst.FormatTime)
-	_ = videoSrc.SetProperty("do-timestamp", false)
-	_ = videoSrc.SetProperty("emit-signals", true)
-	_ = videoSrc.SetProperty("block", false)
-	_ = videoSrc.SetProperty("stream-type", 0)
-	_ = videoSrc.SetProperty("max-bytes", uint64(10*1024*1024))
-
-	videoJitter, err := gst.NewElement("rtpjitterbuffer")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create video jitterbuffer: %w", err)
-	}
-	_ = videoJitter.SetProperty("latency", uint(200))
-	_ = videoJitter.SetProperty("mode", int(1)) // RTP_JITTER_BUFFER_MODE_NONE to keep RTP timestamps unmodified
-
-	videoDepay, err := gst.NewElement("rtph264depay")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create rtph264depay: %w", err)
+	segmentDuration := cfg.SegmentDurationSecs
+	if segmentDuration <= 0 {
+		segmentDuration = 2
 	}
 
-	h264parse, err := gst.NewElement("h264parse")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create h264parse: %w", err)
-	}
-	// force SPS/PPS before every keyframe so the resulting HLS segments stay decodable
-	_ = h264parse.SetProperty("disable-passthrough", true)
-	_ = h264parse.SetProperty("config-interval", int32(-1))
+	// Video pipeline is initialized lazily when the video track is attached
+	// (we need to know whether the participant published H.264 or AV1).
 
-	videoCapsFilter, err := gst.NewElement("capsfilter")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create video capsfilter: %w", err)
-	}
-	videoCaps := gst.NewCapsFromString("video/x-h264,stream-format=byte-stream,alignment=au")
-	_ = videoCapsFilter.SetProperty("caps", videoCaps)
-
-	videoQueue, err := gst.NewElement("queue")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create video queue: %w", err)
-	}
-	_ = videoQueue.SetProperty("max-size-buffers", uint(0))
-	_ = videoQueue.SetProperty("max-size-bytes", uint(0))
-	_ = videoQueue.SetProperty("max-size-time", uint64(0))
+	// =========================================================================
+	// AUDIO PIPELINE: appsrc (raw Opus) → opusparse → queue → splitmuxsink
+	//
+	// We bypass the jitterbuffer and rtpopusdepay entirely by pushing raw Opus
+	// payloads directly. This eliminates jitterbuffer-related blocking issues
+	// that occur when pre-buffered audio drains quickly followed by real-time.
+	// =========================================================================
 
 	audioSrc, err := gst.NewElement("appsrc")
 	if err != nil {
@@ -220,130 +232,53 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	}
 	_ = audioSrc.SetProperty("is-live", true)
 	_ = audioSrc.SetProperty("format", gst.FormatTime)
+	// Use explicit PTS based on RTP timestamps to preserve A/V sync.
 	_ = audioSrc.SetProperty("do-timestamp", false)
 	_ = audioSrc.SetProperty("emit-signals", true)
 	_ = audioSrc.SetProperty("block", false)
 	_ = audioSrc.SetProperty("stream-type", 0)
 	_ = audioSrc.SetProperty("max-bytes", uint64(2*1024*1024))
+	// Set caps for raw Opus audio (not RTP)
+	audioCaps := gst.NewCapsFromString("audio/x-opus,rate=48000,channels=2,channel-mapping-family=0")
+	_ = audioSrc.SetProperty("caps", audioCaps)
 
-	audioJitter, err := gst.NewElement("rtpjitterbuffer")
+	opusParse, err := gst.NewElement("opusparse")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create audio jitterbuffer: %w", err)
-	}
-	_ = audioJitter.SetProperty("latency", uint(200))
-	_ = audioJitter.SetProperty("mode", int(1)) // Disable jitterbuffer resync to preserve relative timestamps
-
-	audioDepay, err := gst.NewElement("rtpopusdepay")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create rtpopusdepay: %w", err)
-	}
-
-	// Audio processing pipeline depends on KeepOpus configuration
-	var opusDec, audioConvert, aacEnc, aacParse, opusParse *gst.Element
-	if cfg.KeepOpus {
-		// Keep Opus without transcoding
-		opusParse, err = gst.NewElement("opusparse")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create opusparse: %w", err)
-		}
-	} else {
-		// Transcode Opus to AAC
-		opusDec, err = gst.NewElement("opusdec")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create opusdec: %w", err)
-		}
-
-		audioConvert, err = gst.NewElement("audioconvert")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create audioconvert: %w", err)
-		}
-
-		aacEnc, err = gst.NewElement("avenc_aac")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create avenc_aac: %w", err)
-		}
-		_ = aacEnc.SetProperty("bitrate", uint(128000))
-
-		aacParse, err = gst.NewElement("aacparse")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create aacparse: %w", err)
-		}
+		return nil, fmt.Errorf("failed to create opusparse: %w", err)
 	}
 
 	audioQueue, err := gst.NewElement("queue")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create audio queue: %w", err)
 	}
-	_ = audioQueue.SetProperty("max-size-buffers", uint(0))
-	_ = audioQueue.SetProperty("max-size-bytes", uint(0))
-	_ = audioQueue.SetProperty("max-size-time", uint64(0))
+	// Set reasonable limits but don't make it leaky (leaky causes gaps that break segmentation)
+	_ = audioQueue.SetProperty("max-size-buffers", uint(500))           // ~10 seconds of audio at 50 packets/sec
+	_ = audioQueue.SetProperty("max-size-bytes", uint(1024*1024))       // 1MB
+	_ = audioQueue.SetProperty("max-size-time", uint64(10*time.Second)) // 10 seconds
 
-	mpegtsmux, err := gst.NewElement("mpegtsmux")
+	// Audio fMP4 segmenter using splitmuxsink with cmafmux
+	// Note: splitmuxsink segments based on RUNNING TIME, not buffer PTS.
+	// Let splitmuxsink handle all segmentation via max-size-time, don't configure cmafmux fragment-duration.
+	audioSplitMux, err := gst.NewElement("splitmuxsink")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create mpegtsmux: %w", err)
+		return nil, fmt.Errorf("failed to create audio splitmuxsink: %w", err)
 	}
-	_ = mpegtsmux.SetProperty("alignment", int64(7))
-	_ = mpegtsmux.SetProperty("start-time-selection", int64(0)) // Force timestamps to start at zero
-	_ = mpegtsmux.SetProperty("start-time", uint64(0))
+	_ = audioSplitMux.SetProperty("location", filepath.Join(absDir, "audio%05d.m4s"))
+	_ = audioSplitMux.SetProperty("max-size-time", uint64(segmentDuration)*uint64(time.Second))
+	_ = audioSplitMux.SetProperty("muxer-factory", "cmafmux")
+	_ = audioSplitMux.SetProperty("async-finalize", false)         // Ensure segments are finalized synchronously
+	_ = audioSplitMux.SetProperty("send-keyframe-requests", false) // Audio has no keyframes
+	_ = audioSplitMux.SetProperty("use-robust-muxing", true)       // Handle discontinuities gracefully
+	_ = audioSplitMux.SetProperty("start-time-selection", 0)       // Use first buffer timestamp as start
 
-	muxQueue, err := gst.NewElement("queue")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create mux queue: %w", err)
-	}
+	// =========================================================================
+	// ADD ELEMENTS TO PIPELINE
+	// =========================================================================
 
-	outputTee, err := gst.NewElement("tee")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create tee: %w", err)
-	}
-
-	tsQueue, err := gst.NewElement("queue")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ts queue: %w", err)
-	}
-
-	tsSink, err := gst.NewElement("filesink")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create filesink: %w", err)
-	}
-	_ = tsSink.SetProperty("location", filepath.Join(absDir, "output.ts"))
-	_ = tsSink.SetProperty("sync", false)
-	_ = tsSink.SetProperty("async", false)
-
-	hlsQueue, err := gst.NewElement("queue")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create hls queue: %w", err)
-	}
-
-	hlsSink, err := gst.NewElement("hlssink")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create hlssink: %w", err)
-	}
-	_ = hlsSink.SetProperty("location", filepath.Join(absDir, "segment%05d.ts"))
-	_ = hlsSink.SetProperty("playlist-location", filepath.Join(absDir, "playlist.m3u8"))
-	segmentDuration := cfg.SegmentDurationSecs
-	if segmentDuration <= 0 {
-		segmentDuration = 2
-	}
-	_ = hlsSink.SetProperty("target-duration", uint(segmentDuration))
-	_ = hlsSink.SetProperty("max-files", uint(0))
-	_ = hlsSink.SetProperty("playlist-length", uint(0))
-
-	// Build elements list based on audio codec configuration
 	elements := []*gst.Element{
-		videoSrc, videoJitter, videoDepay, h264parse, videoCapsFilter, videoQueue,
-		audioSrc, audioJitter, audioDepay,
+		// Audio path (raw Opus, bypasses jitterbuffer and RTP depayloader)
+		audioSrc, opusParse, audioQueue, audioSplitMux,
 	}
-	if cfg.KeepOpus {
-		elements = append(elements, opusParse)
-	} else {
-		elements = append(elements, opusDec, audioConvert, aacEnc, aacParse)
-	}
-	elements = append(elements,
-		audioQueue,
-		mpegtsmux, muxQueue, outputTee,
-		tsQueue, tsSink,
-		hlsQueue, hlsSink,
-	)
 
 	for _, elem := range elements {
 		if err := pipeline.Add(elem); err != nil {
@@ -351,91 +286,69 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 		}
 	}
 
-	if err := gst.ElementLinkMany(videoSrc, videoJitter, videoDepay, h264parse, videoCapsFilter, videoQueue); err != nil {
-		return nil, fmt.Errorf("failed to link video chain: %w", err)
+	// =========================================================================
+	// LINK AUDIO PIPELINE
+	// Direct path: raw Opus → opusparse → queue (no jitterbuffer or depayloader)
+	// This avoids jitterbuffer blocking issues with pre-buffered audio.
+	// =========================================================================
+
+	if err := gst.ElementLinkMany(audioSrc, opusParse, audioQueue); err != nil {
+		return nil, fmt.Errorf("failed to link audio processing chain: %w", err)
 	}
 
-	// Link audio pipeline based on codec configuration
-	if cfg.KeepOpus {
-		if err := gst.ElementLinkMany(audioSrc, audioJitter, audioDepay, opusParse, audioQueue); err != nil {
-			return nil, fmt.Errorf("failed to link audio chain (opus): %w", err)
-		}
-	} else {
-		if err := gst.ElementLinkMany(audioSrc, audioJitter, audioDepay, opusDec, audioConvert, aacEnc, aacParse, audioQueue); err != nil {
-			return nil, fmt.Errorf("failed to link audio chain (aac): %w", err)
-		}
+	// Link audio queue to splitmuxsink (request pad)
+	audioSplitPad := audioSplitMux.GetRequestPad("audio_%u")
+	if audioSplitPad == nil {
+		// Try alternative pad name
+		audioSplitPad = audioSplitMux.GetRequestPad("audio")
 	}
-
-	// mpegtsmux requires request pads, cannot use ElementLinkMany
-	videoMuxPad := mpegtsmux.GetRequestPad("sink_%d")
-	if videoMuxPad == nil {
-		return nil, fmt.Errorf("failed to get request pad from mpegtsmux for video")
-	}
-	videoQueueSrc := videoQueue.GetStaticPad("src")
-	if videoQueueSrc == nil {
-		return nil, fmt.Errorf("failed to get src pad from video queue")
-	}
-	if linkRet := videoQueueSrc.Link(videoMuxPad); linkRet != gst.PadLinkOK {
-		return nil, fmt.Errorf("failed to link video queue to mux: %s", linkRet.String())
-	}
-
-	audioMuxPad := mpegtsmux.GetRequestPad("sink_%d")
-	if audioMuxPad == nil {
-		return nil, fmt.Errorf("failed to get request pad from mpegtsmux for audio")
+	if audioSplitPad == nil {
+		return nil, fmt.Errorf("failed to get request pad from audio splitmuxsink")
 	}
 	audioQueueSrc := audioQueue.GetStaticPad("src")
 	if audioQueueSrc == nil {
 		return nil, fmt.Errorf("failed to get src pad from audio queue")
 	}
-	if linkRet := audioQueueSrc.Link(audioMuxPad); linkRet != gst.PadLinkOK {
-		return nil, fmt.Errorf("failed to link audio queue to mux: %s", linkRet.String())
-	}
-
-	if err := gst.ElementLinkMany(mpegtsmux, muxQueue, outputTee); err != nil {
-		return nil, fmt.Errorf("failed to link mux branch: %w", err)
-	}
-
-	if err := gst.ElementLinkMany(tsQueue, tsSink); err != nil {
-		return nil, fmt.Errorf("failed to link ts branch: %w", err)
-	}
-	if err := gst.ElementLinkMany(hlsQueue, hlsSink); err != nil {
-		return nil, fmt.Errorf("failed to link hls branch: %w", err)
-	}
-
-	teePad1 := outputTee.GetRequestPad("src_%u")
-	tsQueueSink := tsQueue.GetStaticPad("sink")
-	if linkRet := teePad1.Link(tsQueueSink); linkRet != gst.PadLinkOK {
-		return nil, fmt.Errorf("failed to link tee to ts queue: %s", linkRet.String())
-	}
-
-	teePad2 := outputTee.GetRequestPad("src_%u")
-	hlsQueueSink := hlsQueue.GetStaticPad("sink")
-	if linkRet := teePad2.Link(hlsQueueSink); linkRet != gst.PadLinkOK {
-		return nil, fmt.Errorf("failed to link tee to hls queue: %s", linkRet.String())
+	if linkRet := audioQueueSrc.Link(audioSplitPad); linkRet != gst.PadLinkOK {
+		return nil, fmt.Errorf("failed to link audio queue to splitmuxsink: %s", linkRet.String())
 	}
 
 	_ = os.Setenv("GST_DEBUG_DUMP_DOT_DIR", absDir)
 
+	// Initialize audio manifest writer
+	audioManifest := NewAudioManifestWriter(absDir, cfg, startTime)
+
 	recorder := &ParticipantRecorder{
-		participant:  participant,
-		room:         roomName,
-		outputDir:    absDir,
-		keepOpus:     cfg.KeepOpus,
-		pipeline:     pipeline,
-		videoAppSrc:  app.SrcFromElement(videoSrc),
-		audioAppSrc:  app.SrcFromElement(audioSrc),
-		videoDepay:   videoDepay,
-		audioDepay:   audioDepay,
-		startTime:    time.Now(),
-		videoReadyCh: make(chan struct{}),
-		s3Uploader:   s3Uploader,
+		cfg:             cfg,
+		participant:     participant,
+		room:            roomName,
+		outputDir:       absDir,
+		pipeline:        pipeline,
+		segmentDuration: segmentDuration,
+		audioAppSrc:     app.SrcFromElement(audioSrc),
+		startTime:       startTime,
+		videoReadyCh:    make(chan struct{}),
+		s3Uploader:      s3Uploader,
+		audioManifest:   audioManifest,
 	}
 
-	audioCodec := "AAC"
-	if cfg.KeepOpus {
-		audioCodec = "Opus"
-	}
-	log.Printf("[%s/%s] recorder initialized with H.264 + %s", roomName, participant, audioCodec)
+	// Connect to splitmuxsink signals for audio manifest tracking
+	// Note: format-location-full signal has 3 parameters (element, fragment_id, first_sample)
+	// and returns the filename - we don't receive the filename as a parameter
+	audioSplitMux.Connect("format-location-full", func(self *gst.Element, fragmentID uint, firstSample *gst.Sample) string {
+		segmentFile := fmt.Sprintf("audio%05d.m4s", fragmentID)
+		segmentStartTime := float64(fragmentID) * float64(segmentDuration)
+
+		recorder.mu.Lock()
+		recorder.audioSegmentIndex = int(fragmentID)
+		recorder.audioSegmentStart = segmentStartTime
+		recorder.mu.Unlock()
+
+		log.Printf("[%s] audio segment %d started at %.2fs", recorder.logPrefix(), fragmentID, segmentStartTime)
+		return filepath.Join(absDir, segmentFile)
+	})
+
+	log.Printf("[%s/%s] recorder initialized with separate A/V (video TBD + Opus audio fMP4)", roomName, participant)
 
 	bus := pipeline.GetPipelineBus()
 	bus.AddWatch(func(msg *gst.Message) bool {
@@ -457,6 +370,325 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 	return recorder, nil
 }
 
+func (r *ParticipantRecorder) initH264VideoPipeline() error {
+	r.mu.Lock()
+	if r.videoCodec != "" && !strings.EqualFold(r.videoCodec, webrtc.MimeTypeH264) {
+		codec := r.videoCodec
+		r.mu.Unlock()
+		return fmt.Errorf("video pipeline already initialized for codec %s", codec)
+	}
+	if r.videoAppSrc != nil || r.e2eeVideoAppSrc != nil {
+		r.mu.Unlock()
+		return nil
+	}
+	pipeline := r.pipeline
+	outputDir := r.outputDir
+	segmentDuration := r.segmentDuration
+	r.videoCodec = webrtc.MimeTypeH264
+	r.mu.Unlock()
+
+	if pipeline == nil {
+		return fmt.Errorf("pipeline not initialized")
+	}
+	if segmentDuration <= 0 {
+		segmentDuration = 2
+	}
+
+	// =========================================================================
+	// VIDEO PIPELINE: appsrc → jitter → depay → h264parse → capsfilter → queue
+	//                 → mpegtsmux (video-only) → hlssink (video.m3u8)
+	// =========================================================================
+
+	videoSrc, err := gst.NewElement("appsrc")
+	if err != nil {
+		return fmt.Errorf("failed to create video appsrc: %w", err)
+	}
+	_ = videoSrc.SetProperty("is-live", true)
+	_ = videoSrc.SetProperty("format", gst.FormatTime)
+	_ = videoSrc.SetProperty("do-timestamp", false)
+	_ = videoSrc.SetProperty("emit-signals", true)
+	_ = videoSrc.SetProperty("block", false)
+	_ = videoSrc.SetProperty("stream-type", 0)
+	_ = videoSrc.SetProperty("max-bytes", uint64(10*1024*1024))
+
+	videoJitter, err := gst.NewElement("rtpjitterbuffer")
+	if err != nil {
+		return fmt.Errorf("failed to create video jitterbuffer: %w", err)
+	}
+	_ = videoJitter.SetProperty("latency", uint(200))
+	_ = videoJitter.SetProperty("mode", int(1))
+
+	videoDepay, err := gst.NewElement("rtph264depay")
+	if err != nil {
+		return fmt.Errorf("failed to create rtph264depay: %w", err)
+	}
+
+	h264parse, err := gst.NewElement("h264parse")
+	if err != nil {
+		return fmt.Errorf("failed to create h264parse: %w", err)
+	}
+	_ = h264parse.SetProperty("disable-passthrough", true)
+	_ = h264parse.SetProperty("config-interval", int32(-1))
+
+	videoCapsFilter, err := gst.NewElement("capsfilter")
+	if err != nil {
+		return fmt.Errorf("failed to create video capsfilter: %w", err)
+	}
+	videoCaps := gst.NewCapsFromString("video/x-h264,stream-format=byte-stream,alignment=au")
+	_ = videoCapsFilter.SetProperty("caps", videoCaps)
+
+	videoQueue, err := gst.NewElement("queue")
+	if err != nil {
+		return fmt.Errorf("failed to create video queue: %w", err)
+	}
+	_ = videoQueue.SetProperty("max-size-buffers", uint(0))
+	_ = videoQueue.SetProperty("max-size-bytes", uint(0))
+	_ = videoQueue.SetProperty("max-size-time", uint64(0))
+
+	videoMux, err := gst.NewElement("mpegtsmux")
+	if err != nil {
+		return fmt.Errorf("failed to create video mpegtsmux: %w", err)
+	}
+	_ = videoMux.SetProperty("alignment", int64(7))
+	_ = videoMux.SetProperty("start-time-selection", int64(0))
+	_ = videoMux.SetProperty("start-time", uint64(0))
+
+	videoMuxQueue, err := gst.NewElement("queue")
+	if err != nil {
+		return fmt.Errorf("failed to create video mux queue: %w", err)
+	}
+
+	videoHlsSink, err := gst.NewElement("hlssink")
+	if err != nil {
+		return fmt.Errorf("failed to create video hlssink: %w", err)
+	}
+	_ = videoHlsSink.SetProperty("location", filepath.Join(outputDir, "video%05d.ts"))
+	_ = videoHlsSink.SetProperty("playlist-location", filepath.Join(outputDir, "video.m3u8"))
+	_ = videoHlsSink.SetProperty("target-duration", uint(segmentDuration))
+	_ = videoHlsSink.SetProperty("max-files", uint(0))
+	_ = videoHlsSink.SetProperty("playlist-length", uint(0))
+
+	// =========================================================================
+	// E2EE VIDEO PIPELINE: appsrc → h264parse → capsfilter → queue
+	// Receives decrypted Annex B frames directly (bypassing RTP processing).
+	// =========================================================================
+
+	e2eeVideoSrc, err := gst.NewElement("appsrc")
+	if err != nil {
+		return fmt.Errorf("failed to create E2EE video appsrc: %w", err)
+	}
+	_ = e2eeVideoSrc.SetProperty("is-live", true)
+	_ = e2eeVideoSrc.SetProperty("format", gst.FormatTime)
+	_ = e2eeVideoSrc.SetProperty("do-timestamp", false)
+	_ = e2eeVideoSrc.SetProperty("emit-signals", true)
+	_ = e2eeVideoSrc.SetProperty("block", false)
+	_ = e2eeVideoSrc.SetProperty("stream-type", 0)
+	_ = e2eeVideoSrc.SetProperty("max-bytes", uint64(10*1024*1024))
+
+	e2eeH264Parse, err := gst.NewElement("h264parse")
+	if err != nil {
+		return fmt.Errorf("failed to create E2EE h264parse: %w", err)
+	}
+	_ = e2eeH264Parse.SetProperty("disable-passthrough", true)
+	_ = e2eeH264Parse.SetProperty("config-interval", int32(-1))
+
+	e2eeCapsFilter, err := gst.NewElement("capsfilter")
+	if err != nil {
+		return fmt.Errorf("failed to create E2EE video capsfilter: %w", err)
+	}
+	e2eeCaps := gst.NewCapsFromString("video/x-h264,stream-format=byte-stream,alignment=au")
+	_ = e2eeCapsFilter.SetProperty("caps", e2eeCaps)
+
+	e2eeVideoQueue, err := gst.NewElement("queue")
+	if err != nil {
+		return fmt.Errorf("failed to create E2EE video queue: %w", err)
+	}
+	_ = e2eeVideoQueue.SetProperty("max-size-buffers", uint(0))
+	_ = e2eeVideoQueue.SetProperty("max-size-bytes", uint(0))
+	_ = e2eeVideoQueue.SetProperty("max-size-time", uint64(0))
+
+	elements := []*gst.Element{
+		videoSrc, videoJitter, videoDepay, h264parse, videoCapsFilter, videoQueue, videoMux, videoMuxQueue, videoHlsSink,
+		e2eeVideoSrc, e2eeH264Parse, e2eeCapsFilter, e2eeVideoQueue,
+	}
+	for _, elem := range elements {
+		if err := pipeline.Add(elem); err != nil {
+			// Reset codec on failure so another init attempt can be made.
+			r.mu.Lock()
+			r.videoCodec = ""
+			r.mu.Unlock()
+			return fmt.Errorf("failed to add %s to pipeline: %w", elem.GetName(), err)
+		}
+	}
+
+	if err := gst.ElementLinkMany(videoSrc, videoJitter, videoDepay, h264parse, videoCapsFilter, videoQueue); err != nil {
+		return fmt.Errorf("failed to link video processing chain: %w", err)
+	}
+
+	videoMuxPad := videoMux.GetRequestPad("sink_%d")
+	if videoMuxPad == nil {
+		return fmt.Errorf("failed to get request pad from video mpegtsmux")
+	}
+	videoQueueSrc := videoQueue.GetStaticPad("src")
+	if videoQueueSrc == nil {
+		return fmt.Errorf("failed to get src pad from video queue")
+	}
+	if linkRet := videoQueueSrc.Link(videoMuxPad); linkRet != gst.PadLinkOK {
+		return fmt.Errorf("failed to link video queue to mux: %s", linkRet.String())
+	}
+
+	if err := gst.ElementLinkMany(videoMux, videoMuxQueue, videoHlsSink); err != nil {
+		return fmt.Errorf("failed to link video mux to hlssink: %w", err)
+	}
+
+	if err := gst.ElementLinkMany(e2eeVideoSrc, e2eeH264Parse, e2eeCapsFilter, e2eeVideoQueue); err != nil {
+		return fmt.Errorf("failed to link E2EE video processing chain: %w", err)
+	}
+
+	e2eeMuxPad := videoMux.GetRequestPad("sink_%d")
+	if e2eeMuxPad == nil {
+		return fmt.Errorf("failed to get request pad from video mpegtsmux for E2EE")
+	}
+	e2eeQueueSrc := e2eeVideoQueue.GetStaticPad("src")
+	if e2eeQueueSrc == nil {
+		return fmt.Errorf("failed to get src pad from E2EE video queue")
+	}
+	if linkRet := e2eeQueueSrc.Link(e2eeMuxPad); linkRet != gst.PadLinkOK {
+		return fmt.Errorf("failed to link E2EE video queue to mux: %s", linkRet.String())
+	}
+
+	r.mu.Lock()
+	r.videoAppSrc = app.SrcFromElement(videoSrc)
+	r.e2eeVideoAppSrc = app.SrcFromElement(e2eeVideoSrc)
+	r.videoDepay = videoDepay
+	r.mu.Unlock()
+
+	log.Printf("[%s] initialized H.264 video pipeline (MPEG-TS + hlssink)", r.logPrefix())
+	return nil
+}
+
+func (r *ParticipantRecorder) initAV1VideoPipeline() error {
+	r.mu.Lock()
+	if r.videoCodec != "" && !strings.EqualFold(r.videoCodec, webrtc.MimeTypeAV1) {
+		codec := r.videoCodec
+		r.mu.Unlock()
+		return fmt.Errorf("video pipeline already initialized for codec %s", codec)
+	}
+	if r.av1VideoAppSrc != nil {
+		r.mu.Unlock()
+		return nil
+	}
+	pipeline := r.pipeline
+	outputDir := r.outputDir
+	segmentDuration := r.segmentDuration
+	r.videoCodec = webrtc.MimeTypeAV1
+	r.mu.Unlock()
+
+	if pipeline == nil {
+		return fmt.Errorf("pipeline not initialized")
+	}
+	if segmentDuration <= 0 {
+		segmentDuration = 2
+	}
+
+	av1Src, err := gst.NewElement("appsrc")
+	if err != nil {
+		return fmt.Errorf("failed to create AV1 video appsrc: %w", err)
+	}
+	_ = av1Src.SetProperty("is-live", true)
+	_ = av1Src.SetProperty("format", gst.FormatTime)
+	_ = av1Src.SetProperty("do-timestamp", false)
+	_ = av1Src.SetProperty("emit-signals", true)
+	_ = av1Src.SetProperty("block", false)
+	_ = av1Src.SetProperty("stream-type", 0)
+	_ = av1Src.SetProperty("max-bytes", uint64(10*1024*1024))
+	_ = av1Src.SetProperty("caps", gst.NewCapsFromString("video/x-av1,stream-format=obu-stream,alignment=tu"))
+
+	av1Parse, err := gst.NewElement("av1parse")
+	if err != nil {
+		return fmt.Errorf("failed to create av1parse: %w", err)
+	}
+
+	av1CapsFilter, err := gst.NewElement("capsfilter")
+	if err != nil {
+		return fmt.Errorf("failed to create AV1 capsfilter: %w", err)
+	}
+	_ = av1CapsFilter.SetProperty("caps", gst.NewCapsFromString("video/x-av1,stream-format=obu-stream,alignment=tu"))
+
+	videoQueue, err := gst.NewElement("queue")
+	if err != nil {
+		return fmt.Errorf("failed to create AV1 video queue: %w", err)
+	}
+	_ = videoQueue.SetProperty("max-size-buffers", uint(0))
+	_ = videoQueue.SetProperty("max-size-bytes", uint(0))
+	_ = videoQueue.SetProperty("max-size-time", uint64(0))
+
+	videoSplitMux, err := gst.NewElement("splitmuxsink")
+	if err != nil {
+		return fmt.Errorf("failed to create video splitmuxsink: %w", err)
+	}
+	_ = videoSplitMux.SetProperty("location", filepath.Join(outputDir, "video%05d.m4s"))
+	_ = videoSplitMux.SetProperty("max-size-time", uint64(segmentDuration)*uint64(time.Second))
+	_ = videoSplitMux.SetProperty("muxer-factory", "cmafmux")
+	_ = videoSplitMux.SetProperty("async-finalize", false)
+	_ = videoSplitMux.SetProperty("send-keyframe-requests", false)
+	_ = videoSplitMux.SetProperty("use-robust-muxing", true)
+
+	// Ensure monotonic timestamps across segments by forcing a higher track timescale.
+	// splitmuxsink+cmafmux/mp4mux default to a low (1/10000) timebase which introduces
+	// rounding errors at segment boundaries; this can cause players/ffmpeg to drop a
+	// frame at the first split keyframe (t≈13s) due to non-monotonic PTS.
+	//
+	// 60000 aligns exactly with 60000/1001 fps (frame duration = 1001 ticks).
+	const av1TrackTimescale uint = 60000
+	videoSplitMux.Connect("muxer-added", func(_ *gst.Element, muxer *gst.Element) {
+		if muxer == nil {
+			return
+		}
+		_ = muxer.SetProperty("movie-timescale", av1TrackTimescale)
+		_ = muxer.SetProperty("trak-timescale", av1TrackTimescale)
+		if sinkPad := muxer.GetStaticPad("sink"); sinkPad != nil {
+			_ = sinkPad.SetProperty("trak-timescale", av1TrackTimescale)
+		}
+	})
+
+	elements := []*gst.Element{av1Src, av1Parse, av1CapsFilter, videoQueue, videoSplitMux}
+	for _, elem := range elements {
+		if err := pipeline.Add(elem); err != nil {
+			r.mu.Lock()
+			r.videoCodec = ""
+			r.mu.Unlock()
+			return fmt.Errorf("failed to add %s to pipeline: %w", elem.GetName(), err)
+		}
+	}
+
+	if err := gst.ElementLinkMany(av1Src, av1Parse, av1CapsFilter, videoQueue); err != nil {
+		return fmt.Errorf("failed to link AV1 video processing chain: %w", err)
+	}
+
+	videoSplitPad := videoSplitMux.GetRequestPad("video_%u")
+	if videoSplitPad == nil {
+		videoSplitPad = videoSplitMux.GetRequestPad("video")
+	}
+	if videoSplitPad == nil {
+		return fmt.Errorf("failed to get request pad from video splitmuxsink")
+	}
+	videoQueueSrc := videoQueue.GetStaticPad("src")
+	if videoQueueSrc == nil {
+		return fmt.Errorf("failed to get src pad from AV1 video queue")
+	}
+	if linkRet := videoQueueSrc.Link(videoSplitPad); linkRet != gst.PadLinkOK {
+		return fmt.Errorf("failed to link AV1 video queue to splitmuxsink: %s", linkRet.String())
+	}
+
+	r.mu.Lock()
+	r.av1VideoAppSrc = app.SrcFromElement(av1Src)
+	r.mu.Unlock()
+
+	log.Printf("[%s] initialized AV1 video pipeline (CMAF/fMP4 + splitmuxsink)", r.logPrefix())
+	return nil
+}
+
 // logPrefix returns a standardized log prefix for this recorder.
 //
 // Format: "room/participant"
@@ -468,6 +700,35 @@ func NewParticipantRecorder(cfg *Config, roomName, participant string) (*Partici
 // Example output: "test-room/participant-123"
 func (r *ParticipantRecorder) logPrefix() string {
 	return fmt.Sprintf("%s/%s", r.room, r.participant)
+}
+
+// SetE2EEContext sets the E2EE decryption context for this recorder.
+// When set, incoming audio and video RTP payloads will be decrypted
+// before being passed to the GStreamer pipeline.
+//
+// This must be called before tracks are attached. The context should
+// be created using NewE2EEContext with the room's SIF trailer.
+//
+// For E2EE video, we use a frame-level decryption approach:
+//  1. RTP packets are collected by timestamp using FrameAssembler
+//  2. Packets are sorted by sequence number and assembled into Annex B frames
+//  3. Complete frames are decrypted using AES-GCM
+//  4. Decrypted Annex B data is pushed to a separate GStreamer pipeline
+//     that bypasses RTP jitterbuffer/depayloader
+func (r *ParticipantRecorder) SetE2EEContext(ctx *E2EEContext) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.e2eeCtx = ctx
+	// Note: FrameAssembler is created in AttachVideoTrack when the track arrives,
+	// because we need the cipher block from the E2EE context at that point.
+	// The e2eeVideoEnabled flag and e2eeVideoAppSrc are set up in NewParticipantRecorder.
+}
+
+// E2EEEnabled returns true if E2EE decryption is enabled for this recorder.
+func (r *ParticipantRecorder) E2EEEnabled() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.e2eeCtx != nil && r.e2eeCtx.Enabled()
 }
 
 // SetOnVideoReady sets a callback to be invoked when the first video keyframe
@@ -568,7 +829,111 @@ const (
 	nalUnitTypeIDR   = 5  // IDR (Instantaneous Decoder Refresh) keyframe
 	nalUnitTypeSTAPA = 24 // Single-time Aggregation Packet Type A (multiple NAL units)
 	nalUnitTypeFUA   = 28 // Fragmentation Unit Type A (fragmented NAL unit)
+
+	// rtpMTU is the maximum payload size for RTP packets before fragmentation is needed.
+	// This is chosen to fit within typical UDP MTU (~1400 bytes) after IP/UDP/RTP headers.
+	// NAL units larger than this should be fragmented using FU-A.
+	rtpMTU = 1200
 )
+
+// fragmentNALToFUA fragments a large NAL unit into FU-A (Fragmentation Unit Type A) packets.
+// This is required for NAL units that exceed the RTP MTU size.
+//
+// FU-A packet format (RFC 6184):
+//   - Byte 0: FU indicator: F=0, NRI=from original NAL, Type=28 (FU-A)
+//   - Byte 1: FU header: S=start flag, E=end flag, R=0, NAL type
+//   - Bytes 2+: Fragment of NAL unit data (without the NAL header byte)
+//
+// Parameters:
+//   - nalData: Complete NAL unit data including NAL header byte
+//   - timestamp: RTP timestamp for all fragments
+//   - ssrc: SSRC for the RTP packets
+//   - payloadType: RTP payload type
+//   - startSeqNum: Starting sequence number for the fragments
+//   - isLastNAL: Whether this is the last NAL in the access unit (for marker bit)
+//
+// Returns:
+//   - Slice of RTP packets representing the fragmented NAL
+//   - The next sequence number to use
+func fragmentNALToFUA(nalData []byte, timestamp uint32, ssrc uint32, payloadType uint8, startSeqNum uint16, isLastNAL bool) ([]*rtp.Packet, uint16) {
+	if len(nalData) <= rtpMTU {
+		// No fragmentation needed
+		return nil, startSeqNum
+	}
+
+	var packets []*rtp.Packet
+	seqNum := startSeqNum
+
+	// Extract NAL header and data
+	nalHeader := nalData[0]
+	nalType := nalHeader & 0x1F
+	nri := nalHeader & 0x60 // NRI bits (bits 5-6)
+	nalBody := nalData[1:]  // NAL data without header
+
+	// FU indicator: F=0, NRI=from original, Type=28 (FU-A)
+	fuIndicator := nri | nalUnitTypeFUA
+
+	// Fragment the NAL body (without header) into chunks
+	// Each chunk can be at most rtpMTU - 2 bytes (for FU indicator and FU header)
+	maxChunkSize := rtpMTU - 2
+	offset := 0
+	fragmentIndex := 0
+	totalFragments := (len(nalBody) + maxChunkSize - 1) / maxChunkSize
+
+	for offset < len(nalBody) {
+		chunkEnd := offset + maxChunkSize
+		if chunkEnd > len(nalBody) {
+			chunkEnd = len(nalBody)
+		}
+		chunk := nalBody[offset:chunkEnd]
+
+		// FU header: S=start, E=end, R=0, Type=original NAL type
+		var fuHeader byte
+		if fragmentIndex == 0 {
+			fuHeader = 0x80 | nalType // S=1, E=0, R=0, Type
+		} else if chunkEnd >= len(nalBody) {
+			fuHeader = 0x40 | nalType // S=0, E=1, R=0, Type
+		} else {
+			fuHeader = nalType // S=0, E=0, R=0, Type
+		}
+
+		// Build FU-A payload
+		payload := make([]byte, 2+len(chunk))
+		payload[0] = fuIndicator
+		payload[1] = fuHeader
+		copy(payload[2:], chunk)
+
+		// Marker bit only on last fragment of last NAL
+		marker := (chunkEnd >= len(nalBody)) && isLastNAL
+
+		pkt := &rtp.Packet{
+			Header: rtp.Header{
+				Version:        2,
+				Padding:        false,
+				Extension:      false,
+				Marker:         marker,
+				PayloadType:    payloadType,
+				SequenceNumber: seqNum,
+				Timestamp:      timestamp,
+				SSRC:           ssrc,
+			},
+			Payload: payload,
+		}
+		packets = append(packets, pkt)
+
+		seqNum++
+		offset = chunkEnd
+		fragmentIndex++
+	}
+
+	// Log fragmentation for debugging (only first few)
+	if len(packets) > 0 && totalFragments > 1 {
+		log.Printf("[FU-A] fragmented NAL type=%d (%d bytes) into %d fragments, seq=%d-%d",
+			nalType, len(nalData), totalFragments, startSeqNum, seqNum-1)
+	}
+
+	return packets, seqNum
+}
 
 // isH264Keyframe detects whether an RTP payload contains or references an H.264 keyframe.
 //
@@ -763,7 +1128,10 @@ func (r *ParticipantRecorder) initVideoCaps(payloadType uint8) {
 	if r.videoInitialized {
 		return
 	}
-	capsStr := fmt.Sprintf("application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,payload=%d", payloadType)
+	// IMPORTANT: packetization-mode=1 is required for rtph264depay to accept STAP-A packets
+	// Without it, rtph264depay assumes mode 0 (single NAL unit) and drops STAP-A/FU-A packets
+	// This is critical for E2EE video where we bundle SPS/PPS in STAP-A format
+	capsStr := fmt.Sprintf("application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,payload=%d,packetization-mode=(string)1", payloadType)
 	caps := gst.NewCapsFromString(capsStr)
 	_ = r.videoAppSrc.SetProperty("caps", caps)
 	r.videoInitialized = true
@@ -900,12 +1268,16 @@ func (r *ParticipantRecorder) enqueuePreAudioPacket(pkt *rtp.Packet) {
 	if clone == nil {
 		return
 	}
+	now := time.Now()
 	r.preAudioMu.Lock()
 	if len(r.preAudioPackets) >= preAudioBufferMax {
-		r.preAudioPackets[0] = nil
+		r.preAudioPackets[0].pkt = nil
 		r.preAudioPackets = r.preAudioPackets[1:]
 	}
-	r.preAudioPackets = append(r.preAudioPackets, clone)
+	r.preAudioPackets = append(r.preAudioPackets, bufferedRTPPacket{
+		pkt:        clone,
+		receivedAt: now,
+	})
 	r.preAudioMu.Unlock()
 }
 
@@ -932,8 +1304,8 @@ func (r *ParticipantRecorder) dequeuePreAudioPacket() *rtp.Packet {
 	if len(r.preAudioPackets) == 0 {
 		return nil
 	}
-	pkt := r.preAudioPackets[0]
-	r.preAudioPackets[0] = nil
+	pkt := r.preAudioPackets[0].pkt
+	r.preAudioPackets[0].pkt = nil
 	r.preAudioPackets = r.preAudioPackets[1:]
 	return pkt
 }
@@ -951,10 +1323,96 @@ func (r *ParticipantRecorder) dequeuePreAudioPacket() *rtp.Packet {
 func (r *ParticipantRecorder) clearPreAudioBuffer() {
 	r.preAudioMu.Lock()
 	for i := range r.preAudioPackets {
-		r.preAudioPackets[i] = nil
+		r.preAudioPackets[i].pkt = nil
 	}
 	r.preAudioPackets = nil
 	r.preAudioMu.Unlock()
+}
+
+// trimPreAudioBuffer drops any buffered audio packets older than (now - maxAge).
+// This is used when recording starts on a keyframe: it preserves a short amount
+// of recently-received audio (which may have arrived slightly before the video
+// keyframe) while discarding stale buffered audio from warm-up / restarts.
+func (r *ParticipantRecorder) trimPreAudioBuffer(maxAge time.Duration) {
+	debug := os.Getenv("PUBLISHER_HLS_DEBUG_AUDIO_TRIM") == "1"
+	cutoff := time.Now().Add(-maxAge)
+	r.preAudioMu.Lock()
+	defer r.preAudioMu.Unlock()
+	if len(r.preAudioPackets) == 0 {
+		return
+	}
+
+	if debug {
+		log.Printf("[%s] trimPreAudioBuffer: begin packets=%d maxAge=%s", r.logPrefix(), len(r.preAudioPackets), maxAge)
+	}
+
+	keepFrom := 0
+	for keepFrom < len(r.preAudioPackets) && r.preAudioPackets[keepFrom].receivedAt.Before(cutoff) {
+		r.preAudioPackets[keepFrom].pkt = nil
+		keepFrom++
+	}
+	if keepFrom > 0 {
+		r.preAudioPackets = r.preAudioPackets[keepFrom:]
+	}
+
+	// If the publisher stopped and restarted while we were waiting for the first
+	// recording keyframe, the pre-buffer can contain audio from both publishes.
+	// Detect the largest wall-clock gap and keep only the packets after it.
+	//
+	// Note: we intentionally use receivedAt (arrival time), not RTP timestamps,
+	// because the test publisher reuses the same RTP track and sequence space.
+	if len(r.preAudioPackets) > 1 {
+		maxGap := time.Duration(0)
+		cut := -1
+		for i := 1; i < len(r.preAudioPackets); i++ {
+			gap := r.preAudioPackets[i].receivedAt.Sub(r.preAudioPackets[i-1].receivedAt)
+			if gap > maxGap {
+				maxGap = gap
+				cut = i
+			}
+		}
+
+		if cut > 0 && maxGap >= audioRestartGapCut {
+			if debug {
+				log.Printf("[%s] trimPreAudioBuffer: dropping %d/%d packets before restart gap (maxGap=%s)",
+					r.logPrefix(), cut, len(r.preAudioPackets), maxGap)
+			}
+			for i := 0; i < cut; i++ {
+				r.preAudioPackets[i].pkt = nil
+			}
+			r.preAudioPackets = r.preAudioPackets[cut:]
+		}
+	}
+
+	// Ensure monotonic ordering by RTP timestamp/sequence before we start draining
+	// the buffer into GStreamer. Late/out-of-order packets can otherwise trigger
+	// uint32 underflow in audioClockTime() and corrupt tfdt/segment timing.
+	if len(r.preAudioPackets) > 1 {
+		sort.Slice(r.preAudioPackets, func(i, j int) bool {
+			pi := r.preAudioPackets[i].pkt
+			pj := r.preAudioPackets[j].pkt
+			if pi == nil || pj == nil {
+				return pi != nil
+			}
+			if pi.Timestamp == pj.Timestamp {
+				return int16(pi.SequenceNumber-pj.SequenceNumber) < 0
+			}
+			return int32(pi.Timestamp-pj.Timestamp) < 0
+		})
+	}
+
+	if debug {
+		show := min(6, len(r.preAudioPackets))
+		for i := 0; i < show; i++ {
+			p := r.preAudioPackets[i].pkt
+			if p == nil {
+				continue
+			}
+			log.Printf("[%s] trimPreAudioBuffer: kept[%d]=seq=%d ts=%d payload=%d",
+				r.logPrefix(), i, p.SequenceNumber, p.Timestamp, len(p.Payload))
+		}
+		log.Printf("[%s] trimPreAudioBuffer: end packets=%d", r.logPrefix(), len(r.preAudioPackets))
+	}
 }
 
 // pushVideoPacket converts an RTP packet to a GStreamer buffer and pushes it to the video appsrc.
@@ -1015,6 +1473,105 @@ func (r *ParticipantRecorder) pushVideoPacket(pkt *rtp.Packet) error {
 			return fmt.Errorf("video appsrc flushing")
 		}
 		return fmt.Errorf("video appsrc push failed: %s", flow.String())
+	}
+	return nil
+}
+
+// initE2EEVideoCaps sets the capabilities on the E2EE video appsrc.
+// This must be called before pushing E2EE video frames.
+//
+// The E2EE video pipeline receives decrypted Annex B H.264 data directly,
+// bypassing the RTP jitterbuffer and depayloader. The caps specify:
+//   - stream-format=byte-stream: Annex B format with start codes
+//   - alignment=au: Each buffer contains complete access units (frames)
+func (r *ParticipantRecorder) initE2EEVideoCaps() {
+	if r.e2eeVideoAppSrc == nil {
+		return
+	}
+	caps := gst.NewCapsFromString("video/x-h264,stream-format=byte-stream,alignment=au")
+	r.e2eeVideoAppSrc.SetCaps(caps)
+	log.Printf("[%s] E2EE video appsrc caps initialized", r.logPrefix())
+}
+
+// pushE2EEVideoFrame pushes a decrypted Annex B video frame to the E2EE video pipeline.
+//
+// Unlike pushVideoPacket which handles RTP packets, this method receives raw H.264
+// Annex B data (with start codes) that has already been decrypted by the FrameAssembler.
+// The data is pushed directly to h264parse, bypassing the RTP jitterbuffer/depayloader.
+//
+// Parameters:
+//   - annexBData: Complete H.264 access unit in Annex B format (with start codes)
+//   - rtpTimestamp: Original RTP timestamp for PTS calculation
+//   - isKeyframe: True if this frame contains an IDR slice (for logging)
+//
+// Returns:
+//   - nil on success
+//   - error if appsrc rejects the buffer
+func (r *ParticipantRecorder) pushE2EEVideoFrame(annexBData []byte, rtpTimestamp uint32, isKeyframe bool) error {
+	if r.e2eeVideoAppSrc == nil {
+		return fmt.Errorf("E2EE video appsrc not initialized")
+	}
+
+	pts, _ := r.videoClockTime(rtpTimestamp)
+
+	buffer := gst.NewBufferFromBytes(annexBData)
+	buffer.SetPresentationTimestamp(pts)
+
+	// Set buffer flags for proper HLS segmentation:
+	// - Keyframes (IDR) should NOT have DELTA_UNIT flag (hlssink segments at these)
+	// - Non-keyframes (P/B frames) MUST have DELTA_UNIT flag
+	if !isKeyframe {
+		buffer.SetFlags(gst.BufferFlagDeltaUnit)
+	}
+
+	r.mu.Lock()
+	r.videoLastPTS = pts
+	r.videoPacketCount++ // Count frames for E2EE path
+	if isKeyframe {
+		r.videoKeyframeCount++
+	}
+	r.videoBytesReceived += int64(len(annexBData))
+	r.mu.Unlock()
+
+	if flow := r.e2eeVideoAppSrc.PushBuffer(buffer); flow != gst.FlowOK {
+		if flow == gst.FlowFlushing {
+			return fmt.Errorf("E2EE video appsrc flushing")
+		}
+		return fmt.Errorf("E2EE video appsrc push failed: %s", flow.String())
+	}
+	return nil
+}
+
+// pushAV1VideoFrame pushes an AV1 OBU stream (one temporal unit per buffer) to the AV1 video pipeline.
+func (r *ParticipantRecorder) pushAV1VideoFrame(obuStream []byte, rtpTimestamp uint32, isKeyframe bool) error {
+	if r.av1VideoAppSrc == nil {
+		return fmt.Errorf("AV1 video appsrc not initialized")
+	}
+
+	pts, relative := r.videoClockTime(rtpTimestamp)
+
+	buffer := gst.NewBufferFromBytes(obuStream)
+	buffer.SetPresentationTimestamp(pts)
+
+	if !isKeyframe {
+		buffer.SetFlags(gst.BufferFlagDeltaUnit)
+	}
+
+	r.mu.Lock()
+	r.videoLastPTS = pts
+	r.videoLastTimestamp = relative
+	r.videoPacketCount++
+	if isKeyframe {
+		r.videoKeyframeCount++
+	}
+	r.videoBytesReceived += int64(len(obuStream))
+	r.mu.Unlock()
+
+	if flow := r.av1VideoAppSrc.PushBuffer(buffer); flow != gst.FlowOK {
+		if flow == gst.FlowFlushing {
+			return fmt.Errorf("AV1 video appsrc flushing")
+		}
+		return fmt.Errorf("AV1 video appsrc push failed: %s", flow.String())
 	}
 	return nil
 }
@@ -1336,8 +1893,36 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 			pliWriter = func(webrtc.SSRC) {}
 		}
 
+		switch strings.ToLower(track.Codec().MimeType) {
+		case strings.ToLower(webrtc.MimeTypeAV1):
+			if err := r.initAV1VideoPipeline(); err != nil {
+				log.Printf("[%s] failed to initialize AV1 video pipeline: %v", r.logPrefix(), err)
+				return
+			}
+			r.attachAV1VideoTrack(ctx, track, pliWriter)
+			return
+		case strings.ToLower(webrtc.MimeTypeH264):
+			if err := r.initH264VideoPipeline(); err != nil {
+				log.Printf("[%s] failed to initialize H.264 video pipeline: %v", r.logPrefix(), err)
+				return
+			}
+		default:
+			log.Printf("[%s] unsupported video codec: %s", r.logPrefix(), track.Codec().MimeType)
+			return
+		}
+
 		var handshakeWait, recordingWait int
+		var videoE2EEErrors, videoE2EEFrames int
 		firstPacket := true
+
+		// Frame-level assembler for E2EE video decryption.
+		// This replaces the old H264E2EEAssembler per-packet approach.
+		// E2EE video requires frame-level decryption because:
+		// 1. LiveKit E2EE encrypts complete Annex B frames
+		// 2. RTP packetization fragments these encrypted frames (FU-A)
+		// 3. We must reassemble and decrypt whole frames
+		var frameAssembler *FrameAssembler
+		var e2eeVideoInitialized bool
 
 		fmtp := track.Codec().SDPFmtpLine
 		log.Printf("[%s] track fmtp: %q", r.logPrefix(), fmtp)
@@ -1352,7 +1937,9 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 			var rtpPacket *rtp.Packet
 			var fromBuffer bool
 
-			if r.recordingActive.Load() {
+			// Check pre-video buffer (for non-E2EE video only)
+			// E2EE video uses frame-level processing and bypasses the RTP buffer
+			if !e2eeVideoInitialized && r.recordingActive.Load() {
 				if buffered := r.dequeuePreVideoPacket(); buffered != nil {
 					rtpPacket = buffered
 					fromBuffer = true
@@ -1375,11 +1962,177 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 					return
 				}
 
+				// Request initial keyframe on first packet (before any processing)
 				if firstPacket {
 					firstPacket = false
 					log.Printf("[%s] requesting initial keyframe via PLI (seq=%d)", r.logPrefix(), rtpPacket.SequenceNumber)
 					r.requestPLI(pliWriter, track.SSRC())
 				}
+
+				// For E2EE video: use FrameAssembler for frame-level decryption
+				// This is the CORRECT approach: collect RTP packets, assemble complete
+				// Annex B frames, decrypt whole frames, push to e2eeVideoAppSrc
+				e2eeEnabled := r.E2EEEnabled()
+				if e2eeEnabled && len(rtpPacket.Payload) > 0 {
+					// Initialize frame assembler on first encrypted packet
+					if frameAssembler == nil {
+						r.mu.Lock()
+						e2eeCtx := r.e2eeCtx
+						r.mu.Unlock()
+
+						if e2eeCtx != nil && e2eeCtx.Enabled() {
+							e2eeCtx.mu.RLock()
+							cipherBlock := e2eeCtx.cipherBlock
+							sifTrailer := e2eeCtx.sifTrailer
+							e2eeCtx.mu.RUnlock()
+
+							frameAssembler = NewFrameAssembler(cipherBlock, sifTrailer, r.logPrefix())
+							r.mu.Lock()
+							r.frameAssembler = frameAssembler
+							r.e2eeVideoEnabled = true
+							r.mu.Unlock()
+							e2eeVideoInitialized = true
+							r.initE2EEVideoCaps()
+							log.Printf("[%s] initialized E2EE video FrameAssembler (frame-level decryption)", r.logPrefix())
+						}
+					}
+
+					if frameAssembler != nil {
+						// Add packet to assembler - it collects by timestamp and decrypts on frame completion
+						frame, err := frameAssembler.AddPacket(rtpPacket)
+						if err != nil {
+							videoE2EEErrors++
+							if videoE2EEErrors <= 10 {
+								log.Printf("[%s] video E2EE frame assembler error (seq=%d): %v",
+									r.logPrefix(), rtpPacket.SequenceNumber, err)
+							}
+							continue
+						}
+
+						if frame == nil {
+							// Packet accumulated, waiting for more packets to complete the frame
+							continue
+						}
+
+						// Complete frame decrypted - process it
+						videoE2EEFrames++
+						isKeyframe := frame.IsKeyframe
+
+						if videoE2EEFrames <= 5 {
+							log.Printf("[%s] E2EE video frame %d decrypted: %d bytes, keyframe=%v, ts=%d",
+								r.logPrefix(), videoE2EEFrames, len(frame.Data), isKeyframe, frame.Timestamp)
+						}
+
+						// E2EE video frame processing:
+						// Handle handshake (wait for first keyframe) and recording activation
+						// using decrypted frame's keyframe status instead of RTP inspection
+
+						if !r.handshakeReady.Load() {
+							if isKeyframe {
+								r.mu.Lock()
+								r.videoKeyframeCount++
+								r.mu.Unlock()
+								r.signalVideoReady()
+								log.Printf("[%s] E2EE: received warm-up keyframe (ts=%d)", r.logPrefix(), frame.Timestamp)
+
+								// If recording was activated before the first keyframe arrived (AUTO_ACTIVATE_RECORDING),
+								// use this very first keyframe to start the pipeline so we don't miss frame 0.
+								if r.recordingActive.Load() && r.recordingKeyframePending.Load() {
+									if !r.pipelineStarted.Load() {
+										log.Printf("[%s] E2EE: starting GStreamer pipeline with first recording keyframe ts=%d", r.logPrefix(), frame.Timestamp)
+										if err := r.pipeline.SetState(gst.StatePlaying); err != nil {
+											log.Printf("[%s] failed to start pipeline: %v", r.logPrefix(), err)
+											return
+										}
+										r.pipeline.DebugBinToDotFileWithTs(gst.DebugGraphShowAll, "publisher_recorder_e2ee")
+										r.pipelineStarted.Store(true)
+									} else {
+										log.Printf("[%s] E2EE: starting active recording with keyframe ts=%d", r.logPrefix(), frame.Timestamp)
+									}
+
+									// Push decrypted Annex B frame to E2EE video appsrc.
+									if err := r.pushE2EEVideoFrame(frame.Data, frame.Timestamp, isKeyframe); err != nil {
+										log.Printf("[%s] E2EE video push error: %v", r.logPrefix(), err)
+										return
+									}
+
+									// Keep a small amount of recently-received audio when starting on
+									// a video keyframe. Audio often arrives ahead of video; retaining
+									// a short preroll prevents dropping the first Opus frames.
+									r.trimPreAudioBuffer(audioKeyframePreroll)
+
+									// Allow audio to start now.
+									r.recordingKeyframePending.Store(false)
+								}
+							} else {
+								handshakeWait++
+								if handshakeWait == 1 || handshakeWait%200 == 0 {
+									log.Printf("[%s] E2EE: warm-up waiting for keyframe, sending PLI", r.logPrefix())
+									r.requestPLI(pliWriter, track.SSRC())
+								}
+							}
+							continue
+						}
+
+						if !r.recordingActive.Load() {
+							// Not recording yet - just skip
+							continue
+						}
+
+						if r.recordingKeyframePending.Load() {
+							if isKeyframe {
+								r.mu.Lock()
+								r.videoKeyframeCount++
+								r.mu.Unlock()
+
+								// Start pipeline on first recording keyframe
+								if !r.pipelineStarted.Load() {
+									log.Printf("[%s] E2EE: starting GStreamer pipeline with first recording keyframe ts=%d", r.logPrefix(), frame.Timestamp)
+									if err := r.pipeline.SetState(gst.StatePlaying); err != nil {
+										log.Printf("[%s] failed to start pipeline: %v", r.logPrefix(), err)
+										return
+									}
+									r.pipeline.DebugBinToDotFileWithTs(gst.DebugGraphShowAll, "publisher_recorder_e2ee")
+									r.pipelineStarted.Store(true)
+								} else {
+									log.Printf("[%s] E2EE: starting active recording with keyframe ts=%d", r.logPrefix(), frame.Timestamp)
+								}
+
+								// Push decrypted Annex B frame to E2EE video appsrc
+								if err := r.pushE2EEVideoFrame(frame.Data, frame.Timestamp, isKeyframe); err != nil {
+									log.Printf("[%s] E2EE video push error: %v", r.logPrefix(), err)
+									return
+								}
+
+								r.trimPreAudioBuffer(audioKeyframePreroll)
+
+								// Allow audio to start now
+								r.recordingKeyframePending.Store(false)
+								continue
+							} else {
+								recordingWait++
+								if recordingWait == 1 || recordingWait%200 == 0 {
+									log.Printf("[%s] E2EE: waiting for keyframe to begin recording, sending PLI", r.logPrefix())
+									r.requestPLI(pliWriter, track.SSRC())
+								}
+								continue
+							}
+						}
+
+						// Normal E2EE video recording: push decrypted Annex B frame
+						if err := r.pushE2EEVideoFrame(frame.Data, frame.Timestamp, isKeyframe); err != nil {
+							log.Printf("[%s] E2EE video push error: %v", r.logPrefix(), err)
+							return
+						}
+						continue
+					}
+				}
+			}
+
+			// Skip non-E2EE processing for E2EE-enabled video tracks
+			// E2EE video is handled completely above via pushE2EEVideoFrame
+			if e2eeVideoInitialized {
+				continue
 			}
 
 			if rtpPacket == nil {
@@ -1515,6 +2268,11 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 					}
 					log.Printf("[%s] primed pipeline with keyframe + %d video packets", r.logPrefix(), primeCount)
 
+					// Keep a small amount of recently-received audio when starting on
+					// a video keyframe. Audio often arrives ahead of video; retaining
+					// a short preroll prevents dropping the first Opus frames.
+					r.trimPreAudioBuffer(audioKeyframePreroll)
+
 					// NOW allow audio to start (video pipeline is primed)
 					r.recordingKeyframePending.Store(false)
 					continue
@@ -1545,6 +2303,225 @@ func (r *ParticipantRecorder) AttachVideoTrack(ctx context.Context, track *webrt
 	}()
 }
 
+func (r *ParticipantRecorder) attachAV1VideoTrack(ctx context.Context, track *webrtc.TrackRemote, pliWriter func(webrtc.SSRC)) {
+	assembler := NewAV1FrameAssembler(r.logPrefix())
+
+	var handshakeWait, recordingWait int
+	var e2eeErrors, e2eeFrames int
+	firstPacket := true
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		rtpPacket, _, err := track.ReadRTP()
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("[%s] AV1 video track read error: %v", r.logPrefix(), err)
+			}
+			return
+		}
+
+		if firstPacket {
+			firstPacket = false
+			log.Printf("[%s] requesting initial AV1 keyframe via PLI (seq=%d)", r.logPrefix(), rtpPacket.SequenceNumber)
+			r.requestPLI(pliWriter, track.SSRC())
+		}
+
+		if len(rtpPacket.Payload) == 0 {
+			continue
+		}
+
+		frame, err := assembler.AddPacket(rtpPacket)
+		if err != nil {
+			if e2eeErrors < 10 {
+				log.Printf("[%s] AV1 depacketize error (seq=%d): %v", r.logPrefix(), rtpPacket.SequenceNumber, err)
+			}
+			e2eeErrors++
+			continue
+		}
+		if frame == nil {
+			continue
+		}
+
+		obuStream := frame.Data
+		isKeyframe := isAV1OBUStreamKeyframe(obuStream)
+
+		if !r.handshakeReady.Load() {
+			if isKeyframe {
+				r.mu.Lock()
+				r.videoKeyframeCount++
+				r.mu.Unlock()
+				r.signalVideoReady()
+				log.Printf("[%s] received warm-up AV1 keyframe (ts=%d)", r.logPrefix(), frame.Timestamp)
+
+				// If recording was activated before the first keyframe arrived (AUTO_ACTIVATE_RECORDING),
+				// use this very first keyframe to start the pipeline so we don't miss frame 0.
+				if r.recordingActive.Load() && r.recordingKeyframePending.Load() {
+					if !r.pipelineStarted.Load() {
+						log.Printf("[%s] starting GStreamer pipeline with first AV1 recording keyframe ts=%d", r.logPrefix(), frame.Timestamp)
+						if err := r.pipeline.SetState(gst.StatePlaying); err != nil {
+							log.Printf("[%s] failed to start pipeline: %v", r.logPrefix(), err)
+							return
+						}
+						r.pipeline.DebugBinToDotFileWithTs(gst.DebugGraphShowAll, "publisher_recorder_av1")
+						r.pipelineStarted.Store(true)
+					} else {
+						log.Printf("[%s] starting active recording with AV1 keyframe ts=%d", r.logPrefix(), frame.Timestamp)
+					}
+
+					frameData := obuStream
+					if r.E2EEEnabled() {
+						r.mu.Lock()
+						e2eeCtx := r.e2eeCtx
+						r.mu.Unlock()
+						if e2eeCtx != nil && e2eeCtx.Enabled() {
+							e2eeCtx.mu.RLock()
+							cipherBlock := e2eeCtx.cipherBlock
+							sifTrailer := e2eeCtx.sifTrailer
+							e2eeCtx.mu.RUnlock()
+
+							decrypted, err := decryptAV1E2EEOBUStream(frameData, cipherBlock, sifTrailer)
+							if err != nil {
+								if e2eeErrors < 10 {
+									log.Printf("[%s] AV1 E2EE decryption error (ts=%d): %v", r.logPrefix(), frame.Timestamp, err)
+								}
+								e2eeErrors++
+								continue
+							}
+							if decrypted == nil {
+								continue
+							}
+							frameData = decrypted
+							e2eeFrames++
+						}
+					}
+
+					if err := r.pushAV1VideoFrame(frameData, frame.Timestamp, isKeyframe); err != nil {
+						log.Printf("[%s] AV1 video push error: %v", r.logPrefix(), err)
+						return
+					}
+
+					// Keep a small amount of recently-received audio when starting on
+					// a video keyframe. Audio often arrives ahead of video; retaining
+					// a short preroll prevents dropping the first Opus frames.
+					r.trimPreAudioBuffer(audioKeyframePreroll)
+
+					r.recordingKeyframePending.Store(false)
+				}
+			} else {
+				handshakeWait++
+				if handshakeWait == 1 || handshakeWait%200 == 0 {
+					log.Printf("[%s] warm-up waiting for AV1 keyframe, sending PLI", r.logPrefix())
+					r.requestPLI(pliWriter, track.SSRC())
+				}
+			}
+			continue
+		}
+
+		if !r.recordingActive.Load() {
+			continue
+		}
+
+		if r.recordingKeyframePending.Load() {
+			if isKeyframe {
+				// Start pipeline on first recording keyframe to avoid invalid HLS segments.
+				if !r.pipelineStarted.Load() {
+					log.Printf("[%s] starting GStreamer pipeline with first AV1 recording keyframe ts=%d", r.logPrefix(), frame.Timestamp)
+					if err := r.pipeline.SetState(gst.StatePlaying); err != nil {
+						log.Printf("[%s] failed to start pipeline: %v", r.logPrefix(), err)
+						return
+					}
+					r.pipeline.DebugBinToDotFileWithTs(gst.DebugGraphShowAll, "publisher_recorder_av1")
+					r.pipelineStarted.Store(true)
+				} else {
+					log.Printf("[%s] starting active recording with AV1 keyframe ts=%d", r.logPrefix(), frame.Timestamp)
+				}
+
+				// Decrypt (if needed) and push first keyframe BEFORE allowing audio to start.
+				frameData := obuStream
+				if r.E2EEEnabled() {
+					r.mu.Lock()
+					e2eeCtx := r.e2eeCtx
+					r.mu.Unlock()
+					if e2eeCtx != nil && e2eeCtx.Enabled() {
+						e2eeCtx.mu.RLock()
+						cipherBlock := e2eeCtx.cipherBlock
+						sifTrailer := e2eeCtx.sifTrailer
+						e2eeCtx.mu.RUnlock()
+
+						decrypted, err := decryptAV1E2EEOBUStream(frameData, cipherBlock, sifTrailer)
+						if err != nil {
+							if e2eeErrors < 10 {
+								log.Printf("[%s] AV1 E2EE decryption error (ts=%d): %v", r.logPrefix(), frame.Timestamp, err)
+							}
+							e2eeErrors++
+							continue
+						}
+						if decrypted == nil {
+							continue
+						}
+						frameData = decrypted
+						e2eeFrames++
+					}
+				}
+
+				if err := r.pushAV1VideoFrame(frameData, frame.Timestamp, isKeyframe); err != nil {
+					log.Printf("[%s] AV1 video push error: %v", r.logPrefix(), err)
+					return
+				}
+
+				r.trimPreAudioBuffer(audioKeyframePreroll)
+
+				r.recordingKeyframePending.Store(false)
+				continue
+			}
+
+			recordingWait++
+			if recordingWait == 1 || recordingWait%200 == 0 {
+				log.Printf("[%s] waiting for AV1 keyframe to begin recording, sending PLI", r.logPrefix())
+				r.requestPLI(pliWriter, track.SSRC())
+			}
+			continue
+		}
+
+		frameData := obuStream
+		if r.E2EEEnabled() {
+			r.mu.Lock()
+			e2eeCtx := r.e2eeCtx
+			r.mu.Unlock()
+			if e2eeCtx != nil && e2eeCtx.Enabled() {
+				e2eeCtx.mu.RLock()
+				cipherBlock := e2eeCtx.cipherBlock
+				sifTrailer := e2eeCtx.sifTrailer
+				e2eeCtx.mu.RUnlock()
+
+				decrypted, err := decryptAV1E2EEOBUStream(frameData, cipherBlock, sifTrailer)
+				if err != nil {
+					if e2eeErrors < 10 {
+						log.Printf("[%s] AV1 E2EE decryption error (ts=%d): %v", r.logPrefix(), frame.Timestamp, err)
+					}
+					e2eeErrors++
+					continue
+				}
+				if decrypted == nil {
+					continue
+				}
+				frameData = decrypted
+				e2eeFrames++
+			}
+		}
+
+		if err := r.pushAV1VideoFrame(frameData, frame.Timestamp, isKeyframe); err != nil {
+			log.Printf("[%s] AV1 video push error: %v", r.logPrefix(), err)
+			return
+		}
+	}
+}
+
 // AttachAudioTrack attaches an audio track for recording.
 //
 // Audio packets are only pushed to GStreamer after recording is activated
@@ -1555,81 +2532,239 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 		defer r.wg.Done()
 		log.Printf("[%s] audio track subscribed (sid=%s, codec=%s, payloadType=%d)",
 			r.logPrefix(), track.ID(), track.Codec().MimeType, track.PayloadType())
-		for {
-			var rtpPacket *rtp.Packet
-			var fromBuffer bool
 
-			if r.recordingActive.Load() && !r.recordingKeyframePending.Load() {
-				if buffered := r.dequeuePreAudioPacket(); buffered != nil {
-					rtpPacket = buffered
-					fromBuffer = true
+		// We feed raw Opus payloads to GStreamer (bypassing rtpjitterbuffer/rtpopusdepay),
+		// so we must reorder RTP packets ourselves to keep timestamps monotonic.
+		//
+		// We also need to tolerate out-of-order delivery *around the recording start*
+		// boundary: some early packets can arrive after the video keyframe toggles
+		// recordingKeyframePending=false. To avoid dropping these, we hold a short
+		// startup window and pick the earliest sequence number observed.
+		const (
+			maxReorderBuffer        = 512
+			startupCollectWindow    = 250 * time.Millisecond
+			missingSequenceMaxWait  = 200 * time.Millisecond
+			startupMinBufferedPkts  = 20
+			startupMaxCollectWindow = 750 * time.Millisecond
+		)
+
+		reorderBuf := make(map[uint16]*rtp.Packet)
+		var expectedSeq uint16
+		expectedSeqSet := false
+		var missingSince time.Time
+		var recordingStarted bool
+		var collecting bool
+		var collectUntil time.Time
+		var collectDeadline time.Time
+
+		seqLess := func(a, b uint16) bool {
+			return int16(a-b) < 0
+		}
+
+		minSeqInBuffer := func() (uint16, bool) {
+			var min uint16
+			ok := false
+			for seq := range reorderBuf {
+				if !ok || seqLess(seq, min) {
+					min = seq
+					ok = true
 				}
 			}
+			return min, ok
+		}
 
-			if rtpPacket == nil {
-				select {
-				case <-ctx.Done():
-					return
-				default:
+		pushPacket := func(pkt *rtp.Packet) bool {
+			if pkt == nil {
+				return true
+			}
+			if len(pkt.Payload) == 0 {
+				r.mu.Lock()
+				r.audioEmptyPacketCount++
+				r.mu.Unlock()
+				return true
+			}
+
+			audioPTS, relative := r.audioClockTime(pkt.Timestamp)
+			r.mu.Lock()
+			r.audioPacketCount++
+			r.audioBytesReceived += int64(len(pkt.Payload))
+			if !r.audioInitialized {
+				r.audioInitialized = true
+				log.Printf("[%s] audio initialized (raw Opus mode, caps set in constructor)", r.logPrefix())
+			}
+			r.audioLastPTS = audioPTS
+			r.audioLastTimestamp = relative
+			r.mu.Unlock()
+
+			buffer := gst.NewBufferFromBytes(pkt.Payload)
+			buffer.SetPresentationTimestamp(audioPTS)
+
+			if flow := r.audioAppSrc.PushBuffer(buffer); flow != gst.FlowOK {
+				if flow != gst.FlowFlushing {
+					log.Printf("[%s] audio appsrc push returned %s", r.logPrefix(), flow.String())
+				}
+				return false
+			}
+			return true
+		}
+
+		tryFlush := func(now time.Time) bool {
+			if !expectedSeqSet {
+				return true
+			}
+			for {
+				pkt, ok := reorderBuf[expectedSeq]
+				if ok {
+					delete(reorderBuf, expectedSeq)
+					expectedSeq++
+					missingSince = time.Time{}
+					if !pushPacket(pkt) {
+						return false
+					}
+					continue
 				}
 
-				var err error
-				rtpPacket, _, err = track.ReadRTP()
+				if missingSince.IsZero() {
+					missingSince = now
+					break
+				}
+				if now.Sub(missingSince) >= missingSequenceMaxWait {
+					// Consider this packet lost and move forward so we don't stall forever.
+					expectedSeq++
+					missingSince = now
+					continue
+				}
+				break
+			}
+			return true
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			recordingAllowed := r.recordingActive.Load() && !r.recordingKeyframePending.Load()
+			if !recordingAllowed {
+				recordingStarted = false
+				collecting = false
+				expectedSeqSet = false
+				missingSince = time.Time{}
+				clear(reorderBuf)
+
+				rtpPacket, _, err := track.ReadRTP()
 				if err != nil {
 					if ctx.Err() == nil {
 						log.Printf("[%s] audio track read error: %v", r.logPrefix(), err)
 					}
 					return
 				}
-			}
 
-			if rtpPacket == nil {
-				continue
-			}
-
-			if !r.recordingActive.Load() || r.recordingKeyframePending.Load() {
-				if !fromBuffer {
-					r.enqueuePreAudioPacket(rtpPacket)
+				if r.E2EEEnabled() && len(rtpPacket.Payload) > 0 {
+					r.mu.Lock()
+					e2eeCtx := r.e2eeCtx
+					r.mu.Unlock()
+					decrypted, err := e2eeCtx.DecryptAudio(rtpPacket.Payload)
+					if err != nil {
+						log.Printf("[%s] audio E2EE decryption error (seq=%d): %v", r.logPrefix(), rtpPacket.SequenceNumber, err)
+						continue
+					}
+					if decrypted == nil {
+						continue
+					}
+					rtpPacket.Payload = decrypted
 				}
+
+				r.enqueuePreAudioPacket(rtpPacket)
 				continue
 			}
-			r.mu.Lock()
-			r.audioPacketCount++
-			if len(rtpPacket.Payload) == 0 {
-				r.audioEmptyPacketCount++
-				r.mu.Unlock()
-				continue
-			}
-			r.audioBytesReceived += int64(len(rtpPacket.Payload))
-			if !r.audioInitialized {
-				capsStr := fmt.Sprintf("application/x-rtp,media=audio,encoding-name=OPUS,clock-rate=48000,payload=%d", rtpPacket.PayloadType)
-				caps := gst.NewCapsFromString(capsStr)
-				_ = r.audioAppSrc.SetProperty("caps", caps)
-				r.audioInitialized = true
-				log.Printf("[%s] audio caps initialized: %s", r.logPrefix(), capsStr)
-			}
-			r.mu.Unlock()
 
-			pts, relative := r.audioClockTime(rtpPacket.Timestamp)
-			rtpPacket.Timestamp = relative
+			now := time.Now()
+			if !recordingStarted {
+				recordingStarted = true
+				collecting = true
+				collectUntil = now.Add(startupCollectWindow)
+				collectDeadline = now.Add(startupMaxCollectWindow)
 
-			data, err := rtpPacket.Marshal()
+				for {
+					buffered := r.dequeuePreAudioPacket()
+					if buffered == nil {
+						break
+					}
+					if _, exists := reorderBuf[buffered.SequenceNumber]; !exists {
+						reorderBuf[buffered.SequenceNumber] = buffered
+					}
+				}
+			}
+
+			rtpPacket, _, err := track.ReadRTP()
 			if err != nil {
-				log.Printf("[%s] marshal audio RTP failed: %v", r.logPrefix(), err)
-				continue
+				if ctx.Err() == nil {
+					log.Printf("[%s] audio track read error: %v", r.logPrefix(), err)
+				}
+				return
+			}
+			now = time.Now()
+
+			if r.E2EEEnabled() && len(rtpPacket.Payload) > 0 {
+				r.mu.Lock()
+				e2eeCtx := r.e2eeCtx
+				r.mu.Unlock()
+				decrypted, err := e2eeCtx.DecryptAudio(rtpPacket.Payload)
+				if err != nil {
+					log.Printf("[%s] audio E2EE decryption error (seq=%d): %v", r.logPrefix(), rtpPacket.SequenceNumber, err)
+					continue
+				}
+				if decrypted == nil {
+					continue
+				}
+				rtpPacket.Payload = decrypted
 			}
 
-			buffer := gst.NewBufferFromBytes(data)
-			buffer.SetPresentationTimestamp(pts)
-			r.mu.Lock()
-			r.audioLastPTS = pts
-			r.audioLastTimestamp = relative
-			r.mu.Unlock()
+			if _, exists := reorderBuf[rtpPacket.SequenceNumber]; !exists {
+				reorderBuf[rtpPacket.SequenceNumber] = rtpPacket
+			}
 
-			if flow := r.audioAppSrc.PushBuffer(buffer); flow != gst.FlowOK {
-				if flow != gst.FlowFlushing {
-					log.Printf("[%s] audio appsrc push returned %s", r.logPrefix(), flow.String())
+			if collecting {
+				if len(reorderBuf) >= startupMinBufferedPkts || now.After(collectUntil) || now.After(collectDeadline) {
+					minSeq, ok := minSeqInBuffer()
+					if ok {
+						expectedSeq = minSeq
+						expectedSeqSet = true
+						collecting = false
+						missingSince = time.Time{}
+					}
 				}
+			}
+
+			if len(reorderBuf) > maxReorderBuffer {
+				// Too much buffered: assume some packets were lost and jump forward to the
+				// closest available sequence number so we don't stall indefinitely.
+				if expectedSeqSet {
+					bestSeq := expectedSeq
+					bestDist := uint16(0xFFFF)
+					for seq := range reorderBuf {
+						dist := seq - expectedSeq
+						if dist < bestDist {
+							bestDist = dist
+							bestSeq = seq
+						}
+					}
+					expectedSeq = bestSeq
+					missingSince = time.Time{}
+				} else {
+					minSeq, ok := minSeqInBuffer()
+					if ok {
+						expectedSeq = minSeq
+						expectedSeqSet = true
+						collecting = false
+					}
+				}
+			}
+
+			if !tryFlush(time.Now()) {
 				return
 			}
 		}
@@ -1640,13 +2775,34 @@ func (r *ParticipantRecorder) AttachAudioTrack(ctx context.Context, track *webrt
 // Sends EOS to the video appsrc element.
 func (r *ParticipantRecorder) VideoStreamEnded() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.videoEnded {
+		r.mu.Unlock()
 		return
 	}
 	r.videoEnded = true
-	if r.videoAppSrc != nil {
-		r.videoAppSrc.EndStream()
+	videoCodec := r.videoCodec
+	e2eeEnabled := r.e2eeVideoEnabled
+	videoAppSrc := r.videoAppSrc
+	e2eeVideoAppSrc := r.e2eeVideoAppSrc
+	av1VideoAppSrc := r.av1VideoAppSrc
+	r.mu.Unlock()
+
+	if strings.EqualFold(videoCodec, webrtc.MimeTypeAV1) {
+		if av1VideoAppSrc != nil {
+			av1VideoAppSrc.EndStream()
+		}
+		return
+	}
+
+	if e2eeEnabled {
+		if e2eeVideoAppSrc != nil {
+			e2eeVideoAppSrc.EndStream()
+		}
+		return
+	}
+
+	if videoAppSrc != nil {
+		videoAppSrc.EndStream()
 	}
 }
 
@@ -1686,16 +2842,170 @@ func (r *ParticipantRecorder) Stop() {
 		r.clearPreVideoBuffer()
 		r.clearPreAudioBuffer()
 
-		if err := normalizeHLSTimestamps(r.outputDir); err != nil {
-			log.Printf("[%s] failed to normalize HLS timestamps: %v", r.logPrefix(), err)
-		} else {
-			log.Printf("[%s] normalized HLS timestamps", r.logPrefix())
+		r.mu.Lock()
+		videoCodec := r.videoCodec
+		r.mu.Unlock()
+
+		if strings.EqualFold(videoCodec, webrtc.MimeTypeH264) {
+			if err := normalizeHLSTimestamps(r.outputDir); err != nil {
+				log.Printf("[%s] failed to normalize HLS timestamps: %v", r.logPrefix(), err)
+			} else {
+				log.Printf("[%s] normalized HLS timestamps", r.logPrefix())
+			}
+
+			if err := fixHLSPlaylist(r.outputDir); err != nil {
+				log.Printf("[%s] failed to fix HLS playlist: %v", r.logPrefix(), err)
+			} else {
+				log.Printf("[%s] fixed HLS playlist final segment duration", r.logPrefix())
+			}
 		}
 
-		if err := fixHLSPlaylist(r.outputDir); err != nil {
-			log.Printf("[%s] failed to fix HLS playlist: %v", r.logPrefix(), err)
-		} else {
-			log.Printf("[%s] fixed HLS playlist final segment duration", r.logPrefix())
+		// Process audio segments to extract init and strip duplicate moov data
+		// This converts self-contained segments (with ftyp+moov in each) to proper CMAF format
+		// with a separate init segment (audio_init.mp4) and media-only segments
+		if err := r.processAudioSegments(); err != nil {
+			log.Printf("[%s] failed to process audio segments: %v", r.logPrefix(), err)
+		}
+
+		if strings.EqualFold(videoCodec, webrtc.MimeTypeAV1) {
+			if err := r.processAV1VideoSegments(); err != nil {
+				log.Printf("[%s] failed to process video segments: %v", r.logPrefix(), err)
+			}
+			if err := r.writeAV1VideoHLSPlaylist(); err != nil {
+				log.Printf("[%s] failed to write video HLS playlist: %v", r.logPrefix(), err)
+			} else {
+				log.Printf("[%s] wrote video.m3u8 HLS playlist", r.logPrefix())
+			}
+		}
+
+		// Finalize audio manifest with all segments using ACTUAL timing from segment data
+		// CRITICAL: With real-time S3 upload, files are deleted after upload, so we need to
+		// use the timing info tracked by the uploader. If no uploader, fall back to disk.
+		if r.audioManifest != nil {
+			const opusTimescale = 48000 // Opus uses 48kHz sample rate
+			var segmentsAdded int
+
+			// Try to get segment info from S3 uploader (files may be deleted)
+			if r.s3Uploader != nil {
+				trackedSegments := r.s3Uploader.GetAudioSegmentsInfo()
+				for _, seg := range trackedSegments {
+					r.audioManifest.AddSegment(seg.Index, seg.Filename, seg.Duration, seg.StartTime)
+					log.Printf("[%s] manifest segment %d (from S3 tracker): file=%s, startTime=%.3fs, duration=%.3fs",
+						r.logPrefix(), seg.Index, seg.Filename, seg.StartTime, seg.Duration)
+				}
+				segmentsAdded = len(trackedSegments)
+				log.Printf("[%s] populated manifest from S3 uploader: %d segments", r.logPrefix(), segmentsAdded)
+			}
+
+			// If no segments from uploader, try reading from disk (non-realtime upload case)
+			if segmentsAdded == 0 {
+				var cumulativeStartTime float64 = 0
+				for i := 0; ; i++ {
+					segmentFile := fmt.Sprintf("audio%05d.m4s", i)
+					segmentPath := filepath.Join(r.outputDir, segmentFile)
+					if _, err := os.Stat(segmentPath); os.IsNotExist(err) {
+						break
+					}
+
+					// Parse segment to get actual timing from tfdt and duration from trun
+					segInfo, err := getAudioSegmentInfo(segmentPath, opusTimescale)
+					if err != nil {
+						// Fall back to cumulative duration if parsing fails
+						log.Printf("[%s] warning: failed to parse segment %d timing: %v, using cumulative", r.logPrefix(), i, err)
+						duration := float64(r.audioManifest.manifest.SegmentDuration)
+						r.audioManifest.AddSegment(i, segmentFile, duration, cumulativeStartTime)
+						cumulativeStartTime += duration
+						segmentsAdded++
+						continue
+					}
+
+					// Use tfdt-based start time if it's valid (non-zero or first segment)
+					// If all segments have tfdt=0 (splitmuxsink resets timing), use cumulative
+					startTime := segInfo.StartTimeSeconds
+					if i > 0 && segInfo.BaseDecodeTime == 0 {
+						// tfdt is 0 for non-first segment, means splitmuxsink resets timing per segment
+						// Fall back to cumulative approach
+						log.Printf("[%s] segment %d: tfdt=0 (reset), using cumulative startTime=%.3fs, duration=%.3fs",
+							r.logPrefix(), i, cumulativeStartTime, segInfo.Duration)
+						r.audioManifest.AddSegment(i, segmentFile, segInfo.Duration, cumulativeStartTime)
+						cumulativeStartTime += segInfo.Duration
+					} else {
+						log.Printf("[%s] segment %d: tfdt=%.3fs, duration=%.3fs (tfdt_samples=%d)",
+							r.logPrefix(), i, startTime, segInfo.Duration, segInfo.BaseDecodeTime)
+						r.audioManifest.AddSegment(i, segmentFile, segInfo.Duration, startTime)
+						// Update cumulative for potential fallback
+						cumulativeStartTime = startTime + segInfo.Duration
+					}
+					segmentsAdded++
+				}
+			}
+
+			if err := r.audioManifest.Write(); err != nil {
+				log.Printf("[%s] failed to write audio manifest: %v", r.logPrefix(), err)
+			} else {
+				log.Printf("[%s] wrote audio manifest with %d segments", r.logPrefix(), r.audioManifest.SegmentCount())
+			}
+
+			// Also write HLS playlist for standard player compatibility
+			if err := r.audioManifest.WriteHLSPlaylist(); err != nil {
+				log.Printf("[%s] failed to write audio HLS playlist: %v", r.logPrefix(), err)
+			} else {
+				log.Printf("[%s] wrote audio.m3u8 HLS playlist", r.logPrefix())
+			}
+		}
+
+		// Generate video thumbnails (optional). For post-processing uploads, thumbnails are
+		// created locally before the directory upload. For real-time S3 uploads, video segments
+		// may be deleted locally, so we generate thumbnails from the uploaded HLS objects after
+		// the real-time uploader finishes.
+		var (
+			thumbCfg             thumbnailConfig
+			faceCfg              *faceExtractionConfig
+			generateThumbsFromS3 bool
+			generatedThumbCount  int
+			wroteLocalThumbsM3U8 bool
+			uploadedThumbsFromS3 bool
+		)
+		if r.cfg != nil && r.cfg.ThumbnailsEnabled {
+			tc, err := thumbnailConfigFromConfig(r.cfg)
+			if err != nil {
+				log.Printf("[%s] invalid thumbnail config: %v", r.logPrefix(), err)
+			} else {
+				thumbCfg = tc
+				generateThumbsFromS3 = r.s3Uploader != nil && r.cfg.S3RealTimeUpload
+				if fc, err := faceExtractionConfigFromConfig(r.cfg); err != nil {
+					log.Printf("[%s] invalid face extraction config: %v", r.logPrefix(), err)
+				} else if fc.Enabled {
+					faceCfg = &fc
+				}
+
+				if !generateThumbsFromS3 {
+					videoPlaylist := filepath.Join(r.outputDir, "video.m3u8")
+					if _, err := os.Stat(videoPlaylist); err != nil {
+						log.Printf("[%s] skipping thumbnails: video.m3u8 not found: %v", r.logPrefix(), err)
+					} else {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+						thumbnails, faces, warnings, genErr := generateThumbnailsWithOptionalFaceExtraction(ctx, videoPlaylist, r.outputDir, thumbCfg, faceCfg)
+						cancel()
+						for _, warn := range warnings {
+							log.Printf("[%s] thumbnail post-processing warning: %v", r.logPrefix(), warn)
+						}
+						if faces != nil && faces.Saved > 0 {
+							log.Printf("[%s] extracted %d unique faces (detected=%d, nonface=%d, dup=%d, similar=%d, limit=%d, groups=%d)",
+								r.logPrefix(), faces.Saved, faces.Detected, faces.FilteredNonFace, faces.SkippedDuplicate, faces.SkippedSimilar, faces.SkippedLimit, faces.Groups)
+						}
+						if genErr != nil {
+							log.Printf("[%s] failed to generate thumbnails: %v", r.logPrefix(), genErr)
+						} else if err := writeThumbnailPlaylist(filepath.Join(r.outputDir, "thumbnails.m3u8"), thumbnails, thumbCfg.Interval); err != nil {
+							log.Printf("[%s] failed to write thumbnails.m3u8: %v", r.logPrefix(), err)
+						} else {
+							generatedThumbCount = len(thumbnails)
+							wroteLocalThumbsM3U8 = true
+							log.Printf("[%s] generated %d thumbnails and wrote thumbnails.m3u8", r.logPrefix(), len(thumbnails))
+						}
+					}
+				}
+			}
 		}
 
 		// Close real-time S3 uploader if enabled
@@ -1703,6 +3013,20 @@ func (r *ParticipantRecorder) Stop() {
 			if err := r.s3Uploader.Close(); err != nil {
 				log.Printf("[%s] failed to close S3 uploader: %v", r.logPrefix(), err)
 			}
+		}
+
+		if generateThumbsFromS3 && r.s3Uploader != nil && r.cfg != nil && r.cfg.ThumbnailsEnabled {
+			if err := generateAndUploadThumbnailsFromS3(r.s3Uploader, thumbCfg, faceCfg); err != nil {
+				log.Printf("[%s] failed to generate/upload thumbnails from S3: %v", r.logPrefix(), err)
+			} else {
+				uploadedThumbsFromS3 = true
+				log.Printf("[%s] generated and uploaded thumbnails (from S3 HLS) and thumbnails.m3u8", r.logPrefix())
+			}
+		}
+
+		if wroteLocalThumbsM3U8 && r.s3Uploader != nil && r.cfg != nil && r.cfg.S3RealTimeUpload && r.cfg.ThumbnailsEnabled {
+			log.Printf("[%s] wrote thumbnails.m3u8 locally for real-time upload (thumbnails=%d, uploadedFromS3=%v)",
+				r.logPrefix(), generatedThumbCount, uploadedThumbsFromS3)
 		}
 
 		videoSeconds := float64(r.videoLastPTS) / 1_000_000_000
@@ -1730,7 +3054,7 @@ func (r *ParticipantRecorder) Stop() {
 }
 
 // OutputDirectory returns the absolute path to the directory containing
-// the recording files (output.ts, playlist.m3u8, segment*.ts).
+// the recording files (e.g. video.m3u8, video*.ts or video*.m4s, audio.m3u8, audio*.m4s, audio.json).
 func (r *ParticipantRecorder) OutputDirectory() string {
 	return r.outputDir
 }
@@ -1743,19 +3067,202 @@ func (r *ParticipantRecorder) Summary() RecordingSummary {
 		Room:        r.room,
 	}
 
-	outputFile := filepath.Join(r.outputDir, "output.ts")
-	summary.OutputFile = outputFile
-
-	stat, err := os.Stat(outputFile)
-	if err != nil {
-		summary.Err = fmt.Errorf("failed to stat recording: %w", err)
-		return summary
+	videoPlaylist := filepath.Join(r.outputDir, "video.m3u8")
+	if _, err := os.Stat(videoPlaylist); err == nil {
+		summary.OutputFile = videoPlaylist
+	} else {
+		summary.OutputFile = r.outputDir
 	}
 
-	summary.SizeBytes = stat.Size()
+	sizeBytes, err := directorySizeBytes(r.outputDir)
+	if err != nil {
+		summary.Err = fmt.Errorf("failed to stat recording directory: %w", err)
+		return summary
+	}
+	summary.SizeBytes = sizeBytes
 	summary.Duration = time.Since(r.startTime)
 	summary.VideoPackets = r.videoPacketCount
 	summary.AudioPackets = r.audioPacketCount
 
 	return summary
+}
+
+func directorySizeBytes(dir string) (int64, error) {
+	var total int64
+	err := filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	return total, err
+}
+
+// processAudioSegments processes all audio segments to create proper CMAF format.
+// It extracts the init segment from the first audio segment (audio_init.mp4) and
+// strips the duplicate init data from all segments, leaving only media data.
+//
+// This is necessary because GStreamer's splitmuxsink+cmafmux creates self-contained
+// segments where each .m4s has ftyp+moov (init data) + moof+mdat (media). For proper
+// HLS/CMAF playback, we need a separate init segment referenced by EXT-X-MAP.
+func (r *ParticipantRecorder) processAudioSegments() error {
+	initPath := filepath.Join(r.outputDir, "audio_init.mp4")
+	segmentsProcessed := 0
+
+	// Process all audio segments
+	for i := 0; ; i++ {
+		segmentName := fmt.Sprintf("audio%05d.m4s", i)
+		segmentPath := filepath.Join(r.outputDir, segmentName)
+
+		// Check if segment exists
+		if _, err := os.Stat(segmentPath); os.IsNotExist(err) {
+			break // No more segments
+		}
+
+		// Process the segment
+		mediaData, err := processFMP4Segment(segmentPath, i, initPath)
+		if err != nil {
+			log.Printf("[%s] failed to process %s: %v (keeping original)", r.logPrefix(), segmentName, err)
+			continue
+		}
+
+		// Ensure styp prefix for CMAF compliance
+		mediaData = ensureStypPrefix(mediaData, "opus")
+
+		// Overwrite the segment file with processed data
+		if err := os.WriteFile(segmentPath, mediaData, 0644); err != nil {
+			log.Printf("[%s] failed to write processed %s: %v", r.logPrefix(), segmentName, err)
+			continue
+		}
+
+		segmentsProcessed++
+	}
+
+	// Check if init was created
+	if info, err := os.Stat(initPath); err == nil {
+		// Ensure Opus init segment carries correct pre-skip (decoder priming) metadata.
+		// Without it, decoded PCM has extra samples at the start and strict waveform
+		// comparisons (and some players) will drift out of sync.
+		if err := setOpusPreSkipInInitSegment(initPath, 312); err != nil {
+			log.Printf("[%s] warning: failed to set Opus pre-skip in audio_init.mp4: %v", r.logPrefix(), err)
+		}
+
+		log.Printf("[%s] audio segment processing complete: %d segments, init=%d bytes",
+			r.logPrefix(), segmentsProcessed, info.Size())
+	} else if segmentsProcessed > 0 {
+		log.Printf("[%s] warning: processed %d segments but audio_init.mp4 was not created",
+			r.logPrefix(), segmentsProcessed)
+	}
+
+	return nil
+}
+
+func (r *ParticipantRecorder) processAV1VideoSegments() error {
+	initPath := filepath.Join(r.outputDir, "video_init.mp4")
+	segmentsProcessed := 0
+
+	for i := 0; ; i++ {
+		segmentName := fmt.Sprintf("video%05d.m4s", i)
+		segmentPath := filepath.Join(r.outputDir, segmentName)
+
+		if _, err := os.Stat(segmentPath); os.IsNotExist(err) {
+			break
+		}
+
+		mediaData, err := processFMP4Segment(segmentPath, i, initPath)
+		if err != nil {
+			log.Printf("[%s] failed to process %s: %v (keeping original)", r.logPrefix(), segmentName, err)
+			continue
+		}
+
+		mediaData = ensureStypPrefix(mediaData, "av01")
+
+		if err := os.WriteFile(segmentPath, mediaData, 0644); err != nil {
+			log.Printf("[%s] failed to write processed %s: %v", r.logPrefix(), segmentName, err)
+			continue
+		}
+
+		segmentsProcessed++
+	}
+
+	if info, err := os.Stat(initPath); err == nil {
+		log.Printf("[%s] video segment processing complete: %d segments, init=%d bytes",
+			r.logPrefix(), segmentsProcessed, info.Size())
+	} else if segmentsProcessed > 0 {
+		log.Printf("[%s] warning: processed %d segments but video_init.mp4 was not created",
+			r.logPrefix(), segmentsProcessed)
+	}
+
+	return nil
+}
+
+func (r *ParticipantRecorder) writeAV1VideoHLSPlaylist() error {
+	initFile := "video_init.mp4"
+	initPath := filepath.Join(r.outputDir, initFile)
+	timescale, err := getMP4TrackTimescale(initPath)
+	if err != nil {
+		log.Printf("[%s] warning: failed to parse video init timescale: %v (falling back to 90000)", r.logPrefix(), err)
+		timescale = 90000
+	}
+
+	type seg struct {
+		file     string
+		duration float64
+	}
+
+	var segments []seg
+	for i := 0; ; i++ {
+		segmentFile := fmt.Sprintf("video%05d.m4s", i)
+		segmentPath := filepath.Join(r.outputDir, segmentFile)
+		if _, err := os.Stat(segmentPath); os.IsNotExist(err) {
+			break
+		}
+
+		segInfo, err := getAudioSegmentInfo(segmentPath, timescale)
+		if err != nil {
+			log.Printf("[%s] warning: failed to parse video segment %d timing: %v (using target duration)", r.logPrefix(), i, err)
+			segments = append(segments, seg{file: segmentFile, duration: float64(r.segmentDuration)})
+			continue
+		}
+		segments = append(segments, seg{file: segmentFile, duration: segInfo.Duration})
+	}
+
+	if len(segments) == 0 {
+		return fmt.Errorf("no video segments found")
+	}
+
+	maxDuration := 0.0
+	for _, s := range segments {
+		if s.duration > maxDuration {
+			maxDuration = s.duration
+		}
+	}
+	targetDuration := int(maxDuration) + 1
+
+	var content string
+	content += "#EXTM3U\n"
+	content += "#EXT-X-VERSION:7\n"
+	content += "#EXT-X-MEDIA-SEQUENCE:0\n"
+	content += fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", targetDuration)
+	content += "#EXT-X-INDEPENDENT-SEGMENTS\n"
+	content += "\n"
+	content += fmt.Sprintf("#EXT-X-MAP:URI=\"%s\"\n", initFile)
+	content += "\n"
+
+	for _, s := range segments {
+		content += fmt.Sprintf("#EXTINF:%.3f,\n", s.duration)
+		content += s.file + "\n"
+	}
+
+	content += "#EXT-X-ENDLIST\n"
+
+	playlistPath := filepath.Join(r.outputDir, "video.m3u8")
+	if err := os.WriteFile(playlistPath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("write video HLS playlist: %w", err)
+	}
+	return nil
 }
