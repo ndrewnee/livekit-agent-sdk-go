@@ -1060,33 +1060,36 @@ func (w *UniversalWorker) handleJobAssignment(assignment *livekit.JobAssignment)
 	// Set up room callbacks
 	roomCallback := w.createRoomCallbacks(job)
 
-	// Use direct API key connection instead of agent token
-	// Agent tokens from the server don't have permissions to receive video media data
-	// This was discovered by comparing TestRobustReceiver (works with API key) vs
-	// TestParticipantHLSRecorder (fails with agent token - only gets empty video packets)
+	// Prefer the server-provided assignment token when joining the room.
+	// LiveKit Cloud ties job lifecycle to the assigned agent participant; using the
+	// assignment token ensures the worker is properly associated with the job.
+	//
+	// Fall back to API key connection only if the assignment token is missing.
+	var (
+		room *lksdk.Room
+		err  error
+	)
+	if assignment.Token != "" {
+		room, err = connectToRoomWithToken(roomURL, assignment.Token, roomCallback, lksdk.WithAutoSubscribe(false))
+	} else {
+		// For the fallback connection, use metadata values if provided.
+		participantIdentity := metadata.ParticipantIdentity
+		if participantIdentity == "" {
+			participantIdentity = fmt.Sprintf("agent-%s", job.Id)
+			w.logger.Info("Generated agent identity", "identity", participantIdentity, "jobID", job.Id)
+		}
 
-	// For the connection, use metadata values if provided
-	// If ParticipantIdentity is empty, ensure we have a valid identity
-	participantIdentity := metadata.ParticipantIdentity
-	if participantIdentity == "" {
-		// Generate a unique identity for the agent
-		participantIdentity = fmt.Sprintf("agent-%s", job.Id)
-		w.logger.Info("Generated agent identity", "identity", participantIdentity, "jobID", job.Id)
+		room, err = connectToRoom(roomURL, lksdk.ConnectInfo{
+			APIKey:                w.apiKey,
+			APISecret:             w.apiSecret,
+			RoomName:              job.Room.Name,
+			ParticipantIdentity:   participantIdentity,
+			ParticipantName:       metadata.ParticipantName,
+			ParticipantMetadata:   metadata.ParticipantMetadata,
+			ParticipantAttributes: metadata.ParticipantAttributes,
+			ParticipantKind:       lksdk.ParticipantEgress,
+		}, roomCallback, lksdk.WithAutoSubscribe(false))
 	}
-
-	// CRITICAL: Disable auto-subscribe for the agent framework connection
-	// The handler will establish its own direct connection and subscribe to tracks there
-	// If both connections subscribe to the same track, the LiveKit server may only send
-	// data to the first subscriber (the agent connection), which has restricted permissions
-	room, err := lksdk.ConnectToRoom(roomURL, lksdk.ConnectInfo{
-		APIKey:              w.apiKey,
-		APISecret:           w.apiSecret,
-		RoomName:            job.Room.Name,
-		ParticipantIdentity: participantIdentity,
-		ParticipantName:     metadata.ParticipantName,
-		ParticipantMetadata: metadata.ParticipantMetadata,
-		ParticipantKind:     lksdk.ParticipantEgress, // Use EGRESS kind to receive full media for recording
-	}, roomCallback, lksdk.WithAutoSubscribe(false)) // Disable auto-subscribe!
 	if err != nil {
 		w.logger.Error("Failed to connect to room", "error", err, "jobID", job.Id)
 		w.updateJobStatus(job.Id, livekit.JobStatus_JS_FAILED, err.Error())
