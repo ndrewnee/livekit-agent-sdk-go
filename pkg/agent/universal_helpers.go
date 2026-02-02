@@ -230,6 +230,11 @@ func (w *UniversalWorker) updateJobStatus(jobID string, status livekit.JobStatus
 		return
 	}
 
+	// Log terminal status updates for easier debugging of dispatch behavior
+	if w.logger != nil && (status == livekit.JobStatus_JS_SUCCESS || status == livekit.JobStatus_JS_FAILED) {
+		w.logger.Info("[DEBUG] Updating job status", "jobID", jobID, "status", status, "error", error)
+	}
+
 	msg := &livekit.UpdateJobStatus{
 		JobId:  jobID,
 		Status: status,

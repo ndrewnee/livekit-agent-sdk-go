@@ -38,6 +38,9 @@ examples/publisher-hls-agent/publisher-hls-agent
 examples/simple-room-agent/simple-room-agent
 examples/universal-worker-demo/universal-worker-demo
 
+# LiveKit cloud example logs
+examples/livekit-cloud-example/*.log
+
 # Temporary files
 *.tmp
 *.temp
