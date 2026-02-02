@@ -88,6 +88,27 @@ go get github.com/pion/webrtc/v4
 ./full-test.sh
 ```
 
+## JT_PUBLISHER Participant Rejoin E2E
+
+This repo has focused end-to-end repros for `JT_PUBLISHER` participant rejoin behavior.
+
+From this directory:
+
+```bash
+# Observes publish + rejoin/publish within a single JT_PUBLISHER job (works on Cloud)
+./publisher_rejoin_test.sh
+
+# Expects the server to end job #1 and dispatch a fresh job on rejoin (passes on local server; currently fails on LiveKit Cloud)
+./publisher_rejoin_job_redispatch_test.sh
+```
+
+Optional env vars:
+
+- `PUBLISHER_AGENT_NAME` (default: `publisher-rejoin-agent`)
+- `PUBLISHER_IDENTITY` (default: `rejoin-publisher`)
+- `PUBLISH_DURATION` (default: `5s`)
+- `WAIT_FOR_JOBS_SECONDS` (default: `20`)
+
 ## What Happens
 
 When you run the example, it will:

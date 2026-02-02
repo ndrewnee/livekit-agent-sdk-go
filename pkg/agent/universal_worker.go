@@ -63,6 +63,10 @@ type UniversalWorker struct {
 	statusQueueChan chan struct{}
 	loadBatcher     *LoadBatcher
 
+	// Pending metadata captured during availability checks.
+	// Used to ensure consistent participant identity/name between availability response and room connection.
+	pendingJobMetadata map[string]*JobMetadata
+
 	// Lifecycle
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -176,6 +180,7 @@ func NewUniversalWorker(serverURL, apiKey, apiSecret string, handler UniversalHa
 		reconnectChan:       make(chan struct{}, 1),
 		statusQueue:         make([]statusUpdate, 0),
 		statusQueueChan:     make(chan struct{}, 100),
+		pendingJobMetadata:  make(map[string]*JobMetadata),
 		jobCheckpoints:      make(map[string]*JobCheckpoint),
 		stopCh:              make(chan struct{}),
 		doneCh:              make(chan struct{}),
@@ -1001,11 +1006,31 @@ func (w *UniversalWorker) handleJobAssignment(assignment *livekit.JobAssignment)
 		"room", job.Room.Name,
 	)
 
-	// Get metadata from handler
+	// Get metadata from handler and merge with metadata captured during the availability check.
 	metadata := w.handler.GetJobMetadata(job)
 	if metadata == nil {
 		metadata = &JobMetadata{}
 	}
+
+	w.mu.Lock()
+	if pending, ok := w.pendingJobMetadata[job.Id]; ok && pending != nil {
+		if metadata.ParticipantIdentity == "" {
+			metadata.ParticipantIdentity = pending.ParticipantIdentity
+		}
+		if metadata.ParticipantName == "" {
+			metadata.ParticipantName = pending.ParticipantName
+		}
+		if metadata.ParticipantMetadata == "" {
+			metadata.ParticipantMetadata = pending.ParticipantMetadata
+		}
+		if metadata.ParticipantAttributes == nil && pending.ParticipantAttributes != nil {
+			metadata.ParticipantAttributes = pending.ParticipantAttributes
+		}
+		metadata.SupportsResume = metadata.SupportsResume || pending.SupportsResume
+
+		delete(w.pendingJobMetadata, job.Id)
+	}
+	w.mu.Unlock()
 
 	// Update metrics
 	atomic.AddInt64(&w.metrics.jobsAccepted, 1)
@@ -1153,10 +1178,12 @@ func (w *UniversalWorker) createRoomCallbacks(job *livekit.Job) *lksdk.RoomCallb
 			w.handler.OnParticipantJoined(context.Background(), participant)
 		},
 		OnParticipantDisconnected: func(participant *lksdk.RemoteParticipant) {
+			participantIdentity := participant.Identity()
+
 			// Remove participant info
 			w.mu.Lock()
-			delete(w.participants, participant.Identity())
-			if w.targetParticipant != nil && w.targetParticipant.Identity() == participant.Identity() {
+			delete(w.participants, participantIdentity)
+			if w.targetParticipant != nil && w.targetParticipant.Identity() == participantIdentity {
 				w.targetParticipant = nil
 			}
 			w.mu.Unlock()
@@ -1255,25 +1282,34 @@ func (w *UniversalWorker) createRoomCallbacks(job *livekit.Job) *lksdk.RoomCallb
 
 // runJobHandler runs the job handler in a goroutine with panic recovery
 func (w *UniversalWorker) runJobHandler(ctx context.Context, jobCtx *JobContext) {
+	finalStatus := livekit.JobStatus_JS_SUCCESS
+	finalError := ""
+
 	defer func() {
 		if r := recover(); r != nil {
 			w.logger.Error("Handler panic in OnJobAssigned", "panic", r, "jobID", jobCtx.Job.Id)
-			w.updateJobStatus(jobCtx.Job.Id, livekit.JobStatus_JS_FAILED, fmt.Sprintf("handler panic: %v", r))
+			finalStatus = livekit.JobStatus_JS_FAILED
+			finalError = fmt.Sprintf("handler panic: %v", r)
 		}
 
+		// Send terminal status update before clearing local state.
+		w.updateJobStatus(jobCtx.Job.Id, finalStatus, finalError)
+
 		// Clean up
+		var roomToDisconnect *lksdk.Room
 		w.mu.Lock()
 		delete(w.activeJobs, jobCtx.Job.Id)
 		delete(w.jobStartTimes, jobCtx.Job.Id)
 		if jobCtx.Room != nil {
 			delete(w.rooms, jobCtx.Room.Name())
 			delete(w.participantTrackers, jobCtx.Room.Name())
-			jobCtx.Room.Disconnect()
+			roomToDisconnect = jobCtx.Room
 		}
 		w.mu.Unlock()
 
-		// Update job status
-		w.updateJobStatus(jobCtx.Job.Id, livekit.JobStatus_JS_SUCCESS, "")
+		if roomToDisconnect != nil {
+			roomToDisconnect.Disconnect()
+		}
 
 		// Update metrics
 		atomic.AddInt64(&w.metrics.jobsCompleted, 1)
@@ -1300,7 +1336,8 @@ func (w *UniversalWorker) runJobHandler(ctx context.Context, jobCtx *JobContext)
 	// Run job handler
 	if err := w.handler.OnJobAssigned(ctx, jobCtx); err != nil {
 		w.logger.Error("Job handler error", "error", err, "jobID", jobCtx.Job.Id)
-		w.updateJobStatus(jobCtx.Job.Id, livekit.JobStatus_JS_FAILED, err.Error())
+		finalStatus = livekit.JobStatus_JS_FAILED
+		finalError = err.Error()
 	}
 }
 

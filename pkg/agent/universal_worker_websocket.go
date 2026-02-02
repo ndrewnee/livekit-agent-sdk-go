@@ -115,6 +115,15 @@ func (w *UniversalWorker) waitForRegistration(ctx context.Context) error {
 				if reg.Register.WorkerId == "" {
 					return fmt.Errorf("registration failed: no worker ID assigned")
 				}
+				if reg.Register.ServerInfo != nil {
+					w.logger.Info("Server info",
+						"version", reg.Register.ServerInfo.Version,
+						"protocol", reg.Register.ServerInfo.Protocol,
+						"agentProtocol", reg.Register.ServerInfo.AgentProtocol,
+						"region", reg.Register.ServerInfo.Region,
+						"nodeID", reg.Register.ServerInfo.NodeId,
+					)
+				}
 				w.mu.Lock()
 				w.workerID = reg.Register.WorkerId
 				w.savedState.WorkerID = reg.Register.WorkerId
@@ -307,6 +316,25 @@ func (w *UniversalWorker) handleAvailabilityRequest(req *livekit.AvailabilityReq
 		}
 		resp.SupportsResume = false
 	}
+
+	// Persist the resolved metadata so the room connection uses the same identity/name
+	// that were sent in the availability response.
+	w.mu.Lock()
+	if w.pendingJobMetadata == nil {
+		w.pendingJobMetadata = make(map[string]*JobMetadata)
+	}
+	if accept {
+		w.pendingJobMetadata[req.Job.Id] = &JobMetadata{
+			ParticipantIdentity:   resp.ParticipantIdentity,
+			ParticipantName:       resp.ParticipantName,
+			ParticipantMetadata:   resp.ParticipantMetadata,
+			ParticipantAttributes: resp.ParticipantAttributes,
+			SupportsResume:        resp.SupportsResume,
+		}
+	} else {
+		delete(w.pendingJobMetadata, req.Job.Id)
+	}
+	w.mu.Unlock()
 
 	return w.sendMessage(&livekit.WorkerMessage{
 		Message: &livekit.WorkerMessage_Availability{
