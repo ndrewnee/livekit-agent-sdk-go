@@ -69,10 +69,27 @@ func (w *UniversalWorker) connect(ctx context.Context) error {
 
 // sendRegister sends the worker registration message
 func (w *UniversalWorker) sendRegister() error {
+	pingIntervalSeconds := uint32(w.opts.PingInterval.Seconds())
+	if pingIntervalSeconds == 0 && w.opts.PingInterval > 0 {
+		pingIntervalSeconds = 1
+	}
+
+	allowedPermissions := w.opts.Permissions
+	if allowedPermissions == nil {
+		allowedPermissions = &livekit.ParticipantPermission{
+			CanSubscribe:      true,
+			CanPublish:        true,
+			CanPublishData:    true,
+			CanUpdateMetadata: true,
+		}
+	}
+
 	msg := &livekit.RegisterWorkerRequest{
-		Type:      workerTypeToProto(w.opts.JobType),
-		AgentName: w.opts.AgentName,
-		Version:   w.opts.Version,
+		Type:               workerTypeToProto(w.opts.JobType),
+		AgentName:          w.opts.AgentName,
+		Version:            w.opts.Version,
+		PingInterval:       pingIntervalSeconds,
+		AllowedPermissions: allowedPermissions,
 	}
 
 	// Only set namespace if it's not empty
@@ -306,15 +323,18 @@ func (w *UniversalWorker) handleAvailabilityRequest(req *livekit.AvailabilityReq
 		resp.ParticipantName = metadata.ParticipantName
 		resp.ParticipantMetadata = metadata.ParticipantMetadata
 		resp.ParticipantAttributes = metadata.ParticipantAttributes
-	} else {
-		// Default non-empty identity so assignment token is valid
+	}
+
+	// Ensure identity/name are never empty; LiveKit Cloud will reject assignment tokens with an empty identity.
+	if resp.ParticipantIdentity == "" {
 		resp.ParticipantIdentity = fmt.Sprintf("agent-%s", req.Job.Id)
+	}
+	if resp.ParticipantName == "" {
 		if w.opts.AgentName != "" {
 			resp.ParticipantName = w.opts.AgentName
 		} else {
 			resp.ParticipantName = "Agent"
 		}
-		resp.SupportsResume = false
 	}
 
 	// Persist the resolved metadata so the room connection uses the same identity/name
