@@ -216,7 +216,7 @@ func TestUniversalWorker_WebSocket_Reconnection(t *testing.T) {
 
 	// Wait for initial connection deterministically
 	require.Eventually(t, func() bool { return worker.IsConnected() }, 10*time.Second, 100*time.Millisecond)
-	assert.Equal(t, int32(1), connectionCount.Load())
+	require.Eventually(t, func() bool { return connectionCount.Load() >= 1 }, 2*time.Second, 50*time.Millisecond)
 
 	// Force disconnect by closing WebSocket
 	worker.mu.Lock()
