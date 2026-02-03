@@ -61,7 +61,7 @@ go run .
 ./dispatch_job.sh
 
 # Or create manually with Go
-go run test_with_dispatch.go
+go run ./cmd/test-with-dispatch
 ```
 
 The room MUST be created with agent dispatch configuration for the agent to receive jobs. Regular rooms created without dispatch will not trigger the agent.
@@ -118,7 +118,7 @@ You can extend this example by:
 - Ensure the LiveKit server is running
 - Verify API credentials are correct
 - **Make sure rooms are created with agent dispatch configuration**
-- Use the provided dispatch scripts or test_with_dispatch.go
+- Use the provided dispatch scripts or `cmd/test-with-dispatch`
 - Regular rooms without agent dispatch will not trigger jobs
 
 ### Connection errors
@@ -128,6 +128,6 @@ You can extend this example by:
 
 ## Next Steps
 
-- Try the [Participant Monitoring](../participant-monitoring-agent) example for participant-level analytics
+- Try the [Universal Worker Demo](../universal-worker-demo) example for all job types
 - Explore the [Media Publisher](../media-publisher-agent) example for media streaming
 - Read the main [LiveKit Agent SDK documentation](../../docs/README.md)

@@ -78,11 +78,13 @@ func (h *PublisherHLSHandler) WaitReady(ctx context.Context) error {
 // Thread-safety: All fields except cancel are protected by mu.
 type recordingSession struct {
 	mu          sync.Mutex                   // Protects tracksReady and activated
+	ctx         context.Context              // Context for recorder/track processing
 	cancel      context.CancelFunc           // Cancels the session context, stopping recording
 	recorder    *ParticipantRecorder         // GStreamer pipeline for this participant
 	participant string                       // Participant identity being recorded
 	tracksReady map[webrtc.RTPCodecType]bool // Tracks which media types have been subscribed
 	activated   bool                         // Whether ActivateRecording has been called
+	trackSet    *trackRegistry               // Track subscription de-duplication
 }
 
 // NewPublisherHLSHandler creates a new handler for JT_PUBLISHER jobs.
@@ -174,12 +176,28 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 		log.Printf("[debug] job state: participantIdentity=%s status=%s", state.GetParticipantIdentity(), state.GetStatus().String())
 	}
 
+	if jobCtx.Room == nil {
+		return fmt.Errorf("job context has no room connection")
+	}
+
+	// Initialize E2EE context if enabled (must happen before subscribing to tracks).
+	if h.cfg.E2EEEnabled() {
+		e2eeCtx, err := NewE2EEContext(h.cfg.E2EEPassphrase, jobCtx.Room.SifTrailer())
+		if err != nil {
+			return fmt.Errorf("failed to initialize E2EE context: %w", err)
+		}
+		recorder.SetE2EEContext(e2eeCtx)
+		log.Printf("[%s/%s] E2EE decryption enabled", roomName, participantIdentity)
+	}
+
 	sessionCtx, cancel := context.WithCancel(ctx)
 	session := &recordingSession{
+		ctx:         sessionCtx,
 		cancel:      cancel,
 		recorder:    recorder,
 		participant: participantIdentity,
 		tracksReady: make(map[webrtc.RTPCodecType]bool),
+		trackSet:    &trackRegistry{seen: make(map[string]struct{})},
 	}
 
 	recorder.SetOnVideoReady(func() {
@@ -247,112 +265,9 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 	}
 	started = true
 
-	trackSet := &trackRegistry{seen: make(map[string]struct{})}
 	targetIdentity := participantIdentity
 
-	roomCallback := lksdk.NewRoomCallback()
-	roomCallback.OnParticipantDisconnected = func(rp *lksdk.RemoteParticipant) {
-		if rp.Identity() == targetIdentity {
-			log.Printf("[%s/%s] participant disconnected, stopping recording", roomName, targetIdentity)
-			cancel()
-		}
-	}
-	roomCallback.OnDisconnected = func() {
-		log.Printf("[%s/%s] recorder connection disconnected by server", roomName, targetIdentity)
-		cancel()
-	}
-	roomCallback.ParticipantCallback.OnTrackPublished = func(publication *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-		if rp.Identity() != targetIdentity {
-			return
-		}
-		if err := publication.SetSubscribed(true); err != nil {
-			log.Printf("[%s/%s] failed to subscribe to track %s: %v", roomName, targetIdentity, publication.SID(), err)
-		} else {
-			log.Printf("[%s/%s] requested subscription to track %s", roomName, targetIdentity, publication.SID())
-		}
-		if publication.Kind() == lksdk.TrackKindVideo {
-			publication.SetEnabled(true)
-			if err := publication.SetVideoQuality(livekit.VideoQuality_HIGH); err != nil {
-				log.Printf("[%s/%s] failed to set video quality for %s: %v", roomName, targetIdentity, publication.SID(), err)
-			} else {
-				log.Printf("[%s/%s] requested HIGH quality for track %s", roomName, targetIdentity, publication.SID())
-			}
-		}
-	}
-	roomCallback.ParticipantCallback.OnTrackSubscribed = func(track *webrtc.TrackRemote, publication *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-		if rp.Identity() != targetIdentity {
-			return
-		}
-		if !trackSet.mark(publication.SID()) {
-			return
-		}
-		// Track is already subscribed at this point - no need to call SetSubscribed(true) again
-		if publication.Kind() == lksdk.TrackKindVideo {
-			if info := publication.TrackInfo(); info != nil {
-				log.Printf("[%s/%s] track info: %s", roomName, targetIdentity, info.String())
-			}
-			if receiver := publication.Receiver(); receiver != nil {
-				if params := receiver.GetParameters(); params.Codecs != nil {
-					for _, codec := range params.Codecs {
-						log.Printf("[%s/%s] receiver codec: mime=%s fmtp=%s", roomName, targetIdentity, codec.MimeType, codec.SDPFmtpLine)
-					}
-				}
-			}
-		}
-		log.Printf("[%s/%s] track subscribed: sid=%s kind=%s codec=%s payloadType=%d", roomName, targetIdentity, publication.SID(), publication.Kind(), track.Codec().MimeType, track.PayloadType())
-		switch track.Kind() {
-		case webrtc.RTPCodecTypeVideo:
-			recorder.AttachVideoTrack(sessionCtx, track, rp.WritePLI)
-			if session, ok := h.getSessionByParticipant(targetIdentity); ok {
-				session.setTrackReady(webrtc.RTPCodecTypeVideo)
-				h.tryAutoActivate(session)
-			}
-		case webrtc.RTPCodecTypeAudio:
-			recorder.AttachAudioTrack(sessionCtx, track)
-			if session, ok := h.getSessionByParticipant(targetIdentity); ok {
-				session.setTrackReady(webrtc.RTPCodecTypeAudio)
-				h.tryAutoActivate(session)
-			}
-		default:
-			log.Printf("[%s/%s] unsupported track kind %s", roomName, targetIdentity, track.Kind().String())
-		}
-	}
-	roomCallback.ParticipantCallback.OnTrackUnsubscribed = func(track *webrtc.TrackRemote, publication *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-		if rp.Identity() != targetIdentity {
-			return
-		}
-		trackSet.unmark(publication.SID())
-		switch track.Kind() {
-		case webrtc.RTPCodecTypeVideo:
-			recorder.VideoStreamEnded()
-		case webrtc.RTPCodecTypeAudio:
-			recorder.AudioStreamEnded()
-		default:
-			log.Printf("[%s/%s] unsubscribed from unsupported track kind %s", roomName, targetIdentity, track.Kind().String())
-		}
-	}
-
-	recorderIdentity := jobCtx.Job.State.GetParticipantIdentity()
-	if recorderIdentity == "" {
-		recorderIdentity = fmt.Sprintf("recorder-%s", jobCtx.Job.Id)
-	}
-
-	connectInfo := lksdk.ConnectInfo{
-		APIKey:              h.cfg.APIKey,
-		APISecret:           h.cfg.APISecret,
-		RoomName:            roomName,
-		ParticipantIdentity: recorderIdentity,
-		ParticipantName:     "HLS Recorder",
-		ParticipantMetadata: fmt.Sprintf(`{"agent":"%s"}`, h.cfg.AgentName),
-	}
-
-	directRoom, err := lksdk.ConnectToRoom(h.cfg.LiveKitURL, connectInfo, roomCallback, lksdk.WithAutoSubscribe(false))
-	if err != nil {
-		return fmt.Errorf("failed to connect to room %s: %w", roomName, err)
-	}
-	defer directRoom.Disconnect()
-
-	if rp := directRoom.GetParticipantByIdentity(targetIdentity); rp != nil {
+	if rp := jobCtx.Room.GetParticipantByIdentity(targetIdentity); rp != nil {
 		for _, pub := range rp.TrackPublications() {
 			if remotePub, ok := pub.(*lksdk.RemoteTrackPublication); ok {
 				if err := remotePub.SetSubscribed(true); err != nil {
@@ -366,6 +281,17 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 						log.Printf("[%s/%s] requested HIGH quality for existing track %s", roomName, targetIdentity, remotePub.SID())
 					}
 				}
+
+				// Same pre-activation logic as OnTrackPublished: if tracks were already
+				// published before the agent connected, mark them as present and
+				// attempt AUTO_ACTIVATE_RECORDING.
+				switch remotePub.Kind() {
+				case lksdk.TrackKindVideo:
+					session.setTrackReady(webrtc.RTPCodecTypeVideo)
+				case lksdk.TrackKindAudio:
+					session.setTrackReady(webrtc.RTPCodecTypeAudio)
+				}
+				h.tryAutoActivate(session)
 			}
 		}
 	} else {
@@ -378,6 +304,150 @@ func (h *PublisherHLSHandler) OnJobAssigned(ctx context.Context, jobCtx *agent.J
 	}
 
 	return nil
+}
+
+func (h *PublisherHLSHandler) OnRoomDisconnected(ctx context.Context, room *lksdk.Room, reason string) {
+	_ = ctx
+	if room == nil {
+		return
+	}
+
+	h.mu.Lock()
+	var sessions []*recordingSession
+	for _, session := range h.sessions {
+		if session != nil && session.recorder != nil && session.recorder.room == room.Name() {
+			sessions = append(sessions, session)
+		}
+	}
+	h.mu.Unlock()
+
+	for _, session := range sessions {
+		log.Printf("[%s/%s] recorder connection disconnected by server: %s", session.recorder.room, session.participant, reason)
+		session.cancel()
+	}
+}
+
+func (h *PublisherHLSHandler) OnParticipantLeft(ctx context.Context, participant *lksdk.RemoteParticipant) {
+	_ = ctx
+	if participant == nil {
+		return
+	}
+
+	session, ok := h.getSessionByParticipant(participant.Identity())
+	if !ok {
+		return
+	}
+
+	log.Printf("[%s/%s] participant disconnected, stopping recording", session.recorder.room, session.participant)
+	session.cancel()
+}
+
+func (h *PublisherHLSHandler) OnTrackPublished(ctx context.Context, participant *lksdk.RemoteParticipant, publication *lksdk.RemoteTrackPublication) {
+	_ = ctx
+	if participant == nil || publication == nil {
+		return
+	}
+
+	session, ok := h.getSessionByParticipant(participant.Identity())
+	if !ok {
+		return
+	}
+
+	if err := publication.SetSubscribed(true); err != nil {
+		log.Printf("[%s/%s] failed to subscribe to track %s: %v", session.recorder.room, session.participant, publication.SID(), err)
+	} else {
+		log.Printf("[%s/%s] requested subscription to track %s", session.recorder.room, session.participant, publication.SID())
+	}
+
+	if publication.Kind() == lksdk.TrackKindVideo {
+		publication.SetEnabled(true)
+		if err := publication.SetVideoQuality(livekit.VideoQuality_HIGH); err != nil {
+			log.Printf("[%s/%s] failed to set video quality for %s: %v", session.recorder.room, session.participant, publication.SID(), err)
+		} else {
+			log.Printf("[%s/%s] requested HIGH quality for track %s", session.recorder.room, session.participant, publication.SID())
+		}
+	}
+
+	// For AUTO_ACTIVATE_RECORDING=true, pre-activate recording as soon as both
+	// tracks are published so we never miss the very first keyframe.
+	switch publication.Kind() {
+	case lksdk.TrackKindVideo:
+		session.setTrackReady(webrtc.RTPCodecTypeVideo)
+	case lksdk.TrackKindAudio:
+		session.setTrackReady(webrtc.RTPCodecTypeAudio)
+	}
+	h.tryAutoActivate(session)
+}
+
+func (h *PublisherHLSHandler) OnTrackSubscribed(ctx context.Context, track *webrtc.TrackRemote, publication *lksdk.RemoteTrackPublication, participant *lksdk.RemoteParticipant) {
+	_ = ctx
+	if track == nil || publication == nil || participant == nil {
+		return
+	}
+
+	session, ok := h.getSessionByParticipant(participant.Identity())
+	if !ok {
+		return
+	}
+
+	if session.trackSet != nil && !session.trackSet.mark(publication.SID()) {
+		return
+	}
+
+	// Track is already subscribed at this point - no need to call SetSubscribed(true) again
+	if publication.Kind() == lksdk.TrackKindVideo {
+		if info := publication.TrackInfo(); info != nil {
+			log.Printf("[%s/%s] track info: %s", session.recorder.room, session.participant, info.String())
+		}
+		if receiver := publication.Receiver(); receiver != nil {
+			if params := receiver.GetParameters(); params.Codecs != nil {
+				for _, codec := range params.Codecs {
+					log.Printf("[%s/%s] receiver codec: mime=%s fmtp=%s", session.recorder.room, session.participant, codec.MimeType, codec.SDPFmtpLine)
+				}
+			}
+		}
+	}
+
+	log.Printf("[%s/%s] track subscribed: sid=%s kind=%s codec=%s payloadType=%d",
+		session.recorder.room, session.participant, publication.SID(), publication.Kind(), track.Codec().MimeType, track.PayloadType())
+
+	switch track.Kind() {
+	case webrtc.RTPCodecTypeVideo:
+		session.recorder.AttachVideoTrack(session.ctx, track, participant.WritePLI)
+		session.setTrackReady(webrtc.RTPCodecTypeVideo)
+		h.tryAutoActivate(session)
+	case webrtc.RTPCodecTypeAudio:
+		session.recorder.AttachAudioTrack(session.ctx, track)
+		session.setTrackReady(webrtc.RTPCodecTypeAudio)
+		h.tryAutoActivate(session)
+	default:
+		log.Printf("[%s/%s] unsupported track kind %s", session.recorder.room, session.participant, track.Kind().String())
+	}
+}
+
+func (h *PublisherHLSHandler) OnTrackUnsubscribed(ctx context.Context, track *webrtc.TrackRemote, publication *lksdk.RemoteTrackPublication, participant *lksdk.RemoteParticipant) {
+	_ = ctx
+	if track == nil || publication == nil || participant == nil {
+		return
+	}
+
+	session, ok := h.getSessionByParticipant(participant.Identity())
+	if !ok {
+		return
+	}
+
+	if session.trackSet != nil {
+		session.trackSet.unmark(publication.SID())
+	}
+
+	switch track.Kind() {
+	case webrtc.RTPCodecTypeVideo:
+		session.recorder.VideoStreamEnded()
+	case webrtc.RTPCodecTypeAudio:
+		session.recorder.AudioStreamEnded()
+	default:
+		log.Printf("[%s/%s] unsubscribed from unsupported track kind %s", session.recorder.room, session.participant, track.Kind().String())
+	}
 }
 
 // OnJobTerminated is called when the LiveKit server terminates a job.
@@ -533,10 +603,6 @@ func (h *PublisherHLSHandler) tryAutoActivate(session *recordingSession) {
 		return
 	}
 
-	if !session.recorder.HandshakeReady() {
-		return
-	}
-
 	if !session.markActivatedIfReady() {
 		return
 	}
@@ -582,9 +648,6 @@ func (s *recordingSession) markActivatedIfReady() bool {
 		return false
 	}
 	if !s.tracksReady[webrtc.RTPCodecTypeVideo] || !s.tracksReady[webrtc.RTPCodecTypeAudio] {
-		return false
-	}
-	if !s.recorder.HandshakeReady() {
 		return false
 	}
 	s.activated = true

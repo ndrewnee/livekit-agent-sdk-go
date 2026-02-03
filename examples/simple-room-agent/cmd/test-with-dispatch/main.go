@@ -1,4 +1,4 @@
-// test_with_dispatch.go - Test program to create a room with agent dispatch
+// test-with-dispatch - Test program to create a room with agent dispatch.
 package main
 
 import (

@@ -47,7 +47,7 @@ echo ""
 
 # Create room with agent dispatch
 echo -e "${YELLOW}Creating room with agent dispatch...${NC}"
-ROOM_NAME=$ROOM_NAME go run test_with_dispatch.go > /tmp/room_output.txt 2>&1
+ROOM_NAME=$ROOM_NAME go run ./cmd/test-with-dispatch > /tmp/room_output.txt 2>&1
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Room created: $ROOM_NAME${NC}"
     cat /tmp/room_output.txt
