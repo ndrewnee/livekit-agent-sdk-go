@@ -13,13 +13,13 @@ func TestError_Error(t *testing.T) {
 		expected string
 	}{
 		{
-			name: "connection failed error",
-			err:  ErrConnectionFailed,
+			name:     "connection failed error",
+			err:      ErrConnectionFailed,
 			expected: "CONNECTION_FAILED: failed to connect to LiveKit server",
 		},
 		{
-			name: "authentication error",
-			err:  ErrAuthenticationError,
+			name:     "authentication error",
+			err:      ErrAuthenticationError,
 			expected: "AUTHENTICATION_ERROR: authentication failed",
 		},
 		{
@@ -56,9 +56,9 @@ func TestJobMetadata(t *testing.T) {
 		{
 			name: "full metadata",
 			metadata: &JobMetadata{
-				ParticipantIdentity:   "agent-456",
-				ParticipantName:       "Advanced Agent",
-				ParticipantMetadata:   `{"version": "1.0"}`,
+				ParticipantIdentity: "agent-456",
+				ParticipantName:     "Advanced Agent",
+				ParticipantMetadata: `{"version": "1.0"}`,
 				ParticipantAttributes: map[string]string{
 					"role": "transcriber",
 					"lang": "en",
@@ -100,8 +100,8 @@ func TestWorkerOptions(t *testing.T) {
 				Namespace: "production",
 				JobType:   livekit.JobType_JT_PUBLISHER,
 				Permissions: &livekit.ParticipantPermission{
-					CanPublish:   true,
-					CanSubscribe: true,
+					CanPublish:     true,
+					CanSubscribe:   true,
 					CanPublishData: true,
 				},
 				MaxJobs: 10,
@@ -150,20 +150,20 @@ func TestWorkerStatus(t *testing.T) {
 func TestLoggerInterface(t *testing.T) {
 	// Test that our mock logger implements the Logger interface
 	var _ Logger = (*mockTestLogger)(nil)
-	
+
 	logger := &mockTestLogger{}
-	
+
 	// Test all methods
 	logger.Debug("debug message", "key", "value")
 	logger.Info("info message", "count", 42)
 	logger.Warn("warn message", "error", "something")
 	logger.Error("error message", "fatal", true)
-	
+
 	// Verify calls were made
 	if len(logger.calls) != 4 {
 		t.Errorf("Expected 4 log calls, got %d", len(logger.calls))
 	}
-	
+
 	expectedLevels := []string{"Debug", "Info", "Warn", "Error"}
 	for i, call := range logger.calls {
 		if call.level != expectedLevels[i] {

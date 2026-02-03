@@ -5,7 +5,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -28,11 +27,7 @@ type TTSIntegrationSuite struct {
 func (suite *TTSIntegrationSuite) SetupSuite() {
 	suite.ctx = context.Background()
 
-	// Get API key from environment
-	suite.apiKey = os.Getenv("OPENAI_API_KEY")
-	if suite.apiKey == "" {
-		suite.T().Skip("OPENAI_API_KEY not set, skipping integration tests")
-	}
+	suite.apiKey = requireOpenAI(suite.T())
 }
 
 func (suite *TTSIntegrationSuite) SetupTest() {
@@ -289,10 +284,7 @@ type TTSLatencyTestSuite struct {
 
 // TestAverageLatencyMultipleRuns measures average latency across multiple TTS generation runs.
 func (suite *TTSLatencyTestSuite) TestAverageLatencyMultipleRuns() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	realStage := NewTextToSpeechStage(&TextToSpeechConfig{
 		Name:         "latency-test",
@@ -396,10 +388,7 @@ func (suite *TTSLatencyTestSuite) TestAverageLatencyMultipleRuns() {
 
 // TestLatencyWithDifferentTextLengths measures performance with varying text lengths.
 func (suite *TTSLatencyTestSuite) TestLatencyWithDifferentTextLengths() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	realStage := NewTextToSpeechStage(&TextToSpeechConfig{
 		Name:         "length-test",
@@ -457,10 +446,7 @@ func (suite *TTSLatencyTestSuite) TestLatencyWithDifferentTextLengths() {
 
 // TestLatencyWithMultipleLanguages measures performance with different numbers of parallel TTS generations.
 func (suite *TTSLatencyTestSuite) TestLatencyWithMultipleLanguages() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	testCases := []struct {
 		name         string
@@ -533,10 +519,7 @@ func (suite *TTSLatencyTestSuite) TestLatencyWithMultipleLanguages() {
 
 // TestModelPerformanceComparison compares latency across different TTS models.
 func (suite *TTSLatencyTestSuite) TestModelPerformanceComparison() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	// Models to compare (gpt-4o-mini-tts is the baseline/default)
 	models := []struct {
@@ -670,10 +653,7 @@ func (suite *TTSLatencyTestSuite) TestModelPerformanceComparison() {
 
 // TestVoicePerformanceComparison compares latency across different TTS voices.
 func (suite *TTSLatencyTestSuite) TestVoicePerformanceComparison() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	// All available OpenAI TTS voices
 	voices := []string{"alloy", "echo", "fable", "onyx", "nova", "shimmer"}
@@ -771,10 +751,7 @@ func (suite *TTSLatencyTestSuite) TestVoicePerformanceComparison() {
 
 // TestQualityVsLatencyTradeoff analyzes the quality/latency tradeoff across models.
 func (suite *TTSLatencyTestSuite) TestQualityVsLatencyTradeoff() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	// Quality test cases with different text complexities
 	testTexts := []string{
@@ -959,26 +936,19 @@ func (suite *TTSLatencyTestSuite) TestQualityVsLatencyTradeoff() {
 
 // Run the integration test suite
 func TestTTSIntegrationSuite(t *testing.T) {
-	if os.Getenv("OPENAI_API_KEY") == "" {
-		t.Skip("OPENAI_API_KEY not set, skipping integration tests")
-	}
+	_ = requireOpenAI(t)
 	suite.Run(t, new(TTSIntegrationSuite))
 }
 
 // Run the latency test suite
 func TestTTSLatencyTestSuite(t *testing.T) {
-	if os.Getenv("OPENAI_API_KEY") == "" {
-		t.Skip("OPENAI_API_KEY not set, skipping integration tests")
-	}
+	_ = requireOpenAI(t)
 	suite.Run(t, new(TTSLatencyTestSuite))
 }
 
 // Standalone integration test for quick verification
 func TestTTSQuickIntegration(t *testing.T) {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		t.Skip("OPENAI_API_KEY not set, skipping integration test")
-	}
+	apiKey := requireOpenAI(t)
 
 	stage := NewTextToSpeechStage(&TextToSpeechConfig{
 		Name:     "quick-test",

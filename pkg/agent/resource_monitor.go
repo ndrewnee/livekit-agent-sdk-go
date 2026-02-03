@@ -22,7 +22,7 @@ type ResourceMonitor struct {
 	goroutineLeakThreshold int // Number of consecutive increases to consider a leak
 	stopChan               chan struct{}
 	wg                     sync.WaitGroup
-	
+
 	// Metrics
 	lastMemory          uint64
 	lastGoroutineCount  int
@@ -30,15 +30,15 @@ type ResourceMonitor struct {
 	oomDetected         bool
 	leakDetected        bool
 	circularDepDetected bool
-	
+
 	// Callbacks
 	oomCallback      func()
 	leakCallback     func(count int)
 	circularCallback func(deps []string)
-	
+
 	// Dependency tracking for circular detection
-	dependencies     map[string][]string
-	dependencyMutex  sync.RWMutex
+	dependencies    map[string][]string
+	dependencyMutex sync.RWMutex
 }
 
 // ResourceMonitorOptions configures the resource monitor
@@ -60,7 +60,7 @@ func NewResourceMonitor(logger *zap.Logger, opts ResourceMonitorOptions) *Resour
 	if opts.GoroutineLeakThreshold == 0 {
 		opts.GoroutineLeakThreshold = 5
 	}
-	
+
 	memLimit := uint64(opts.MemoryLimitMB) * 1024 * 1024
 	if memLimit == 0 {
 		// Default to 80% of system memory
@@ -68,7 +68,7 @@ func NewResourceMonitor(logger *zap.Logger, opts ResourceMonitorOptions) *Resour
 		runtime.ReadMemStats(&m)
 		memLimit = uint64(float64(m.Sys) * 0.8)
 	}
-	
+
 	return &ResourceMonitor{
 		logger:                 logger,
 		checkInterval:          opts.CheckInterval,
@@ -118,7 +118,7 @@ func (m *ResourceMonitor) monitor(ctx context.Context) {
 	defer m.wg.Done()
 	ticker := time.NewTicker(m.checkInterval)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -136,12 +136,12 @@ func (m *ResourceMonitor) checkResources() {
 	// Check memory usage
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
-	
+
 	m.mu.Lock()
 	previousMemory := m.lastMemory
 	m.lastMemory = memStats.Alloc
 	m.mu.Unlock()
-	
+
 	// Check for OOM condition
 	if memStats.Alloc > m.memoryLimit {
 		m.handleOOM(memStats.Alloc)
@@ -155,11 +155,11 @@ func (m *ResourceMonitor) checkResources() {
 			zap.Uint64("limit_mb", m.memoryLimit/1024/1024),
 		)
 	}
-	
+
 	// Check goroutine count
 	goroutineCount := runtime.NumGoroutine()
 	m.checkGoroutineLeaks(goroutineCount)
-	
+
 	// Log current resource usage
 	m.logger.Debug("Resource check",
 		zap.Uint64("memory_mb", memStats.Alloc/1024/1024),
@@ -176,17 +176,17 @@ func (m *ResourceMonitor) handleOOM(currentMemory uint64) {
 	m.oomDetected = true
 	callback := m.oomCallback
 	m.mu.Unlock()
-	
+
 	if !alreadyDetected {
 		m.logger.Error("OOM condition detected",
 			zap.Uint64("current_memory_mb", currentMemory/1024/1024),
 			zap.Uint64("limit_mb", m.memoryLimit/1024/1024),
 		)
-		
+
 		// Force garbage collection
 		runtime.GC()
 		debug.FreeOSMemory()
-		
+
 		// Call callback if set
 		if callback != nil {
 			callback()
@@ -199,30 +199,30 @@ func (m *ResourceMonitor) checkGoroutineLeaks(currentCount int) {
 	m.mu.Lock()
 	previousCount := m.lastGoroutineCount
 	m.lastGoroutineCount = currentCount
-	
+
 	// Check if goroutines are increasing
 	if currentCount > previousCount && previousCount > 0 {
 		m.goroutineIncreases++
 	} else if currentCount <= previousCount {
 		m.goroutineIncreases = 0 // Reset counter
 	}
-	
+
 	// Check for leak pattern
 	leakDetected := m.goroutineIncreases >= m.goroutineLeakThreshold ||
 		currentCount > m.goroutineLimit
-	
+
 	wasLeakDetected := m.leakDetected
 	m.leakDetected = leakDetected
 	callback := m.leakCallback
 	m.mu.Unlock()
-	
+
 	if leakDetected && !wasLeakDetected {
 		m.logger.Error("Goroutine leak detected",
 			zap.Int("count", currentCount),
 			zap.Int("limit", m.goroutineLimit),
 			zap.Int("consecutive_increases", m.goroutineIncreases),
 		)
-		
+
 		if callback != nil {
 			callback(currentCount)
 		}
@@ -237,12 +237,12 @@ func (m *ResourceMonitor) checkGoroutineLeaks(currentCount int) {
 func (m *ResourceMonitor) AddDependency(from, to string) {
 	m.dependencyMutex.Lock()
 	defer m.dependencyMutex.Unlock()
-	
+
 	if m.dependencies[from] == nil {
 		m.dependencies[from] = make([]string, 0)
 	}
 	m.dependencies[from] = append(m.dependencies[from], to)
-	
+
 	// Check for circular dependency
 	if cycle := m.detectCycle(from); len(cycle) > 0 {
 		m.handleCircularDependency(cycle)
@@ -254,13 +254,13 @@ func (m *ResourceMonitor) detectCycle(start string) []string {
 	visited := make(map[string]bool)
 	recStack := make(map[string]bool)
 	path := []string{}
-	
+
 	var dfs func(node string) []string
 	dfs = func(node string) []string {
 		visited[node] = true
 		recStack[node] = true
 		path = append(path, node)
-		
+
 		for _, neighbor := range m.dependencies[node] {
 			if !visited[neighbor] {
 				if cycle := dfs(neighbor); len(cycle) > 0 {
@@ -278,12 +278,12 @@ func (m *ResourceMonitor) detectCycle(start string) []string {
 				return append(path[cycleStart:], neighbor)
 			}
 		}
-		
+
 		path = path[:len(path)-1]
 		recStack[node] = false
 		return nil
 	}
-	
+
 	return dfs(start)
 }
 
@@ -294,12 +294,12 @@ func (m *ResourceMonitor) handleCircularDependency(cycle []string) {
 	m.circularDepDetected = true
 	callback := m.circularCallback
 	m.mu.Unlock()
-	
+
 	if !alreadyDetected {
 		m.logger.Error("Circular dependency detected",
 			zap.Any("cycle", cycle),
 		)
-		
+
 		if callback != nil {
 			callback(cycle)
 		}
@@ -310,10 +310,10 @@ func (m *ResourceMonitor) handleCircularDependency(cycle []string) {
 func (m *ResourceMonitor) GetMetrics() map[string]interface{} {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
-	
+
 	metrics := map[string]interface{}{
 		"memory_alloc_mb":       memStats.Alloc / 1024 / 1024,
 		"memory_sys_mb":         memStats.Sys / 1024 / 1024,
@@ -323,10 +323,10 @@ func (m *ResourceMonitor) GetMetrics() map[string]interface{} {
 		"oom_detected":          m.oomDetected,
 		"leak_detected":         m.leakDetected,
 		"circular_dep_detected": m.circularDepDetected,
-		"gc_runs":              memStats.NumGC,
-		"gc_pause_ms":          float64(memStats.PauseNs[(memStats.NumGC+255)%256]) / 1e6,
+		"gc_runs":               memStats.NumGC,
+		"gc_pause_ms":           float64(memStats.PauseNs[(memStats.NumGC+255)%256]) / 1e6,
 	}
-	
+
 	return metrics
 }
 
@@ -334,7 +334,7 @@ func (m *ResourceMonitor) GetMetrics() map[string]interface{} {
 func (m *ResourceMonitor) IsHealthy() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	return !m.oomDetected && !m.leakDetected && !m.circularDepDetected
 }
 
@@ -350,25 +350,25 @@ type ResourceThresholds struct {
 func (m *ResourceMonitor) GetResourceStatus() ResourceStatus {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
-	
+
 	memoryPercent := float64(memStats.Alloc) / float64(m.memoryLimit) * 100
 	goroutineCount := runtime.NumGoroutine()
-	
+
 	status := ResourceStatus{
-		MemoryUsageMB:      memStats.Alloc / 1024 / 1024,
-		MemoryLimitMB:      m.memoryLimit / 1024 / 1024,
-		MemoryPercent:      memoryPercent,
-		GoroutineCount:     goroutineCount,
-		GoroutineLimit:     m.goroutineLimit,
-		OOMDetected:        m.oomDetected,
-		LeakDetected:       m.leakDetected,
+		MemoryUsageMB:       memStats.Alloc / 1024 / 1024,
+		MemoryLimitMB:       m.memoryLimit / 1024 / 1024,
+		MemoryPercent:       memoryPercent,
+		GoroutineCount:      goroutineCount,
+		GoroutineLimit:      m.goroutineLimit,
+		OOMDetected:         m.oomDetected,
+		LeakDetected:        m.leakDetected,
 		CircularDepDetected: m.circularDepDetected,
-		Timestamp:          time.Now(),
+		Timestamp:           time.Now(),
 	}
-	
+
 	// Determine health level
 	if m.oomDetected || m.leakDetected || m.circularDepDetected {
 		status.HealthLevel = ResourceHealthCritical
@@ -379,7 +379,7 @@ func (m *ResourceMonitor) GetResourceStatus() ResourceStatus {
 	} else {
 		status.HealthLevel = ResourceHealthGood
 	}
-	
+
 	return status
 }
 
@@ -421,11 +421,11 @@ func (r ResourceHealthLevel) String() string {
 
 // ResourceGuard provides automatic resource protection
 type ResourceGuard struct {
-	monitor      *ResourceMonitor
-	maxRetries   int
-	backoffMs    int64
-	abortOnOOM   bool
-	panicOnLeak  bool
+	monitor     *ResourceMonitor
+	maxRetries  int
+	backoffMs   int64
+	abortOnOOM  bool
+	panicOnLeak bool
 }
 
 // NewResourceGuard creates a new resource guard
@@ -442,30 +442,30 @@ func NewResourceGuard(monitor *ResourceMonitor) *ResourceGuard {
 // ExecuteWithProtection executes a function with resource protection
 func (g *ResourceGuard) ExecuteWithProtection(fn func() error) error {
 	retries := 0
-	
+
 	for retries < g.maxRetries {
 		// Check resources before execution
 		if !g.monitor.IsHealthy() {
 			status := g.monitor.GetResourceStatus()
-			
+
 			if status.OOMDetected && g.abortOnOOM {
 				return fmt.Errorf("execution aborted: OOM detected")
 			}
-			
+
 			if status.LeakDetected && g.panicOnLeak {
 				panic(fmt.Sprintf("goroutine leak detected: %d goroutines", status.GoroutineCount))
 			}
-			
+
 			// Wait with exponential backoff
 			backoff := time.Duration(atomic.AddInt64(&g.backoffMs, g.backoffMs)) * time.Millisecond
 			time.Sleep(backoff)
 			retries++
 			continue
 		}
-		
+
 		// Execute function
 		return fn()
 	}
-	
+
 	return fmt.Errorf("execution failed after %d retries due to resource constraints", retries)
 }

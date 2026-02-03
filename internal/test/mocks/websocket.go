@@ -53,15 +53,15 @@ func (m *MockWebSocketConn) RemoteAddr() net.Addr {
 func (m *MockWebSocketConn) WriteMessage(messageType int, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	if m.closed {
 		return websocket.ErrCloseSent
 	}
-	
+
 	if m.writeErr != nil {
 		return m.writeErr
 	}
-	
+
 	m.WriteMessages = append(m.WriteMessages, MockMessage{
 		MessageType: messageType,
 		Data:        data,
@@ -72,33 +72,33 @@ func (m *MockWebSocketConn) WriteMessage(messageType int, data []byte) error {
 func (m *MockWebSocketConn) ReadMessage() (messageType int, p []byte, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	if m.closed {
 		return 0, nil, websocket.ErrCloseSent
 	}
-	
+
 	if m.readErr != nil {
 		return 0, nil, m.readErr
 	}
-	
+
 	if m.readIndex >= len(m.ReadMessages) {
 		// Block until new message or timeout
 		m.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 		m.mu.Lock()
-		
+
 		if m.readIndex >= len(m.ReadMessages) {
 			return 0, nil, errors.New("read timeout")
 		}
 	}
-	
+
 	msg := m.ReadMessages[m.readIndex]
 	m.readIndex++
-	
+
 	if msg.Error != nil {
 		return 0, nil, msg.Error
 	}
-	
+
 	return msg.MessageType, msg.Data, nil
 }
 
@@ -172,11 +172,11 @@ type MockDialer struct {
 func (d *MockDialer) Dial(urlStr string, requestHeader http.Header) (*websocket.Conn, *http.Response, error) {
 	d.URL = urlStr
 	d.Headers = requestHeader
-	
+
 	if d.DialError != nil {
 		return nil, nil, d.DialError
 	}
-	
+
 	// We can't return our mock directly, so we return nil for testing purposes
 	// In real tests, we'll need to inject the mock connection differently
 	return nil, &http.Response{StatusCode: 101}, nil

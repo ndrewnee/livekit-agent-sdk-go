@@ -23,8 +23,8 @@ test-bench:
 test-e2e:
 	@echo "Running e2e tests..."
 	@if [ -z "$$OPENAI_API_KEY" ]; then \
-		echo "Error: OPENAI_API_KEY environment variable is required for e2e tests"; \
-		exit 1; \
+		echo "Skipping e2e tests: OPENAI_API_KEY environment variable not set"; \
+		exit 0; \
 	fi
 	go test -tags=e2e -v ./pkg/agent/...
 

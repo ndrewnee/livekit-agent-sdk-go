@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -21,10 +20,7 @@ type TranslationIntegrationTestSuite struct {
 
 // TestAverageLatencyMultipleRuns measures average latency across multiple translation runs.
 func (suite *TranslationIntegrationTestSuite) TestAverageLatencyMultipleRuns() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	realStage := NewTranslationStage(&TranslationConfig{
 		Name:         "latency-test",
@@ -142,10 +138,7 @@ func (suite *TranslationIntegrationTestSuite) TestAverageLatencyMultipleRuns() {
 
 // TestLatencyWithDifferentTextLengths measures performance with varying text lengths.
 func (suite *TranslationIntegrationTestSuite) TestLatencyWithDifferentTextLengths() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	realStage := NewTranslationStage(&TranslationConfig{
 		Name:         "length-test",
@@ -226,10 +219,7 @@ func (suite *TranslationIntegrationTestSuite) TestLatencyWithDifferentTextLength
 
 // TestLatencyWithMultipleLanguages measures performance with different numbers of target languages.
 func (suite *TranslationIntegrationTestSuite) TestLatencyWithMultipleLanguages() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	testCases := []struct {
 		name      string
@@ -365,10 +355,7 @@ func calculateStdDev(durations []time.Duration, avg time.Duration) time.Duration
 
 // TestModelPerformanceComparison compares latency across different OpenAI models.
 func (suite *TranslationIntegrationTestSuite) TestModelPerformanceComparison() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	// Models to compare (GPT-4 family only - GPT-5 not production-ready)
 	models := []struct {
@@ -555,10 +542,7 @@ func (suite *TranslationIntegrationTestSuite) TestModelPerformanceComparison() {
 
 // TestWarmupImpact tests the impact of warm-up on first translation latency.
 func (suite *TranslationIntegrationTestSuite) TestWarmupImpact() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	fmt.Printf("\n=== Testing Warm-up Impact ===\n\n")
 
@@ -652,10 +636,7 @@ func (suite *TranslationIntegrationTestSuite) TestWarmupImpact() {
 
 // TestTranslationQuality validates translation quality against ground truth.
 func (suite *TranslationIntegrationTestSuite) TestTranslationQuality() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	// Define ground truth test cases with expected translations from speech
 	type qualityTestCase struct {
@@ -877,10 +858,7 @@ func validateWithKeywords(translation string, keywords []string) bool {
 
 // TestTranslationQualityRegression tests edge cases to ensure quality hasn't degraded.
 func (suite *TranslationIntegrationTestSuite) TestTranslationQualityRegression() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	// Edge case test scenarios for speech transcription
 	type edgeCaseTest struct {
@@ -1106,10 +1084,7 @@ func (suite *TranslationIntegrationTestSuite) TestTranslationQualityRegression()
 
 // TestQualityVsLatencyTradeoff analyzes the quality/latency tradeoff across models.
 func (suite *TranslationIntegrationTestSuite) TestQualityVsLatencyTradeoff() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	// Quality test cases from speech transcription (fewer for speed)
 	type qualityTest struct {

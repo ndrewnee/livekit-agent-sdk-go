@@ -316,7 +316,7 @@ func TestUniversalWorker_ConcurrentRoomCallbacks(t *testing.T) {
 			}
 		}()
 
-		// Test OnDisconnectedWithReason callback  
+		// Test OnDisconnectedWithReason callback
 		go func() {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {

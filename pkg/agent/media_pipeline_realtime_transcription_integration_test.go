@@ -54,10 +54,7 @@ func (suite *RealtimeTranscriptionIntegrationTestSuite) SetupSuite() {
 
 // TestAverageLatencyMultipleRuns measures average latency across multiple transcription runs with real audio.
 func (suite *RealtimeTranscriptionIntegrationTestSuite) TestAverageLatencyMultipleRuns() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	if _, err := os.Stat(suite.audioFile); err != nil {
 		suite.T().Skipf("Skipping test: audio-sample-5s.wav not found at %s", suite.audioFile)
@@ -101,10 +98,7 @@ func (suite *RealtimeTranscriptionIntegrationTestSuite) TestAverageLatencyMultip
 
 // TestModelComparison compares performance between gpt-4o-transcribe and whisper-1 models with real audio.
 func (suite *RealtimeTranscriptionIntegrationTestSuite) TestModelComparison() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(suite.T())
 
 	if _, err := os.Stat(suite.audioFile); err != nil {
 		suite.T().Skipf("Skipping test: audio-sample-5s.wav not found at %s", suite.audioFile)
@@ -165,10 +159,7 @@ func (suite *RealtimeTranscriptionIntegrationTestSuite) TestModelComparison() {
 
 // TestLatencyWithDifferentLanguages tests VAD configuration across various languages.
 func (suite *RealtimeTranscriptionIntegrationTestSuite) TestLatencyWithDifferentLanguages() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		suite.T().Skip("Skipping real OpenAI integration test: OPENAI_API_KEY not set")
-	}
+	requireOpenAI(suite.T())
 
 	languages := []struct {
 		code string

@@ -20,16 +20,16 @@ type JobPriority int
 const (
 	// JobPriorityLow indicates a low priority job that can be processed after other jobs.
 	// Suitable for background tasks or non-time-sensitive operations.
-	JobPriorityLow    JobPriority = 0
-	
+	JobPriorityLow JobPriority = 0
+
 	// JobPriorityNormal indicates a standard priority job.
 	// This is the default priority for most jobs.
 	JobPriorityNormal JobPriority = 1
-	
+
 	// JobPriorityHigh indicates a high priority job that should be processed soon.
 	// Suitable for user-initiated actions or time-sensitive operations.
-	JobPriorityHigh   JobPriority = 2
-	
+	JobPriorityHigh JobPriority = 2
+
 	// JobPriorityUrgent indicates an urgent job that requires immediate processing.
 	// Should be used sparingly for critical operations.
 	JobPriorityUrgent JobPriority = 3
@@ -42,21 +42,21 @@ const (
 // and enqueue time.
 type JobQueueItem struct {
 	// Job is the LiveKit job to be processed
-	Job         *livekit.Job
-	
+	Job *livekit.Job
+
 	// Priority determines the processing order of this job
-	Priority    JobPriority
-	
+	Priority JobPriority
+
 	// EnqueueTime records when the job was added to the queue
 	EnqueueTime time.Time
-	
+
 	// Token is the authentication token for this job
-	Token       string
-	
+	Token string
+
 	// URL is the server URL for this job
-	URL         string
-	
-	index       int // Used by heap.Interface
+	URL string
+
+	index int // Used by heap.Interface
 }
 
 // JobQueue manages pending jobs with priority-based ordering.
@@ -69,10 +69,10 @@ type JobQueueItem struct {
 // Example usage:
 //
 //	queue := NewJobQueue(JobQueueOptions{MaxSize: 100})
-//	
+//
 //	// Add a job
 //	err := queue.Enqueue(job, JobPriorityHigh, token, url)
-//	
+//
 //	// Get the next job (blocking)
 //	item, err := queue.DequeueWithContext(ctx)
 //	if err == nil {
@@ -140,7 +140,7 @@ func (q *JobQueue) Enqueue(job *livekit.Job, priority JobPriority, token, url st
 	}
 
 	heap.Push(q, item)
-	
+
 	// Signal that a new item is available
 	select {
 	case q.waitChan <- struct{}{}:
@@ -182,7 +182,7 @@ func (q *JobQueue) Dequeue() (*JobQueueItem, bool) {
 //
 //	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 //	defer cancel()
-//	
+//
 //	item, err := queue.DequeueWithContext(ctx)
 //	if err != nil {
 //	    // Handle timeout or cancellation

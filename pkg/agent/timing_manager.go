@@ -13,24 +13,24 @@ import (
 
 // TimingManager handles clock skew, deadline propagation, and backpressure
 type TimingManager struct {
-	mu               sync.RWMutex
-	logger           *zap.Logger
-	
+	mu     sync.RWMutex
+	logger *zap.Logger
+
 	// Clock skew detection
 	serverTimeOffset time.Duration
 	skewSamples      []time.Duration
 	maxSkewSamples   int
 	skewThreshold    time.Duration
-	
+
 	// Deadline tracking
-	deadlines        map[string]*DeadlineContext
-	
+	deadlines map[string]*DeadlineContext
+
 	// Backpressure control
-	backpressure     *BackpressureController
-	
+	backpressure *BackpressureController
+
 	// Metrics
-	skewDetections   int64
-	missedDeadlines  int64
+	skewDetections     int64
+	missedDeadlines    int64
 	backpressureEvents int64
 }
 
@@ -45,10 +45,10 @@ type DeadlineContext struct {
 
 // TimingManagerOptions configures the timing manager
 type TimingManagerOptions struct {
-	MaxSkewSamples      int           // Max samples for skew calculation (default: 10)
-	SkewThreshold       time.Duration // Threshold to trigger skew correction (default: 1s)
-	BackpressureWindow  time.Duration // Window for rate calculation (default: 1s)
-	BackpressureLimit   int           // Max events per window (default: 100)
+	MaxSkewSamples     int           // Max samples for skew calculation (default: 10)
+	SkewThreshold      time.Duration // Threshold to trigger skew correction (default: 1s)
+	BackpressureWindow time.Duration // Window for rate calculation (default: 1s)
+	BackpressureLimit  int           // Max events per window (default: 100)
 }
 
 // NewTimingManager creates a new timing manager
@@ -65,7 +65,7 @@ func NewTimingManager(logger *zap.Logger, opts TimingManagerOptions) *TimingMana
 	if opts.BackpressureLimit == 0 {
 		opts.BackpressureLimit = 100
 	}
-	
+
 	return &TimingManager{
 		logger:         logger,
 		maxSkewSamples: opts.MaxSkewSamples,
@@ -80,37 +80,37 @@ func NewTimingManager(logger *zap.Logger, opts TimingManagerOptions) *TimingMana
 func (tm *TimingManager) UpdateServerTime(serverTime time.Time, receivedAt time.Time) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	
+
 	// Calculate the offset between server time and local time
 	offset := serverTime.Sub(receivedAt)
-	
+
 	// Add to samples
 	tm.skewSamples = append(tm.skewSamples, offset)
 	if len(tm.skewSamples) > tm.maxSkewSamples {
 		tm.skewSamples = tm.skewSamples[1:]
 	}
-	
+
 	// Calculate average offset
 	var totalOffset time.Duration
 	for _, sample := range tm.skewSamples {
 		totalOffset += sample
 	}
 	avgOffset := totalOffset / time.Duration(len(tm.skewSamples))
-	
+
 	// Check if skew is significant
 	if abs(avgOffset) > tm.skewThreshold {
 		oldOffset := tm.serverTimeOffset
 		tm.serverTimeOffset = avgOffset
-		
+
 		atomic.AddInt64(&tm.skewDetections, 1)
-		
+
 		tm.logger.Warn("Clock skew detected",
 			zap.Duration("offset", avgOffset),
 			zap.Duration("threshold", tm.skewThreshold),
 			zap.Int("samples", len(tm.skewSamples)),
 			zap.Duration("previous_offset", oldOffset),
 		)
-		
+
 		// Adjust all existing deadlines
 		tm.adjustDeadlinesForSkew(avgOffset - oldOffset)
 	}
@@ -133,7 +133,7 @@ func (tm *TimingManager) ServerTimeNow() time.Time {
 	tm.mu.RLock()
 	offset := tm.serverTimeOffset
 	tm.mu.RUnlock()
-	
+
 	return time.Now().Add(offset)
 }
 
@@ -141,10 +141,10 @@ func (tm *TimingManager) ServerTimeNow() time.Time {
 func (tm *TimingManager) SetDeadline(jobID string, deadline time.Time, propagatedFrom string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	
+
 	// Adjust deadline for clock skew
 	adjustedDeadline := deadline.Add(-tm.serverTimeOffset)
-	
+
 	tm.deadlines[jobID] = &DeadlineContext{
 		JobID:            jobID,
 		OriginalDeadline: deadline,
@@ -152,7 +152,7 @@ func (tm *TimingManager) SetDeadline(jobID string, deadline time.Time, propagate
 		PropagatedFrom:   propagatedFrom,
 		CreatedAt:        time.Now(),
 	}
-	
+
 	tm.logger.Debug("Set deadline",
 		zap.String("jobID", jobID),
 		zap.Time("original", deadline),
@@ -166,12 +166,12 @@ func (tm *TimingManager) SetDeadline(jobID string, deadline time.Time, propagate
 func (tm *TimingManager) GetDeadline(jobID string) (*DeadlineContext, bool) {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	
+
 	deadline, exists := tm.deadlines[jobID]
 	if !exists {
 		return nil, false
 	}
-	
+
 	// Return a copy to prevent external modification
 	deadlineCopy := *deadline
 	return &deadlineCopy, true
@@ -182,17 +182,17 @@ func (tm *TimingManager) CheckDeadline(jobID string) (bool, time.Duration) {
 	tm.mu.RLock()
 	deadline, exists := tm.deadlines[jobID]
 	tm.mu.RUnlock()
-	
+
 	if !exists {
 		return false, 0
 	}
-	
+
 	now := time.Now()
 	if now.After(deadline.AdjustedDeadline) {
 		atomic.AddInt64(&tm.missedDeadlines, 1)
 		return true, now.Sub(deadline.AdjustedDeadline)
 	}
-	
+
 	return false, deadline.AdjustedDeadline.Sub(now)
 }
 
@@ -200,7 +200,7 @@ func (tm *TimingManager) CheckDeadline(jobID string) (bool, time.Duration) {
 func (tm *TimingManager) RemoveDeadline(jobID string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	
+
 	delete(tm.deadlines, jobID)
 }
 
@@ -211,7 +211,7 @@ func (tm *TimingManager) PropagateDeadline(ctx context.Context, jobID string) (c
 		// No deadline set, return context as-is
 		return ctx, func() {}
 	}
-	
+
 	// Create context with the adjusted deadline
 	return context.WithDeadline(ctx, deadline.AdjustedDeadline)
 }
@@ -241,27 +241,27 @@ func (tm *TimingManager) GetMetrics() map[string]interface{} {
 	deadlineCount := len(tm.deadlines)
 	offset := tm.serverTimeOffset
 	tm.mu.RUnlock()
-	
+
 	return map[string]interface{}{
-		"clock_skew_offset_ms":   offset.Milliseconds(),
-		"skew_detections":        atomic.LoadInt64(&tm.skewDetections),
-		"active_deadlines":       deadlineCount,
-		"missed_deadlines":       atomic.LoadInt64(&tm.missedDeadlines),
-		"backpressure_events":    atomic.LoadInt64(&tm.backpressureEvents),
-		"backpressure_active":    tm.backpressure.IsActive(),
-		"current_rate":          tm.backpressure.GetCurrentRate(),
+		"clock_skew_offset_ms": offset.Milliseconds(),
+		"skew_detections":      atomic.LoadInt64(&tm.skewDetections),
+		"active_deadlines":     deadlineCount,
+		"missed_deadlines":     atomic.LoadInt64(&tm.missedDeadlines),
+		"backpressure_events":  atomic.LoadInt64(&tm.backpressureEvents),
+		"backpressure_active":  tm.backpressure.IsActive(),
+		"current_rate":         tm.backpressure.GetCurrentRate(),
 	}
 }
 
 // BackpressureController manages backpressure for high-frequency operations
 type BackpressureController struct {
-	mu              sync.RWMutex
-	window          time.Duration
-	limit           int
-	events          []time.Time
-	lastCleanup     time.Time
-	backoffFactor   float64
-	maxBackoff      time.Duration
+	mu            sync.RWMutex
+	window        time.Duration
+	limit         int
+	events        []time.Time
+	lastCleanup   time.Time
+	backoffFactor float64
+	maxBackoff    time.Duration
 }
 
 // NewBackpressureController creates a new backpressure controller
@@ -280,10 +280,10 @@ func NewBackpressureController(window time.Duration, limit int) *BackpressureCon
 func (b *BackpressureController) RecordEvent() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	
+
 	now := time.Now()
 	b.events = append(b.events, now)
-	
+
 	// Cleanup old events periodically
 	if now.Sub(b.lastCleanup) > b.window {
 		b.cleanup(now)
@@ -294,13 +294,13 @@ func (b *BackpressureController) RecordEvent() {
 // cleanup removes events outside the window
 func (b *BackpressureController) cleanup(now time.Time) {
 	cutoff := now.Add(-b.window)
-	
+
 	// Find first event within window
 	i := 0
 	for i < len(b.events) && b.events[i].Before(cutoff) {
 		i++
 	}
-	
+
 	// Remove old events
 	if i > 0 {
 		b.events = b.events[i:]
@@ -311,16 +311,16 @@ func (b *BackpressureController) cleanup(now time.Time) {
 func (b *BackpressureController) ShouldApplyBackpressure() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	
+
 	now := time.Now()
 	cutoff := now.Add(-b.window)
-	
+
 	// Count events in window
 	count := 0
 	for i := len(b.events) - 1; i >= 0 && b.events[i].After(cutoff); i-- {
 		count++
 	}
-	
+
 	return count >= b.limit
 }
 
@@ -328,20 +328,20 @@ func (b *BackpressureController) ShouldApplyBackpressure() bool {
 func (b *BackpressureController) GetDelay() time.Duration {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	
+
 	rate := b.GetCurrentRate()
 	if rate <= float64(b.limit) {
 		return 0
 	}
-	
+
 	// Calculate delay based on how much over the limit we are
 	overageRatio := rate / float64(b.limit)
 	delay := time.Duration(float64(b.window) * (overageRatio - 1) * b.backoffFactor)
-	
+
 	if delay > b.maxBackoff {
 		delay = b.maxBackoff
 	}
-	
+
 	return delay
 }
 
@@ -349,12 +349,12 @@ func (b *BackpressureController) GetDelay() time.Duration {
 func (b *BackpressureController) GetCurrentRate() float64 {
 	now := time.Now()
 	cutoff := now.Add(-b.window)
-	
+
 	count := 0
 	for i := len(b.events) - 1; i >= 0 && b.events[i].After(cutoff); i-- {
 		count++
 	}
-	
+
 	return float64(count)
 }
 
@@ -385,7 +385,7 @@ func (g *TimingGuard) Execute(ctx context.Context, fn func(context.Context) erro
 	if exceeded, overBy := g.manager.CheckDeadline(g.jobID); exceeded {
 		return fmt.Errorf("deadline exceeded for %s by %v", g.operation, overBy)
 	}
-	
+
 	// Check backpressure
 	if g.manager.CheckBackpressure() {
 		delay := g.manager.GetBackpressureDelay()
@@ -395,14 +395,14 @@ func (g *TimingGuard) Execute(ctx context.Context, fn func(context.Context) erro
 		)
 		time.Sleep(delay)
 	}
-	
+
 	// Record event for rate limiting
 	g.manager.RecordEvent()
-	
+
 	// Propagate deadline to context
 	ctxWithDeadline, cancel := g.manager.PropagateDeadline(ctx, g.jobID)
 	defer cancel()
-	
+
 	// Execute function
 	return fn(ctxWithDeadline)
 }
@@ -424,12 +424,12 @@ func NewClockSkewDetector(maxSamples int) *ClockSkewDetector {
 // AddSample adds a clock difference sample
 func (d *ClockSkewDetector) AddSample(localTime, remoteTime time.Time) time.Duration {
 	skew := remoteTime.Sub(localTime)
-	
+
 	d.samples = append(d.samples, skew)
 	if len(d.samples) > d.maxSamples {
 		d.samples = d.samples[1:]
 	}
-	
+
 	return d.GetAverageSkew()
 }
 
@@ -438,12 +438,12 @@ func (d *ClockSkewDetector) GetAverageSkew() time.Duration {
 	if len(d.samples) == 0 {
 		return 0
 	}
-	
+
 	var total time.Duration
 	for _, s := range d.samples {
 		total += s
 	}
-	
+
 	return total / time.Duration(len(d.samples))
 }
 
@@ -474,12 +474,12 @@ func (dm *DeadlineManager) SetJobDeadline(job *livekit.Job) {
 	if job == nil {
 		return
 	}
-	
+
 	// Extract deadline from job metadata if available
 	// This is where you'd parse any deadline information from the job
 	// For now, we'll use a default deadline
 	deadline := time.Now().Add(5 * time.Minute)
-	
+
 	dm.timingManager.SetDeadline(job.Id, deadline, "job_assignment")
 }
 

@@ -522,13 +522,13 @@ func TestUniversalWorker_Integration_DataMessaging(t *testing.T) {
 	url, apiKey, apiSecret := getTestConfig()
 
 	dataReceived := make(chan []byte, 1)
-	roomConnected := make(chan struct{}, 1)
+	roomConnected := make(chan *lksdk.Room, 1)
+	participantJoined := make(chan *lksdk.RemoteParticipant, 1)
 
 	var worker *UniversalWorker
 
-	// Channels for synchronization
-	agentConnected := make(chan *lksdk.Room, 1)
-	participantJoined := make(chan *lksdk.RemoteParticipant, 1)
+	done := make(chan struct{})
+	var doneOnce sync.Once
 
 	handler := &SimpleUniversalHandler{
 		JobRequestFunc: func(ctx context.Context, job *livekit.Job) (bool, *JobMetadata) {
@@ -538,16 +538,33 @@ func TestUniversalWorker_Integration_DataMessaging(t *testing.T) {
 			}
 		},
 		JobAssignedFunc: func(ctx context.Context, jobCtx *JobContext) error {
-			// Send data to all participants and keep the job briefly alive
-			_ = worker.SendDataToParticipant(jobCtx.Job.Id, "", []byte("test-data"), true)
-			time.Sleep(4 * time.Second)
-			return nil
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-done:
+				return nil
+			}
 		},
 		DataReceivedFunc: func(ctx context.Context, data []byte, participant *lksdk.RemoteParticipant, kind livekit.DataPacket_Kind) {
 			t.Logf("Received data: %s from participant: %s", string(data), participant.Identity())
-			dataReceived <- data
+			select {
+			case dataReceived <- data:
+			default:
+			}
+			doneOnce.Do(func() { close(done) })
 		},
-		RoomConnectedFunc: func(ctx context.Context, room *lksdk.Room) { roomConnected <- struct{}{} },
+		RoomConnectedFunc: func(ctx context.Context, room *lksdk.Room) {
+			select {
+			case roomConnected <- room:
+			default:
+			}
+		},
+		ParticipantJoinedFunc: func(ctx context.Context, participant *lksdk.RemoteParticipant) {
+			select {
+			case participantJoined <- participant:
+			default:
+			}
+		},
 	}
 
 	worker = NewUniversalWorker(url, apiKey, apiSecret, handler, WorkerOptions{
@@ -563,6 +580,7 @@ func TestUniversalWorker_Integration_DataMessaging(t *testing.T) {
 	go func() {
 		_ = worker.Start(ctx)
 	}()
+	defer worker.Stop()
 
 	// Wait for connection deterministically
 	require.Eventually(t, func() bool { return worker.IsConnected() }, 10*time.Second, 100*time.Millisecond)
@@ -573,25 +591,11 @@ func TestUniversalWorker_Integration_DataMessaging(t *testing.T) {
 	require.NoError(t, err)
 	t.Logf("Created room %s for data messaging test", roomName)
 
-	// Wait for agent to connect to room first
-	select {
-	case agentRoom := <-agentConnected:
-		t.Logf("Agent connected to room: %s", agentRoom.Name())
-	case <-time.After(15 * time.Second):
-		t.Fatal("Timeout waiting for agent to connect to room")
-	}
-
 	// Wait for agent to connect to the room
 	select {
-	case <-roomConnected:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Timeout waiting for room connection")
-	}
-
-	// Wait for agent to connect to the room
-	select {
-	case <-roomConnected:
-	case <-time.After(10 * time.Second):
+	case room := <-roomConnected:
+		t.Logf("Agent connected to room: %s", room.Name())
+	case <-time.After(20 * time.Second):
 		t.Fatal("Timeout waiting for room connection")
 	}
 
@@ -613,9 +617,6 @@ func TestUniversalWorker_Integration_DataMessaging(t *testing.T) {
 		t.Fatal("Timeout waiting for agent to detect participant")
 	}
 
-	// Give a bit more time for the connection to fully stabilize
-	time.Sleep(2 * time.Second)
-
 	// Send data from participant
 	testData := []byte("participant-data")
 	err = room.LocalParticipant.PublishData(testData, lksdk.WithDataPublishReliable(true))
@@ -630,8 +631,6 @@ func TestUniversalWorker_Integration_DataMessaging(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("Timeout waiting for data after 15 seconds")
 	}
-
-	worker.Stop()
 }
 
 // ==================== Error Handling and Recovery Tests ====================

@@ -42,7 +42,7 @@ func (m *MockLogger) Error(msg string, fields ...interface{}) {
 func (m *MockLogger) log(level, msg string, fields ...interface{}) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	m.Messages = append(m.Messages, LogMessage{
 		Level:   level,
 		Message: msg,
@@ -61,7 +61,7 @@ func (m *MockLogger) GetMessages() []LogMessage {
 func (m *MockLogger) GetMessagesByLevel(level string) []LogMessage {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	var filtered []LogMessage
 	for _, msg := range m.Messages {
 		if msg.Level == level {
@@ -75,7 +75,7 @@ func (m *MockLogger) GetMessagesByLevel(level string) []LogMessage {
 func (m *MockLogger) HasMessage(level, message string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	for _, msg := range m.Messages {
 		if msg.Level == level && msg.Message == message {
 			return true
@@ -95,7 +95,7 @@ func (m *MockLogger) Reset() {
 func (m *MockLogger) String() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	var result string
 	for _, msg := range m.Messages {
 		result += fmt.Sprintf("[%s] %s", msg.Level, msg.Message)

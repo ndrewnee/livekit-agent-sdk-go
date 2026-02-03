@@ -173,7 +173,7 @@ func (m *MessageBuilder) BuildJobTermination(jobID string) *livekit.ServerMessag
 	return &livekit.ServerMessage{
 		Message: &livekit.ServerMessage_Termination{
 			Termination: &livekit.JobTermination{
-				JobId:  jobID,
+				JobId: jobID,
 			},
 		},
 	}

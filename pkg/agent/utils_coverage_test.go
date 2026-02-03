@@ -13,7 +13,7 @@ func TestSimpleJobHandler_EdgeCases(t *testing.T) {
 	// The main tests in utils_test.go already provide good coverage
 }
 
-// TestJobContext_EdgeCases tests edge cases not covered in main tests  
+// TestJobContext_EdgeCases tests edge cases not covered in main tests
 func TestJobContext_EdgeCases(t *testing.T) {
 	// Add any additional edge case tests here if needed
 	// The main tests in utils_test.go already provide good coverage

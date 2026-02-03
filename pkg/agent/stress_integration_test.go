@@ -20,6 +20,10 @@ import (
 func TestStress_Integration_ConcurrentJobs(t *testing.T) {
 	url, apiKey, apiSecret := getTestConfig()
 
+	maxJobs := 5
+	total := 10
+	runID := time.Now().UnixNano()
+
 	var activeMu sync.Mutex
 	active := make(map[string]bool)
 	var maxConcurrent int32
@@ -51,23 +55,37 @@ func TestStress_Integration_ConcurrentJobs(t *testing.T) {
 	w := NewUniversalWorker(url, apiKey, apiSecret, handler, WorkerOptions{
 		AgentName: "stress-cjobs",
 		JobType:   livekit.JobType_JT_ROOM,
-		MaxJobs:   5,
+		MaxJobs:   maxJobs,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	go func() { _ = w.Start(ctx) }()
+	defer w.Stop()
 
 	// Wait for connection
 	require.Eventually(t, func() bool { return w.IsConnected() }, 10*time.Second, 100*time.Millisecond)
 
-	// Trigger more jobs than MaxJobs concurrently
-	total := 10
-	for i := 0; i < total; i++ {
-		roomName := fmt.Sprintf("stress-cjobs-%d-%d", time.Now().Unix(), i)
+	// LiveKit agent dispatch occurs at room creation time. Create jobs in two waves to
+	// avoid creating rooms while the worker is "full" (those jobs may not dispatch).
+	for i := 0; i < maxJobs; i++ {
+		roomName := fmt.Sprintf("stress-cjobs-%d-%d", runID, i)
 		_, err := createTestRoomWithAgent(apiKey, apiSecret, url, roomName, "stress-cjobs")
 		require.NoError(t, err)
-		time.Sleep(50 * time.Millisecond)
+	}
+
+	require.Eventually(t, func() bool { return atomic.LoadInt32(&processed) >= int32(maxJobs) }, 30*time.Second, 100*time.Millisecond)
+	require.Eventually(t, func() bool {
+		w.mu.RLock()
+		defer w.mu.RUnlock()
+		return len(w.activeJobs) == 0 && w.status == WorkerStatusAvailable
+	}, 10*time.Second, 100*time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
+
+	for i := maxJobs; i < total; i++ {
+		roomName := fmt.Sprintf("stress-cjobs-%d-%d", runID, i)
+		_, err := createTestRoomWithAgent(apiKey, apiSecret, url, roomName, "stress-cjobs")
+		require.NoError(t, err)
 	}
 
 	// Wait for processing

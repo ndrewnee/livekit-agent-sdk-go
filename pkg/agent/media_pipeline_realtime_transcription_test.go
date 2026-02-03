@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -200,10 +199,7 @@ func TestRealtimeTranscriptionStageCreation(t *testing.T) {
 
 // TestRealtimeTranscriptionProcess tests the Process method
 func TestRealtimeTranscriptionProcess(t *testing.T) {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		t.Skip("Skipping RealtimeTranscriptionProcess test: OPENAI_API_KEY not set")
-	}
+	apiKey := requireOpenAI(t)
 
 	stage := createTestStage("transcription", 20, apiKey, "", "en")
 	ctx := context.Background()

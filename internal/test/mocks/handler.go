@@ -19,14 +19,14 @@ type JobMetadata struct {
 
 // MockJobHandler implements a mock JobHandler for testing
 type MockJobHandler struct {
-	mu                   sync.Mutex
-	OnJobRequestFunc     func(ctx context.Context, job *livekit.Job) (bool, *JobMetadata)
-	OnJobAssignedFunc    func(ctx context.Context, job *livekit.Job, room *lksdk.Room) error
-	OnJobTerminatedFunc  func(ctx context.Context, jobID string)
-	
+	mu                  sync.Mutex
+	OnJobRequestFunc    func(ctx context.Context, job *livekit.Job) (bool, *JobMetadata)
+	OnJobAssignedFunc   func(ctx context.Context, job *livekit.Job, room *lksdk.Room) error
+	OnJobTerminatedFunc func(ctx context.Context, jobID string)
+
 	// Track calls
-	JobRequests    []JobRequestCall
-	JobAssignments []JobAssignmentCall
+	JobRequests     []JobRequestCall
+	JobAssignments  []JobAssignmentCall
 	JobTerminations []JobTerminationCall
 }
 
@@ -43,7 +43,7 @@ type JobAssignmentCall struct {
 }
 
 type JobTerminationCall struct {
-	JobID  string
+	JobID string
 }
 
 func NewMockJobHandler() *MockJobHandler {
@@ -57,54 +57,54 @@ func NewMockJobHandler() *MockJobHandler {
 func (m *MockJobHandler) OnJobRequest(ctx context.Context, job *livekit.Job) (bool, *JobMetadata) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	accepted := true
 	metadata := &JobMetadata{
 		ParticipantIdentity: "test-agent-" + job.Id,
 		ParticipantName:     "Test Agent",
 	}
-	
+
 	if m.OnJobRequestFunc != nil {
 		accepted, metadata = m.OnJobRequestFunc(ctx, job)
 	}
-	
+
 	m.JobRequests = append(m.JobRequests, JobRequestCall{
 		Job:      job,
 		Accepted: accepted,
 		Metadata: metadata,
 	})
-	
+
 	return accepted, metadata
 }
 
 func (m *MockJobHandler) OnJobAssigned(ctx context.Context, job *livekit.Job, room *lksdk.Room) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	var err error
 	if m.OnJobAssignedFunc != nil {
 		err = m.OnJobAssignedFunc(ctx, job, room)
 	}
-	
+
 	m.JobAssignments = append(m.JobAssignments, JobAssignmentCall{
 		Job:   job,
 		Room:  room,
 		Error: err,
 	})
-	
+
 	return err
 }
 
 func (m *MockJobHandler) OnJobTerminated(ctx context.Context, jobID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	if m.OnJobTerminatedFunc != nil {
 		m.OnJobTerminatedFunc(ctx, jobID)
 	}
-	
+
 	m.JobTerminations = append(m.JobTerminations, JobTerminationCall{
-		JobID:  jobID,
+		JobID: jobID,
 	})
 }
 

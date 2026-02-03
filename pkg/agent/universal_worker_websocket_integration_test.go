@@ -362,8 +362,10 @@ func TestUniversalWorker_WebSocket_JobTermination(t *testing.T) {
 	}
 
 	worker := NewUniversalWorker(url, apiKey, apiSecret, handler, WorkerOptions{
-		AgentName: "test-termination-worker",
-		JobType:   livekit.JobType_JT_ROOM,
+		AgentName:    "test-termination-worker",
+		JobType:      livekit.JobType_JT_ROOM,
+		PingInterval: 1 * time.Second,
+		PingTimeout:  2 * time.Second,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
