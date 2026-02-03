@@ -74,3 +74,7 @@ examples/livekit-cloud-example/*.log
 
 # Claude AI session data
 /.claude/
+
+# Local Go caches (created by CI/dev runs)
+/.gocache/
+/.gomodcache/
