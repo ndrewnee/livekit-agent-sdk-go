@@ -45,8 +45,12 @@ type UniversalWorker struct {
 	jobStartTimes map[string]time.Time
 
 	// WebSocket state
-	wsState       WebSocketState
-	reconnectChan chan struct{}
+	wsState              WebSocketState
+	reconnectChan        chan struct{}
+	messageHandlerCtx    context.Context
+	messageHandlerCancel context.CancelFunc
+	messageHandlerMu     sync.Mutex
+	reconnecting         atomic.Bool // Prevents concurrent reconnections
 
 	// Shared capabilities
 	rooms               map[string]*lksdk.Room
@@ -58,6 +62,10 @@ type UniversalWorker struct {
 	statusQueue     []statusUpdate
 	statusQueueChan chan struct{}
 	loadBatcher     *LoadBatcher
+
+	// Pending metadata captured during availability checks.
+	// Used to ensure consistent participant identity/name between availability response and room connection.
+	pendingJobMetadata map[string]*JobMetadata
 
 	// Lifecycle
 	stopOnce sync.Once
@@ -172,6 +180,7 @@ func NewUniversalWorker(serverURL, apiKey, apiSecret string, handler UniversalHa
 		reconnectChan:       make(chan struct{}, 1),
 		statusQueue:         make([]statusUpdate, 0),
 		statusQueueChan:     make(chan struct{}, 100),
+		pendingJobMetadata:  make(map[string]*JobMetadata),
 		jobCheckpoints:      make(map[string]*JobCheckpoint),
 		stopCh:              make(chan struct{}),
 		doneCh:              make(chan struct{}),
@@ -317,7 +326,14 @@ func (w *UniversalWorker) Start(ctx context.Context) error {
 		w.resourceLimiterCancel = cancel
 		w.resourceLimiter.Start(rlCtx)
 	}
-	go w.handleMessages(ctx)
+
+	// Create cancellable context for message handler
+	w.messageHandlerMu.Lock()
+	w.messageHandlerCtx, w.messageHandlerCancel = context.WithCancel(ctx)
+	messageCtx := w.messageHandlerCtx
+	w.messageHandlerMu.Unlock()
+
+	go w.handleMessages(messageCtx) // Use dedicated context
 	go w.maintainConnection(ctx)
 	go w.handleStatusUpdateRetries(ctx)
 
@@ -342,6 +358,9 @@ func (w *UniversalWorker) Stop() error {
 	var err error
 	w.stopOnce.Do(func() {
 		close(w.stopCh)
+
+		// Stop message handler first
+		w.stopMessageHandler()
 
 		// Stop all active jobs
 		w.mu.Lock()
@@ -502,6 +521,9 @@ func (w *UniversalWorker) StopWithTimeout(timeout time.Duration) error {
 		if w.shutdownHandler != nil {
 			w.shutdownHandler.ExecutePhase(ctx, ShutdownPhasePreStop)
 		}
+
+		// Stop message handler first
+		w.stopMessageHandler()
 
 		// Cancel active jobs to allow handlers to exit promptly
 		w.mu.Lock()
@@ -984,11 +1006,31 @@ func (w *UniversalWorker) handleJobAssignment(assignment *livekit.JobAssignment)
 		"room", job.Room.Name,
 	)
 
-	// Get metadata from handler
+	// Get metadata from handler and merge with metadata captured during the availability check.
 	metadata := w.handler.GetJobMetadata(job)
 	if metadata == nil {
 		metadata = &JobMetadata{}
 	}
+
+	w.mu.Lock()
+	if pending, ok := w.pendingJobMetadata[job.Id]; ok && pending != nil {
+		if metadata.ParticipantIdentity == "" {
+			metadata.ParticipantIdentity = pending.ParticipantIdentity
+		}
+		if metadata.ParticipantName == "" {
+			metadata.ParticipantName = pending.ParticipantName
+		}
+		if metadata.ParticipantMetadata == "" {
+			metadata.ParticipantMetadata = pending.ParticipantMetadata
+		}
+		if metadata.ParticipantAttributes == nil && pending.ParticipantAttributes != nil {
+			metadata.ParticipantAttributes = pending.ParticipantAttributes
+		}
+		metadata.SupportsResume = metadata.SupportsResume || pending.SupportsResume
+
+		delete(w.pendingJobMetadata, job.Id)
+	}
+	w.mu.Unlock()
 
 	// Update metrics
 	atomic.AddInt64(&w.metrics.jobsAccepted, 1)
@@ -1018,33 +1060,36 @@ func (w *UniversalWorker) handleJobAssignment(assignment *livekit.JobAssignment)
 	// Set up room callbacks
 	roomCallback := w.createRoomCallbacks(job)
 
-	// Use direct API key connection instead of agent token
-	// Agent tokens from the server don't have permissions to receive video media data
-	// This was discovered by comparing TestRobustReceiver (works with API key) vs
-	// TestParticipantHLSRecorder (fails with agent token - only gets empty video packets)
+	// Prefer the server-provided assignment token when joining the room.
+	// LiveKit Cloud ties job lifecycle to the assigned agent participant; using the
+	// assignment token ensures the worker is properly associated with the job.
+	//
+	// Fall back to API key connection only if the assignment token is missing.
+	var (
+		room *lksdk.Room
+		err  error
+	)
+	if assignment.Token != "" {
+		room, err = connectToRoomWithToken(roomURL, assignment.Token, roomCallback, lksdk.WithAutoSubscribe(false))
+	} else {
+		// For the fallback connection, use metadata values if provided.
+		participantIdentity := metadata.ParticipantIdentity
+		if participantIdentity == "" {
+			participantIdentity = fmt.Sprintf("agent-%s", job.Id)
+			w.logger.Info("Generated agent identity", "identity", participantIdentity, "jobID", job.Id)
+		}
 
-	// For the connection, use metadata values if provided
-	// If ParticipantIdentity is empty, ensure we have a valid identity
-	participantIdentity := metadata.ParticipantIdentity
-	if participantIdentity == "" {
-		// Generate a unique identity for the agent
-		participantIdentity = fmt.Sprintf("agent-%s", job.Id)
-		w.logger.Info("Generated agent identity", "identity", participantIdentity, "jobID", job.Id)
+		room, err = connectToRoom(roomURL, lksdk.ConnectInfo{
+			APIKey:                w.apiKey,
+			APISecret:             w.apiSecret,
+			RoomName:              job.Room.Name,
+			ParticipantIdentity:   participantIdentity,
+			ParticipantName:       metadata.ParticipantName,
+			ParticipantMetadata:   metadata.ParticipantMetadata,
+			ParticipantAttributes: metadata.ParticipantAttributes,
+			ParticipantKind:       lksdk.ParticipantEgress,
+		}, roomCallback, lksdk.WithAutoSubscribe(false))
 	}
-
-	// CRITICAL: Disable auto-subscribe for the agent framework connection
-	// The handler will establish its own direct connection and subscribe to tracks there
-	// If both connections subscribe to the same track, the LiveKit server may only send
-	// data to the first subscriber (the agent connection), which has restricted permissions
-	room, err := lksdk.ConnectToRoom(roomURL, lksdk.ConnectInfo{
-		APIKey:              w.apiKey,
-		APISecret:           w.apiSecret,
-		RoomName:            job.Room.Name,
-		ParticipantIdentity: participantIdentity,
-		ParticipantName:     metadata.ParticipantName,
-		ParticipantMetadata: metadata.ParticipantMetadata,
-		ParticipantKind:     lksdk.ParticipantEgress, // Use EGRESS kind to receive full media for recording
-	}, roomCallback, lksdk.WithAutoSubscribe(false)) // Disable auto-subscribe!
 	if err != nil {
 		w.logger.Error("Failed to connect to room", "error", err, "jobID", job.Id)
 		w.updateJobStatus(job.Id, livekit.JobStatus_JS_FAILED, err.Error())
@@ -1130,10 +1175,12 @@ func (w *UniversalWorker) createRoomCallbacks(job *livekit.Job) *lksdk.RoomCallb
 			w.handler.OnParticipantJoined(context.Background(), participant)
 		},
 		OnParticipantDisconnected: func(participant *lksdk.RemoteParticipant) {
+			participantIdentity := participant.Identity()
+
 			// Remove participant info
 			w.mu.Lock()
-			delete(w.participants, participant.Identity())
-			if w.targetParticipant != nil && w.targetParticipant.Identity() == participant.Identity() {
+			delete(w.participants, participantIdentity)
+			if w.targetParticipant != nil && w.targetParticipant.Identity() == participantIdentity {
 				w.targetParticipant = nil
 			}
 			w.mu.Unlock()
@@ -1229,25 +1276,34 @@ func (w *UniversalWorker) createRoomCallbacks(job *livekit.Job) *lksdk.RoomCallb
 
 // runJobHandler runs the job handler in a goroutine with panic recovery
 func (w *UniversalWorker) runJobHandler(ctx context.Context, jobCtx *JobContext) {
+	finalStatus := livekit.JobStatus_JS_SUCCESS
+	finalError := ""
+
 	defer func() {
 		if r := recover(); r != nil {
 			w.logger.Error("Handler panic in OnJobAssigned", "panic", r, "jobID", jobCtx.Job.Id)
-			w.updateJobStatus(jobCtx.Job.Id, livekit.JobStatus_JS_FAILED, fmt.Sprintf("handler panic: %v", r))
+			finalStatus = livekit.JobStatus_JS_FAILED
+			finalError = fmt.Sprintf("handler panic: %v", r)
 		}
 
+		// Send terminal status update before clearing local state.
+		w.updateJobStatus(jobCtx.Job.Id, finalStatus, finalError)
+
 		// Clean up
+		var roomToDisconnect *lksdk.Room
 		w.mu.Lock()
 		delete(w.activeJobs, jobCtx.Job.Id)
 		delete(w.jobStartTimes, jobCtx.Job.Id)
 		if jobCtx.Room != nil {
 			delete(w.rooms, jobCtx.Room.Name())
 			delete(w.participantTrackers, jobCtx.Room.Name())
-			jobCtx.Room.Disconnect()
+			roomToDisconnect = jobCtx.Room
 		}
 		w.mu.Unlock()
 
-		// Update job status
-		w.updateJobStatus(jobCtx.Job.Id, livekit.JobStatus_JS_SUCCESS, "")
+		if roomToDisconnect != nil {
+			roomToDisconnect.Disconnect()
+		}
 
 		// Update metrics
 		atomic.AddInt64(&w.metrics.jobsCompleted, 1)
@@ -1274,7 +1330,8 @@ func (w *UniversalWorker) runJobHandler(ctx context.Context, jobCtx *JobContext)
 	// Run job handler
 	if err := w.handler.OnJobAssigned(ctx, jobCtx); err != nil {
 		w.logger.Error("Job handler error", "error", err, "jobID", jobCtx.Job.Id)
-		w.updateJobStatus(jobCtx.Job.Id, livekit.JobStatus_JS_FAILED, err.Error())
+		finalStatus = livekit.JobStatus_JS_FAILED
+		finalError = err.Error()
 	}
 }
 

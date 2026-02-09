@@ -62,6 +62,31 @@ func main() {
 	// Check for agent/example mode
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "publisher-agent":
+			if err := RunPublisherRejoinAgent(os.Args[2:]); err != nil {
+				log.Fatalf("Publisher agent failed: %v", err)
+			}
+			return
+		case "publisher-client":
+			if err := RunPublisherClient(os.Args[2:]); err != nil {
+				log.Fatalf("Publisher client failed: %v", err)
+			}
+			return
+		case "create-room-publisher":
+			if err := CreateRoomForPublisherAgent(os.Args[2:]); err != nil {
+				log.Fatalf("Publisher room creation failed: %v", err)
+			}
+			return
+		case "delete-room":
+			if err := DeleteRoom(os.Args[2:]); err != nil {
+				log.Fatalf("Room deletion failed: %v", err)
+			}
+			return
+		case "list-dispatch":
+			if err := ListDispatch(os.Args[2:]); err != nil {
+				log.Fatalf("List dispatch failed: %v", err)
+			}
+			return
 		case "proper-agent":
 			if err := RunProperAgent(); err != nil {
 				log.Fatalf("Proper agent failed: %v", err)
@@ -80,6 +105,11 @@ func main() {
 		case "help":
 			fmt.Println("LiveKit Cloud Example - Available Commands:")
 			fmt.Println("  proper-agent          - Run the agent to handle jobs")
+			fmt.Println("  publisher-agent       - Run JT_PUBLISHER agent (rejoin test)")
+			fmt.Println("  publisher-client      - Join room and publish media")
+			fmt.Println("  create-room-publisher - Create a room for publisher rejoin test")
+			fmt.Println("  delete-room           - Delete a room by name")
+			fmt.Println("  list-dispatch         - List agent dispatch state for a room")
 			fmt.Println("  agent-demo            - Run agent with automatic room creation")
 			fmt.Println("  create-room           - Create a room with agent dispatch")
 			fmt.Println("  help                  - Show this help message")
@@ -87,9 +117,11 @@ func main() {
 		}
 	}
 
-	fmt.Println("\n================================================")
+	fmt.Println()
+	fmt.Println("================================================")
 	fmt.Println("   🌩️  LiveKit Cloud SDK Comprehensive Example")
-	fmt.Println("================================================\n")
+	fmt.Println("================================================")
+	fmt.Println()
 
 	// Initialize logger
 	logger.InitFromConfig(&logger.Config{
