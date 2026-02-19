@@ -160,6 +160,7 @@ func (w *UniversalWorker) sendMessage(msg *livekit.WorkerMessage) error {
 	w.mu.Lock()
 	conn := w.conn
 	state := w.wsState
+	networkHandler := w.networkHandler
 	w.mu.Unlock()
 
 	// Allow sending messages when connecting (for registration) or connected
@@ -172,10 +173,20 @@ func (w *UniversalWorker) sendMessage(msg *livekit.WorkerMessage) error {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
 
-	// Protect WebSocket write with mutex to prevent concurrent writes
-	w.mu.Lock()
-	err = conn.WriteMessage(websocket.BinaryMessage, data)
-	w.mu.Unlock()
+	// IMPORTANT: Do not hold w.mu while writing to the websocket.
+	//
+	// A blocked WriteMessage() would otherwise freeze the worker state lock and
+	// can stall the message reader (which uses w.mu.RLock), causing Recv-Q growth
+	// and the agent to appear "hung".
+	//
+	// NetworkHandler provides:
+	// - its own mutex to serialize writes (gorilla/websocket requires single writer)
+	// - a write deadline so writes can't block forever.
+	if networkHandler != nil {
+		err = networkHandler.WriteMessageWithRetry(conn, websocket.BinaryMessage, data)
+	} else {
+		err = conn.WriteMessage(websocket.BinaryMessage, data)
+	}
 
 	if err != nil {
 		return fmt.Errorf("failed to write message: %w", err)
